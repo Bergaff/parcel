@@ -95,7 +95,13 @@ npx wrangler secret put ADMIN_API_TOKEN  # случайный токен для 
 
 ### Вариант А. Авто-деплой через GitHub Actions (рекомендую)
 
-Файл `.github/workflows/deploy-worker.yml` уже лежит в репозитории — копировать ничего не нужно. Workflow запускается при push в `main` (и вручную через Actions → Deploy Worker → Run workflow).
+В репозитории есть шаблон workflow: `deploy-workflows/deploy-worker.yml.example`. GitHub App этого репозитория не может создать `.github/workflows/` сам (нет права `workflows`), поэтому скопируйте файл один раз:
+
+```bash
+mkdir -p .github/workflows
+cp deploy-workflows/deploy-worker.yml.example .github/workflows/deploy-worker.yml
+git add .github/workflows/deploy-worker.yml && git commit -m "add worker deploy workflow" && git push
+```
 
 Теперь в GitHub → репозиторий → Settings → Secrets and variables → Actions → New repository secret:
 - `CLOUDFLARE_API_TOKEN` — токен из Cloudflare (My Profile → API Tokens → Create Token → шаблон **Edit Cloudflare Workers**)
