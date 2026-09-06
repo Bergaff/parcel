@@ -14,10 +14,10 @@ ADMIN_IDS=123456789
 AUTO_APPROVE=0
 
 # Публичный URL САЙТА (Pages): используется для ссылок на сайте
-SITE_URL=https://poputchka.pages.dev
+SITE_URL=https://parcel.pages.dev
 
 # Публичный URL ВОРКЕРА: сюда Telegram шлёт вебхук /api/telegram/:secret
-WORKER_URL=https://poputchka-api.YOUR_SUBDOMAIN.workers.dev
+WORKER_URL=https://parcel.YOUR_SUBDOMAIN.workers.dev
 
 # Юзернейм бота без @ — подставляется в ссылку "Telegram-бот" на сайте
 BOT_USERNAME=MyPoputchkaBot

@@ -84,14 +84,25 @@ npx wrangler secret put ADMIN_API_TOKEN  # случайный токен для 
 
 ## 4. Задеплоить Воркер (это не Pages!)
 
-Сначала, почему упал ваш билд. Причин было две:
+### Почему ваш билд падал
 
-1. **Билд собирал ветку `main`, а в ней нет кода.** Сейчас в `main` репозитория лежит только `README.md`. Весь код (включая `public/` и `wrangler.toml`) — на ветке `arena/01a07723-parcel`. Отсюда «Could not detect a directory containing static files».
-2. **Cloudflare просил `wrangler.toml` с `name = 'parcel'`** (сообщение «Update wrangler.toml … keep settings consistent»). Исправлено: `name = "parcel"` теперь совпадает с именем вашего проекта.
+Вы прислали лог от проекта `parcel`, и в нём две важные строки:
 
-Что сделать: **смержите открытый PR** из `arena/01a07723-parcel` в `main` (тогда и Pages, и воркер соберутся), либо в настройках проекта переключите **Production branch** на `arena/01a07723-parcel` без мержа.
+- **`main`**: билд собирал ветку `main`, а в `main` до недавнего времени лежал только `README.md`. Кода там не было, отсюда `Could not detect a directory containing static files`.
+- **`Deploy command: npx wrangler deploy`**: это команда для **воркера**, а не для Pages.
 
-Воркер деплоится **из вашего компьютера** или **через GitHub Actions**, но НЕ через страницу «Builds» в Pages-проекте. Поэтому в Pages-проекте уберите «Deploy command: npx wrangler deploy» (см. раздел 5).
+Что сделано: **PR #1 смержен, ветка `main` теперь содержит весь проект** (включая `wrangler.toml` и `public/`). Перезапустите билд на Cloudflare (или сделайте любой push) — он соберётся.
+
+### Какой проект для воркера?
+
+В Cloudflare два разных типа проекта:
+
+| Тип | Умеет | У нас |
+|---|---|---|
+| **Pages** | только статика (HTML/CSS/JS) | сайт. Настройки: Build пусто, **Output directory: public**, Deploy пусто |
+| **Worker** | JS-код, D1, KV, вебхуки | парсер и API |
+
+Если воркер создан через **Create Worker → Connect to Git** с Deploy command `npx wrangler deploy` — это правильный путь, после мержа он заработает. Если проект оказался типом **Pages** — воркер в нём не получится: уберите Deploy command, оставьте `public`, а воркер задеплойте одним из способов ниже.
 
 ### Вариант А. Авто-деплой через GitHub Actions (рекомендую)
 
@@ -112,12 +123,13 @@ git add .github/workflows/deploy-worker.yml && git commit -m "add worker deploy 
 ### Вариант Б. Локально, одной командой
 
 ```bash
-npm run db:remote          # применить миграции D1 на проде
-npm run deploy             # задеплоить воркер
+npm install
+npx wrangler login            # один раз
+npm run db:remote             # применить миграции D1 на проде
+npm run deploy                # задеплоить воркер
 ```
 
-Адрес воркера: Workers & Pages → воркер `parcel` → Settings → Domains, вида `https://parcel.ваш-поддомен.workers.dev`.
-
+Имя воркера задано в `wrangler.toml` (`name = "parcel"` — по автопредложению Cloudflare). Адрес будет вида `https://parcel.<ваш-поддомен>.workers.dev` (Workers & Pages → воркер `parcel` → Settings → Domains).
 ---
 
 ## 5. Исправить Pages (страница объявлений)

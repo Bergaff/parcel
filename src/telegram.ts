@@ -384,7 +384,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   await notifyAdmins(env, listing);
 }
 
-async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
+export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
   const link = listing.sourceMessageId
     ? chatMessageLink(Number(listing.sourceChatId), listing.sourceMessageId)
