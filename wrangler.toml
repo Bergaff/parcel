@@ -1,0 +1,25 @@
+# Конфигурация Cloudflare Workers.
+# Перед деплоем: npm run db:remote и подставьте реальные ID ниже.
+
+name = "poputchka"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[assets]
+directory = "./public"
+not_found_handling = "404-page"
+
+# Миграции D1: npm run db:remote
+[[d1_databases]]
+binding = "DB"
+database_name = "poputchka-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# KV: сессии бота, rate limit, счётчики
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[observability]
+enabled = true

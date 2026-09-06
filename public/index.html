@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Попутная — доска попутных посылок</title>
+  <meta name="description" content="Водители междугородних и международных рейсов берут посылки попутно. Найдите маршрут или разместите своё объявление." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🚚</text></svg>" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="#/" class="logo">
+        <span class="logo-icon">🚚</span>
+        <span class="logo-text">Попутная</span>
+      </a>
+      <nav class="nav">
+        <a href="#/" id="nav-list">Объявления</a>
+        <a href="#/new" class="btn btn-primary btn-sm">+ Разместить</a>
+        <a href="#/bot" class="btn btn-ghost btn-sm" id="nav-bot" hidden>🤖 Бот</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>Посылки, которые едут<span class="accent"> попутно</span></h1>
+      <p class="hero-sub">Водители международных и межгородских рейсов берут передачки. Без посредников: нашли маршрут — написали напрямую.</p>
+      <div class="hero-actions">
+        <a href="#/new" class="btn btn-primary">📦 Разместить объявление</a>
+        <a href="#/bot" class="btn btn-outline" id="hero-bot" hidden>🤖 Через Telegram-бот</a>
+      </div>
+    </section>
+
+    <!-- Список -->
+    <section id="view-list">
+      <div class="filters">
+        <div class="filter-group">
+          <label class="seg">
+            <input type="radio" name="type" value="" checked />
+            <span>Все</span>
+          </label>
+          <label class="seg">
+            <input type="radio" name="type" value="offer" />
+            <span>🚚 Водитель везёт</span>
+          </label>
+          <label class="seg">
+            <input type="radio" name="type" value="request" />
+            <span>📦 Нужно передать</span>
+          </label>
+        </div>
+        <div class="filters-row">
+          <input id="f-from" class="input" type="text" placeholder="Откуда" autocomplete="off" />
+          <span class="arrow">→</span>
+          <input id="f-to" class="input" type="text" placeholder="Куда" autocomplete="off" />
+          <input id="f-date" class="input" type="date" />
+          <button id="f-clear" class="btn btn-ghost" type="button">Сбросить</button>
+        </div>
+      </div>
+
+      <div id="list" class="list" aria-live="polite"></div>
+      <div class="list-footer">
+        <button id="load-more" class="btn btn-outline" hidden>Показать ещё</button>
+        <p id="list-empty" class="empty" hidden>Пока пусто. Станьте первым! 🚚</p>
+      </div>
+    </section>
+
+    <!-- Карточка (детали) -->
+    <section id="view-item" hidden>
+      <a href="#/" class="back-link">← Назад к объявлениям</a>
+      <div id="item-detail"></div>
+    </section>
+
+    <!-- Форма -->
+    <section id="view-new" hidden>
+      <h2>Разместить объявление</h2>
+      <form id="form" class="card form" autocomplete="off">
+        <div class="form-row">
+          <label class="seg seg-big">
+            <input type="radio" name="ltype" value="offer" checked />
+            <span>🚚 Водитель везёт<br /><small>Есть место в машине</small></span>
+          </label>
+          <label class="seg seg-big">
+            <input type="radio" name="ltype" value="request" />
+            <span>📦 Нужно передать<br /><small>Ищу попутчика</small></span>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="field">
+            <span>Откуда *</span>
+            <input class="input" name="fromCity" required maxlength="80" placeholder="Варшава" />
+          </label>
+          <label class="field">
+            <span>Куда *</span>
+            <input class="input" name="toCity" required maxlength="80" placeholder="Львов" />
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="field">
+            <span>Дата выезда</span>
+            <input class="input" name="departureDate" type="date" />
+          </label>
+          <label class="field">
+            <span>Вес посылки (кг)</span>
+            <input class="input" name="weightKg" type="number" min="0.1" max="1000" step="0.1" placeholder="5" />
+          </label>
+          <label class="field">
+            <span>Цена / оплата</span>
+            <input class="input" name="price" maxlength="40" placeholder="50 zł" />
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Описание *</span>
+          <textarea class="input" name="description" required minlength="5" maxlength="2000" rows="4" placeholder="Что за посылка, размеры, сколько мест, условия передачи, можно ли за руль…"></textarea>
+        </label>
+
+        <div class="form-row">
+          <label class="field">
+            <span>Telegram</span>
+            <input class="input" name="telegram" maxlength="64" placeholder="@username" />
+          </label>
+          <label class="field">
+            <span>Или телефон</span>
+            <input class="input" name="phone" maxlength="32" placeholder="+48 123 456 789" />
+          </label>
+        </div>
+
+        <div id="form-error" class="error" hidden></div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary btn-lg" id="submit-btn">Отправить на модерацию</button>
+          <p class="hint">Объявление проверяется администратором и появляется на доске. Контакты публикуются так, как вы их укажете.</p>
+        </div>
+      </form>
+    </section>
+
+    <!-- О боте -->
+    <section id="view-bot" hidden>
+      <div class="card bot-card">
+        <div class="bot-icon">🤖</div>
+        <h2>Как работает Telegram-бот</h2>
+        <ol class="steps">
+          <li><b>Добавьте бота в чаты водителей и релокантов</b> (например, чаты «Польша — Украина», «Работа за рубежом»).</li>
+          <li>Бот распознаёт объявления о перевозке — маршрут, дата, вес, цена, контакты.</li>
+          <li>Объявления автоматически появляются на этой доске — можно найти нужный маршрут и написать напрямую.</li>
+        </ol>
+        <div class="bot-actions">
+          <a id="bot-link" class="btn btn-primary" href="#" target="_blank" rel="noopener">Открыть бота в Telegram</a>
+          <p class="hint">Или напишите боту команду <code>/post</code> — он поможет оформить объявление за пару минут.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <span>Попутная © 2026</span>
+      <span class="muted">Объявления проверяются модерацией. Передавайте посылки на свой риск.</span>
+    </div>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
