@@ -1,0 +1,26 @@
+# Скопируйте в .dev.vars для локальной разработки.
+# В проде эти значения задаются через: wrangler secret put <NAME>
+
+# Токен бота от @BotFather
+BOT_TOKEN=123456789:AAAA-ваш-токен
+
+# Секрет для проверки входящих вебхуков от Telegram (любая длинная случайная строка)
+BOT_SECRET=change-me-to-random-string
+
+# Числа через запятую: ID администраторов (чат/юзер), которые могут одобрять объявления
+ADMIN_IDS=123456789
+
+# Если "1" — объявления публикуются сразу без модерации (для старта). Иначе все идут в "На модерации".
+AUTO_APPROVE=0
+
+# Публичный URL САЙТА (Pages): используется для ссылок на сайте
+SITE_URL=https://poputchka.pages.dev
+
+# Публичный URL ВОРКЕРА: сюда Telegram шлёт вебхук /api/telegram/:secret
+WORKER_URL=https://poputchka-api.YOUR_SUBDOMAIN.workers.dev
+
+# Юзернейм бота без @ — подставляется в ссылку "Telegram-бот" на сайте
+BOT_USERNAME=MyPoputchkaBot
+
+# Токен для админского API (если нужен внешний модератор-скрипт)
+ADMIN_API_TOKEN=change-me-too

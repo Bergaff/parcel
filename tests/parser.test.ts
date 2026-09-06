@@ -1,0 +1,62 @@
+import { describe, expect, it } from 'vitest';
+import { looksLikeListing, parseDate, parseTelegramMessage } from '../src/parser';
+
+const NOW = new Date('2026-09-06T12:00:00Z');
+
+describe('parseTelegramMessage', () => {
+  it('распознаёт классическое объявление водителя', () => {
+    const p = parseTelegramMessage('Варшава — Львов, завтра, возьму посылку 10 кг, 100 zł, @driver77');
+    expect(p.intent).toBe('offer');
+    expect(p.fromCity).toBe('Варшава');
+    expect(p.toCity).toBe('Львов');
+    expect(p.departureDate).toBe(parseDate('завтра', NOW));
+    expect(p.weightKg).toBe(10);
+    expect(p.price).toBe('100 zł');
+    expect(p.telegram).toBe('@driver77');
+    expect(p.confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('распознаёт запрос на передачу посылки', () => {
+    const p = parseTelegramMessage('Кто может передать посылку Краков → Киев? 5 кг, 15.09, +48 123 456 789');
+    expect(p.intent).toBe('request');
+    expect(p.fromCity).toBe('Краков');
+    expect(p.toCity).toBe('Киев');
+    expect(p.weightKg).toBe(5);
+    expect(p.departureDate).toBe('2026-09-15');
+    expect(p.phone).toContain('+48');
+  });
+
+  it('понимает маршрут через предлог «до»', () => {
+    const p = parseTelegramMessage('Еду Берлин до Варшавы в пятницу. Есть место, 20 кг, 50 евро');
+    expect(p.fromCity).toBe('Берлин');
+    expect(p.toCity).toBe('Варшава');
+    expect(p.departureDate).toBe(parseDate('пятница', NOW));
+    expect(p.price).toBe('50 €');
+  });
+
+  it('находит дату днями недели', () => {
+    // 2026-09-06 — воскресенье: следующая пятница 2026-09-11
+    expect(parseDate('в пятницу', NOW)).toBe('2026-09-11');
+    expect(parseDate('послезавтра', NOW)).toBe('2026-09-08');
+  });
+
+  it('не принимает за объявление обычный разговор', () => {
+    const p = parseTelegramMessage('Сегодня хорошая погода, всем привет');
+    expect(p.intent).toBeNull();
+    expect(looksLikeListing('Сегодня хорошая погода, всем привет')).toBe(false);
+  });
+
+  it('игнорирует объявление без маршрута', () => {
+    expect(looksLikeListing('Везу посылку завтра, 30 кг, 200 zl')).toBe(false);
+  });
+
+  it('считает контакт в ссылке t.me', () => {
+    const p = parseTelegramMessage('Варшава — Краков, https://t.me/trasher завтра возьму');
+    expect(p.telegram).toBe('@trasher');
+  });
+
+  it('распознаёт вес «до 15 кг»', () => {
+    const p = parseTelegramMessage('Гданьск до Варшавы, беру до 15 кг');
+    expect(p.weightKg).toBe(15);
+  });
+});
