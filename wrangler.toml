@@ -23,3 +23,6 @@ id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
 [observability]
 enabled = true
+
+# Каталог статики для Pages (Cloudflare просит хранить это в wrangler.toml для консистентности)
+pages_build_output_dir = "./public"

@@ -8,9 +8,11 @@
  * Переменные:
  *   BOT_TOKEN   — токен от @BotFather (обязательно)
  *   BOT_SECRET  — секрет из /api/telegram/:secret (обязательно)
- *   SITE_URL    — публичный URL воркера, напр. https://poputchka.workers.dev
+ *   WORKER_URL  — публичный URL ВОРКЕРА, напр. https://poputchka-api.workers.dev (обязательно)
+ *   SITE_URL    — публичный URL сайта (Pages), используется только как fallback для WORKER_URL
  *
- * Сначала:  wrangler secret put BOT_TOKEN  (и т.д.), либо положите значения в .dev.vars для локалки.
+ * Важно: вебхук должен указывать на воркер, а не на Pages!
+ * Pages раздаёт статику и не умеет принимать /api/telegram/...
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -29,14 +31,15 @@ function loadDevVars() {
 const vars = loadDevVars();
 const BOT_TOKEN = process.env.BOT_TOKEN ?? vars.BOT_TOKEN;
 const BOT_SECRET = process.env.BOT_SECRET ?? vars.BOT_SECRET;
-const SITE_URL = (process.env.SITE_URL ?? vars.SITE_URL ?? '').replace(/\/+$/, '');
+const WORKER_URL = (process.env.WORKER_URL ?? vars.WORKER_URL ?? process.env.SITE_URL ?? vars.SITE_URL ?? '').replace(/\/+$/, '');
 
-if (!BOT_TOKEN || !BOT_SECRET || !SITE_URL) {
-  console.error('Нужны BOT_TOKEN, BOT_SECRET и SITE_URL (env или .dev.vars).');
+if (!BOT_TOKEN || !BOT_SECRET || !WORKER_URL) {
+  console.error('Нужны BOT_TOKEN, BOT_SECRET и WORKER_URL (env или .dev.vars).');
+  console.error('WORKER_URL — это адрес воркера, например https://poputchka-api.workers.dev, а не Pages.');
   process.exit(1);
 }
 
-const url = `${SITE_URL}/api/telegram/${BOT_SECRET}`;
+const url = `${WORKER_URL}/api/telegram/${BOT_SECRET}`;
 const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },

@@ -13,8 +13,11 @@ ADMIN_IDS=123456789
 # Если "1" — объявления публикуются сразу без модерации (для старта). Иначе все идут в "На модерации".
 AUTO_APPROVE=0
 
-# Публичный URL сайта (для кнопок и установки вебхука)
-SITE_URL=http://localhost:8787
+# Публичный URL САЙТА (Pages): используется для ссылок на сайте
+SITE_URL=https://poputchka.pages.dev
+
+# Публичный URL ВОРКЕРА: сюда Telegram шлёт вебхук /api/telegram/:secret
+WORKER_URL=https://poputchka-api.YOUR_SUBDOMAIN.workers.dev
 
 # Юзернейм бота без @ — подставляется в ссылку "Telegram-бот" на сайте
 BOT_USERNAME=MyPoputchkaBot
