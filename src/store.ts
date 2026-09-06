@@ -53,22 +53,16 @@ export async function listListings(
   env: Env,
   f: ListFilters
 ): Promise<{ items: Listing[]; hasMore: boolean }> {
-  const status = f.status ?? 'published';
-  let sql = 'SELECT * FROM listings WHERE status = ?';
-  const params: (string | number)[] = [status];
-
-  if (f.type) { sql += ' AND type = ?'; params.push(f.type); }
-  if (f.from) { sql += ' AND from_city LIKE ?'; params.push(`%${escapeLike(f.from)}%`); }
-  if (f.to) { sql += ' AND to_city LIKE ?'; params.push(`%${escapeLike(f.to)}%`); }
-  if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
-  if (f.q) { sql += ' AND (description LIKE ? OR from_city LIKE ? OR to_city LIKE ?)'; params.push(`%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`); }
+  const { sql, params } = buildWhere(f);
+  let fullSql = `SELECT * FROM listings${sql}`;
+  if (f.type) { fullSql += ' AND type = ?'; params.push(f.type); }
 
   const page = Math.max(1, f.page ?? 1);
   const perPage = Math.min(50, Math.max(1, f.perPage ?? 20));
-  sql += ' ORDER BY COALESCE(published_at, created_at) DESC LIMIT ? OFFSET ?';
+  fullSql += ' ORDER BY COALESCE(published_at, created_at) DESC LIMIT ? OFFSET ?';
   params.push(perPage + 1, (page - 1) * perPage);
 
-  const res = await env.DB.prepare(sql).bind(...params).all();
+  const res = await env.DB.prepare(fullSql).bind(...params).all();
   const rows = (res.results ?? []) as unknown as Array<Record<string, unknown>>;
   const hasMore = rows.length > perPage;
   return { items: rows.slice(0, perPage).map(mapRow), hasMore };
@@ -139,4 +133,34 @@ export async function setSeenListing(env: Env, chatId: string, messageId: number
 
 function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
+}
+
+interface WhereClause { sql: string; params: (string | number)[] }
+
+function buildWhere(f: ListFilters): WhereClause {
+  let sql = ' WHERE status = ?';
+  const params: (string | number)[] = [f.status ?? 'published'];
+  if (f.from) { sql += ' AND from_city LIKE ?'; params.push(`%${escapeLike(f.from)}%`); }
+  if (f.to) { sql += ' AND to_city LIKE ?'; params.push(`%${escapeLike(f.to)}%`); }
+  if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
+  if (f.q) {
+    sql += ' AND (description LIKE ? OR from_city LIKE ? OR to_city LIKE ?)';
+    params.push(`%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`);
+  }
+  return { sql, params };
+}
+
+/** Количество объявлений по типам с учётом фильтров поиска (без учёта вкладки-типа). */
+export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: number; request: number }> {
+  const { sql, params } = buildWhere(f);
+  const res = await env.DB.prepare(
+    `SELECT type, COUNT(*) AS n FROM listings${sql} GROUP BY type`
+  ).bind(...params).all();
+  let offer = 0;
+  let request = 0;
+  for (const row of (res.results ?? []) as unknown as Array<{ type?: string; n?: number }>) {
+    if (row.type === 'offer') offer = Number(row.n ?? 0);
+    if (row.type === 'request') request = Number(row.n ?? 0);
+  }
+  return { offer, request };
 }

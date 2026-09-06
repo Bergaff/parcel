@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
-import { addReport, createListing, getListingById, listListings, updateListingStatus } from './store';
+import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText } from './util';
 import { handleTelegramUpdate } from './telegram';
 
@@ -102,7 +102,8 @@ app.get('/api/listings', async (c) => {
   const q = url.searchParams.get('q') ?? undefined;
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
   const { items, hasMore } = await listListings(c.env, { type, from, to, date, q, page });
-  return c.json({ items, hasMore, page });
+  const counts = await getCounts(c.env, { from, to, date, q });
+  return c.json({ items, hasMore, page, total: counts.offer + counts.request, counts });
 });
 
 app.get('/api/listings/:id', async (c) => {

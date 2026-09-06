@@ -3,163 +3,376 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Попутная — доска попутных посылок</title>
-  <meta name="description" content="Водители междугородних и международных рейсов берут посылки попутно. Найдите маршрут или разместите своё объявление." />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🚚</text></svg>" />
+  <title>попутка. доска попутных передач</title>
+  <meta name="description" content="Водители междугородних и международных рейсов берут посылки. Договариваетесь напрямую, без посредников." />
+  <meta name="theme-color" content="#f2eee5" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2eee5'/><text x='50' y='68' font-size='52' font-family='Georgia' text-anchor='middle' fill='%23201d17'>п</text></svg>" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <header class="site-header">
-    <div class="container header-inner">
-      <a href="#/" class="logo">
-        <span class="logo-icon">🚚</span>
-        <span class="logo-text">Попутная</span>
-      </a>
-      <nav class="nav">
-        <a href="#/" id="nav-list">Объявления</a>
-        <a href="#/new" class="btn btn-primary btn-sm">+ Разместить</a>
-        <a href="#/bot" class="btn btn-ghost btn-sm" id="nav-bot" hidden>🤖 Бот</a>
-      </nav>
+  <header class="masthead">
+    <div class="wrap masthead-grid">
+      <a class="wordmark" href="#/">попутка<span class="wordmark-dot">.</span></a>
+      <p class="masthead-meta">
+        <span id="today"></span>
+        <span class="dot-sep">·</span>
+        <span>на доске <b id="total-count">…</b></span>
+      </p>
     </div>
+    <nav class="topnav wrap">
+      <a href="#/" id="nav-list">Доска</a>
+      <a href="#/how">Как это работает</a>
+      <a href="#/bot" id="nav-bot" hidden>Бот</a>
+      <a href="#/new" class="btn btn-ink btn-sm nav-cta">+ разместить</a>
+    </nav>
   </header>
 
-  <main class="container">
-    <section class="hero">
-      <h1>Посылки, которые едут<span class="accent"> попутно</span></h1>
-      <p class="hero-sub">Водители международных и межгородских рейсов берут передачки. Без посредников: нашли маршрут — написали напрямую.</p>
-      <div class="hero-actions">
-        <a href="#/new" class="btn btn-primary">📦 Разместить объявление</a>
-        <a href="#/bot" class="btn btn-outline" id="hero-bot" hidden>🤖 Через Telegram-бот</a>
+  <main>
+    <!-- ДОСКА -->
+    <section id="view-list" class="wrap board">
+      <header class="board-head">
+        <h1>Кто куда едет, что можно передать</h1>
+        <p class="lead">
+          Водители междугородних и международных рейсов пишут сюда сами: куда едут, когда,
+          сколько места. Вы находите маршрут и договариваетесь напрямую. Посылка на ваш риск,
+          поэтому читайте описание целиком.
+        </p>
+      </header>
+
+      <form class="route-search" id="search" onsubmit="return false">
+        <input class="q" id="f-from" type="text" placeholder="откуда" autocomplete="off" />
+        <span class="route-arrow">→</span>
+        <input class="q" id="f-to" type="text" placeholder="куда" autocomplete="off" />
+        <input class="q date" id="f-date" type="date" aria-label="дата" />
+        <button type="button" class="btn btn-ink" id="f-go">найти</button>
+        <button type="button" class="link-btn" id="f-clear">сбросить</button>
+      </form>
+
+      <p class="quick-routes">
+        часто ищут:
+        <a href="#" data-from="Варшава" data-to="Львов">Варшава → Львов</a> ·
+        <a href="#" data-from="Краков" data-to="Киев">Краков → Киев</a> ·
+        <a href="#" data-from="Гданьск" data-to="Вроцлав">Гданьск → Вроцлав</a>
+      </p>
+
+      <div class="tabs" role="tablist">
+        <button class="tab on" data-type="">все <span class="tab-count" id="c-all"></span></button>
+        <button class="tab" data-type="offer">водители везут <span class="tab-count" id="c-offer"></span></button>
+        <button class="tab" data-type="request">ищу передачу <span class="tab-count" id="c-request"></span></button>
+      </div>
+
+      <div id="list" class="rows" aria-live="polite"></div>
+
+      <div class="board-foot">
+        <button id="load-more" class="btn btn-line" hidden>показать ещё</button>
+        <p id="list-empty" class="empty-note" hidden>
+          По такому маршруту пока пусто. Если вы за рулём, разместите рейс, это занимает
+          минуту. Если что-то нужно, напишите в <a href="#/bot">бота</a>, он тоже публикует сюда.
+        </p>
       </div>
     </section>
 
-    <!-- Список -->
-    <section id="view-list">
-      <div class="filters">
-        <div class="filter-group">
-          <label class="seg">
-            <input type="radio" name="type" value="" checked />
-            <span>Все</span>
-          </label>
-          <label class="seg">
-            <input type="radio" name="type" value="offer" />
-            <span>🚚 Водитель везёт</span>
-          </label>
-          <label class="seg">
-            <input type="radio" name="type" value="request" />
-            <span>📦 Нужно передать</span>
-          </label>
-        </div>
-        <div class="filters-row">
-          <input id="f-from" class="input" type="text" placeholder="Откуда" autocomplete="off" />
-          <span class="arrow">→</span>
-          <input id="f-to" class="input" type="text" placeholder="Куда" autocomplete="off" />
-          <input id="f-date" class="input" type="date" />
-          <button id="f-clear" class="btn btn-ghost" type="button">Сбросить</button>
-        </div>
-      </div>
-
-      <div id="list" class="list" aria-live="polite"></div>
-      <div class="list-footer">
-        <button id="load-more" class="btn btn-outline" hidden>Показать ещё</button>
-        <p id="list-empty" class="empty" hidden>Пока пусто. Станьте первым! 🚚</p>
-      </div>
+    <!-- КАРТОЧКА -->
+    <section id="view-item" class="wrap" hidden>
+      <a href="#/" class="back">← к доске</a>
+      <article id="item-detail"></article>
     </section>
 
-    <!-- Карточка (детали) -->
-    <section id="view-item" hidden>
-      <a href="#/" class="back-link">← Назад к объявлениям</a>
-      <div id="item-detail"></div>
-    </section>
+    <!-- ФОРМА -->
+    <section id="view-new" class="wrap narrow" hidden>
+      <h1 class="page-title">Новое объявление</h1>
+      <p class="lead">Пара минут. После отправки оно попадает к модератору. Обычно проверяю в течение пары часов.</p>
 
-    <!-- Форма -->
-    <section id="view-new" hidden>
-      <h2>Разместить объявление</h2>
-      <form id="form" class="card form" autocomplete="off">
-        <div class="form-row">
-          <label class="seg seg-big">
+      <form id="form" class="form" autocomplete="off">
+        <fieldset class="who">
+          <legend>Кто вы</legend>
+          <label class="choice">
             <input type="radio" name="ltype" value="offer" checked />
-            <span>🚚 Водитель везёт<br /><small>Есть место в машине</small></span>
+            <span>Я водитель, беру посылку в машину</span>
           </label>
-          <label class="seg seg-big">
+          <label class="choice">
             <input type="radio" name="ltype" value="request" />
-            <span>📦 Нужно передать<br /><small>Ищу попутчика</small></span>
+            <span>Мне нужно, чтобы кто-то передал</span>
+          </label>
+        </fieldset>
+
+        <div class="pair">
+          <label class="field">
+            <span class="label">Откуда</span>
+            <input class="q" name="fromCity" required maxlength="80" placeholder="например, Варшава" />
+          </label>
+          <span class="pair-arrow">→</span>
+          <label class="field">
+            <span class="label">Куда</span>
+            <input class="q" name="toCity" required maxlength="80" placeholder="например, Львов" />
           </label>
         </div>
 
-        <div class="form-row">
+        <div class="triple">
           <label class="field">
-            <span>Откуда *</span>
-            <input class="input" name="fromCity" required maxlength="80" placeholder="Варшава" />
+            <span class="label">Дата выезда <i class="opt">(необязательно)</i></span>
+            <input class="q" name="departureDate" type="date" />
           </label>
           <label class="field">
-            <span>Куда *</span>
-            <input class="input" name="toCity" required maxlength="80" placeholder="Львов" />
-          </label>
-        </div>
-
-        <div class="form-row">
-          <label class="field">
-            <span>Дата выезда</span>
-            <input class="input" name="departureDate" type="date" />
+            <span class="label">Вес, кг <i class="opt">(необязательно)</i></span>
+            <input class="q" name="weightKg" type="number" min="0.1" max="1000" step="0.1" placeholder="5" />
           </label>
           <label class="field">
-            <span>Вес посылки (кг)</span>
-            <input class="input" name="weightKg" type="number" min="0.1" max="1000" step="0.1" placeholder="5" />
-          </label>
-          <label class="field">
-            <span>Цена / оплата</span>
-            <input class="input" name="price" maxlength="40" placeholder="50 zł" />
+            <span class="label">Цена или оплата <i class="opt">(необязательно)</i></span>
+            <input class="q" name="price" maxlength="40" placeholder="100 zł" />
           </label>
         </div>
 
         <label class="field">
-          <span>Описание *</span>
-          <textarea class="input" name="description" required minlength="5" maxlength="2000" rows="4" placeholder="Что за посылка, размеры, сколько мест, условия передачи, можно ли за руль…"></textarea>
+          <span class="label">Опишите подробнее</span>
+          <textarea class="q" name="description" required minlength="5" maxlength="2000" rows="5" placeholder="Что за передачка, размеры, сколько мест, когда забрать, что можно, а что нельзя. Честное описание: залог того, что вам ответят."></textarea>
         </label>
 
-        <div class="form-row">
+        <div class="pair">
           <label class="field">
-            <span>Telegram</span>
-            <input class="input" name="telegram" maxlength="64" placeholder="@username" />
+            <span class="label">Telegram</span>
+            <input class="q" name="telegram" maxlength="64" placeholder="@username" />
           </label>
+          <span class="pair-arrow">или</span>
           <label class="field">
-            <span>Или телефон</span>
-            <input class="input" name="phone" maxlength="32" placeholder="+48 123 456 789" />
+            <span class="label">Телефон</span>
+            <input class="q" name="phone" maxlength="32" placeholder="+48 ..." />
           </label>
         </div>
 
+        <p class="form-grey">
+          Контакт попадёт в объявление ровно так, как вы его напишете. Номер или юзернейм
+          увидят только люди с доски, никому больше я его не передаю.
+        </p>
+
         <div id="form-error" class="error" hidden></div>
+
         <div class="form-actions">
-          <button type="submit" class="btn btn-primary btn-lg" id="submit-btn">Отправить на модерацию</button>
-          <p class="hint">Объявление проверяется администратором и появляется на доске. Контакты публикуются так, как вы их укажете.</p>
+          <button type="submit" class="btn btn-ink btn-lg" id="submit-btn">Отправить на проверку</button>
+          <span class="form-note">появится на доске после одобрения</span>
         </div>
       </form>
     </section>
 
-    <!-- О боте -->
-    <section id="view-bot" hidden>
-      <div class="card bot-card">
-        <div class="bot-icon">🤖</div>
-        <h2>Как работает Telegram-бот</h2>
-        <ol class="steps">
-          <li><b>Добавьте бота в чаты водителей и релокантов</b> (например, чаты «Польша — Украина», «Работа за рубежом»).</li>
-          <li>Бот распознаёт объявления о перевозке — маршрут, дата, вес, цена, контакты.</li>
-          <li>Объявления автоматически появляются на этой доске — можно найти нужный маршрут и написать напрямую.</li>
-        </ol>
-        <div class="bot-actions">
-          <a id="bot-link" class="btn btn-primary" href="#" target="_blank" rel="noopener">Открыть бота в Telegram</a>
-          <p class="hint">Или напишите боту команду <code>/post</code> — он поможет оформить объявление за пару минут.</p>
-        </div>
+    <!-- КАК РАБОТАЕТ -->
+    <section id="view-how" class="wrap narrow section-page" hidden>
+      <h1 class="page-title">Как это работает</h1>
+      <ol class="steps">
+        <li><b>Водитель публикует рейс</b>: «Варшава → Львов, выезжаю в субботу, есть два места». Это может быть и рейс с грузом, и пустой перегон в отпуск.</li>
+        <li><b>Вы находите свой маршрут</b> и смотрите, что человек пишет: вес, габариты, что готов взять. Всё в описании, без «уточните у менеджера».</li>
+        <li><b>Пишете напрямую</b>: в Telegram или по телефону. Договариваетесь о месте встречи, оплате и ответственности сами.</li>
+      </ol>
+
+      <h2 class="rule-head">Кто проверяет</h2>
+      <p>
+        Каждое объявление с сайта и из телеграм-чатов проходит ручную проверку: маршрут,
+        контакты, здравый смысл. Если три человека пожалуются на объявление, я его снимаю
+        автоматически. Подтверждённых анкет и «звёздочек доверия» здесь нет, поэтому всегда
+        смотрите, кто пишет, и не отдавайте деньги вперёд.
+      </p>
+
+      <h2 class="rule-head">Частые вопросы</h2>
+      <details class="qa">
+        <summary>Это бесплатно?</summary>
+        <p>Да. Пока доска живёт на энтузиазме и хостинге на своём кошельке. Если начну брать деньги, напишу прямо наверху, а не «монетизация появится позже».</p>
+      </details>
+      <details class="qa">
+        <summary>Почему нет отзывов и рейтинга?</summary>
+        <p>Отзывы на водителей легко накручиваются, а фальшивый рейтинг хуже его отсутствия. Лучше переписка по-человечески и одно правило: не отдавайте деньги, пока не увидели посылку в машине.</p>
+      </details>
+      <details class="qa">
+        <summary>Можно передать что-то запрещённое?</summary>
+        <p>Нет. Оружие, лекарства без рецепта, паспорта и подобное: это уголовная статья для обоих, а не «просто передачка». Такие объявления снимаю без предупреждения.</p>
+      </details>
+
+      <p class="colophon">Если нашли ошибку, фейк или бессмыслицу, напишите боту <code>/report</code>, разберусь.</p>
+    </section>
+
+    <!-- БОТ -->
+    <section id="view-bot" class="wrap narrow section-page" hidden>
+      <h1 class="page-title">Бот, который читает чаты</h1>
+      <p class="lead">
+        Доска не пустует сама по себе. В чатах водителей и релокантов обычно пишут десятки
+        объявлений в день, но половина из них тонет в переписке. Бот добавляется в эти чаты,
+        и всё, что похоже на объявление, приносит сюда.
+      </p>
+
+      <h2 class="rule-head">Что он делает</h2>
+      <ol class="steps">
+        <li>Находит в сообщении маршрут: «Варшава → Львов, завтра, беру до 10 кг».</li>
+        <li>Вытаскивает дату, вес, цену, контакт и понимает, водитель это или тот, кто ищет передачу.</li>
+        <li>Кладёт объявление сюда, на доску. В подписи указан чат-источник, чтобы можно было проверить.</li>
+      </ol>
+
+      <h2 class="rule-head">Как подключить</h2>
+      <ol class="steps">
+        <li>Напишите боту <code>/start</code>: он покажет, что работает.</li>
+        <li>В <b>@BotFather</b>: <code>/setprivacy</code> → <b>Disable</b>. Без этого бот в группах видит только команды, а не сообщения.</li>
+        <li>Добавьте его в свои чаты. Всё, дальше он сам.</li>
+      </ol>
+
+      <p class="bot-note">
+        В личке бот умеет ещё и размещать: команда <code>/post</code> проведёт по шагам,
+        от «откуда» до контакта.
+      </p>
+
+      <div class="cta-bar">
+        <a id="bot-link" class="btn btn-ink btn-lg" href="#" target="_blank" rel="noopener">открыть бота в Telegram</a>
+        <span class="form-note">или напишите ему /start прямо в чате</span>
       </div>
+    </section>
+
+    <!-- УСЛОВИЯ -->
+    <section id="view-terms" class="wrap narrow section-page" hidden>
+      <h1 class="page-title">Условия использования</h1>
+      <p class="doc-date">Последняя редакция: 6 сентября 2026</p>
+
+      <h2 class="rule-head">Общие положения</h2>
+      <p>
+        «попутка.» это личная доска объявлений. Я не агентство и не посредник: услуги по
+        перевозке вы получаете напрямую от человека, который разместил объявление. Регистрация
+        не нужна: объявление можно разместить с сайта или через телеграм-бота.
+      </p>
+
+      <h2 class="rule-head">Что разрешено</h2>
+      <p>
+        Обычные бытовые передачи: документы, одежда, техника, продукты в заводской упаковке,
+        предметы первой необходимости. Разрешается указывать любую цену за передачу, включая
+        «бесплатно, по договорённости». Запрещается размещать одно и то же объявление повторно
+        чаще, чем раз в три дня.
+      </p>
+
+      <h2 class="rule-head">Что запрещено</h2>
+      <ul class="plain-list">
+        <li>Оружие и его части, боеприпасы, взрывчатые вещества.</li>
+        <li>Наркотики, психотропные вещества и любые лекарства без рецепта.</li>
+        <li>Документы, удостоверяющие личность, банковские карты и их данные.</li>
+        <li>Животные без согласования с водителем и нужных документов.</li>
+        <li>Товары, запрещённые к перевозке в стране отправления или назначения.</li>
+        <li>Спам, фейковые объявления, сбор «предоплаты» без реальной передачи.</li>
+      </ul>
+      <p>Такие объявления снимаются без предупреждения, а авторы блокируются.</p>
+
+      <h2 class="rule-head">Модерация</h2>
+      <p>
+        Объявления с сайта публикуются после ручной проверки. Объявления из телеграм-чатов
+        проходят проверку тоже, но могут задерживаться. Три жалобы на одно объявление снимают
+        его автоматически. Модератор вправе отклонить объявление без объяснения причин, если
+        оно нарушает правила или выглядит мошенническим.
+      </p>
+
+      <h2 class="rule-head">Ответственность</h2>
+      <p>
+        Доска помогает встретиться. Всё остальное, включая выбор человека, состояние посылки,
+        оплату и риски перевозки, лежит на участниках. Я не проверяю личность водителей и
+        получателей, не оцениваю содержимое посылок и не гарантирую, что объявление актуально.
+        Не отдавайте деньги, пока не увидели посылку в машине. Если вам предлагают
+        «бронирование» переводом на неизвестную карту, это мошенничество: пришлите мне
+        жалобу с этого объявления.
+      </p>
+
+      <h2 class="rule-head">Ответственность за содержимое</h2>
+      <p>
+        Автор объявления отвечает за законность содержимого и за достоверность описания.
+        Перевозка запрещённых предметов является уголовным преступлением в большинстве стран,
+        независимо от того, «просто передачка» это или нет.
+      </p>
+
+      <h2 class="rule-head">Изменения</h2>
+      <p>
+        Условия могут меняться. При серьёзных изменениях дата вверху страницы обновится,
+        а уведомление появится на доске. Продолжая пользоваться сайтом, вы принимаете текущую
+        редакцию.
+      </p>
+
+      <p class="doc-note">Вопросы по условиям: напишите боту <code>/help</code>, отвечаю лично.</p>
+    </section>
+
+    <!-- ПРИВАТНОСТЬ -->
+    <section id="view-privacy" class="wrap narrow section-page" hidden>
+      <h1 class="page-title">Политика приватности</h1>
+      <p class="doc-date">Последняя редакция: 6 сентября 2026</p>
+
+      <h2 class="rule-head">Коротко</h2>
+      <p>
+        Я собираю минимум данных, только то, без чего доска не работает. Никаких рекламных
+        профилей, никакой продажи данных, никаких трекеров подписки на рассылки.
+      </p>
+
+      <h2 class="rule-head">Что я собираю</h2>
+      <ul class="plain-list">
+        <li><b>Текст объявления</b>, который вы отправляете с сайта. Он становится публичным.</li>
+        <li><b>Контакт</b>, который вы указали сами: юзернейм Telegram или номер телефона. Он тоже публичный, это смысл доски.</li>
+        <li><b>Через бота</b>: ваш Telegram ID, юзернейм, ID чата и ID сообщения, из которого взято объявление.</li>
+        <li><b>Технически</b>: IP-адрес при отправке формы или жалобы (для защиты от спама), время создания объявления, количество просмотров.</li>
+      </ul>
+
+      <h2 class="rule-head">Что я не собираю</h2>
+      <ul class="plain-list">
+        <li>ФИО, адрес проживания, паспортные данные.</li>
+        <li>Номера банковских карт и платёжные данные.</li>
+        <li>Переписку в телеграм-чатах. Бот видит только сообщения, которые сам же распознал как объявления, и сохраняет только их.</li>
+        <li>Историю браузера и «профиль интересов». Внешних трекеров нет.</li>
+      </ul>
+
+      <h2 class="rule-head">Зачем это нужно</h2>
+      <p>
+        Текст и контакт: чтобы участники нашли и связались друг с другом. Telegram ID чата
+        и сообщения: чтобы не публиковать одно объявление дважды и чтобы можно было открыть
+        исходное сообщение. IP: чтобы ограничить спам и накрутку. Количество просмотров: чтобы
+        видеть, что доска живая, без счётчиков-кнопок «лайкни меня».
+      </p>
+
+      <h2 class="rule-head">Где хранится</h2>
+      <p>
+        База данных и рабочий код размещены на Cloudflare (D1, KV, Workers). Это инфраструктурный
+        провайдер, а не рекламная сеть: он обрабатывает данные для работы сайта, не имеет к ним
+        бизнес-доступа и использует свои стандартные меры защиты. Доступ к базе есть только у меня.
+      </p>
+
+      <h2 class="rule-head">Срок хранения</h2>
+      <p>
+        Объявление хранится, пока висит на доске, плюс 90 дней после снятия: это нужно для
+        разбора споров и жалоб. После этого запись удаляется. Технические логи не хранятся дольше 30 дней.
+      </p>
+
+      <h2 class="rule-head">Ваши права</h2>
+      <p>
+        Вы можете попросить удалить любое своё объявление или все данные, связанные с вами,
+        одним сообщением боту команду <code>/delete</code> или <code>/gdpr</code>. Отвечаю в
+        течение 72 часов. Жалоба на объявление также удаляет его из публичного доступа после
+        трёх жалоб.
+      </p>
+
+      <h2 class="rule-head">Cookies и сторонние сервисы</h2>
+      <p>
+        Сайт работает без cookies для рекламы и аналитики. Telegram обрабатывает данные по
+        своей политике конфиденциальности, когда вы открываете бота или переходите по его ссылке.
+        Cloudflare может использовать свои технические журналы для защиты от атак.
+      </p>
+
+      <h2 class="rule-head">Изменения</h2>
+      <p>
+        Если политика изменится существенно, дата наверху обновится, а на доске появится
+        короткое объявление об изменении. Продолжая пользоваться сайтом, вы принимаете текущую редакцию.
+      </p>
     </section>
   </main>
 
-  <footer class="site-footer">
-    <div class="container footer-inner">
-      <span>Попутная © 2026</span>
-      <span class="muted">Объявления проверяются модерацией. Передавайте посылки на свой риск.</span>
+  <footer class="colophon-foot wrap">
+    <div class="foot-row">
+      <span class="wordmark small">попутка.</span>
+      <p class="foot-note">
+        Личная доска без посредников: люди договариваются между собой напрямую.
+        Правила работы и обработка данных описаны в «Условиях» и «Приватности».
+      </p>
+      <nav class="foot-links">
+        <a href="#/terms">условия</a>
+        <a href="#/privacy">приватность</a>
+        <a id="foot-bot" href="#">бот</a>
+      </nav>
     </div>
+    <p class="foot-meta">сборка 06.09.2026 · нашли фейк, жалоба из карточки объявления</p>
   </footer>
 
   <div id="toast" class="toast" hidden></div>

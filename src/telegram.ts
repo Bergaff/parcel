@@ -61,8 +61,8 @@ async function answerCallback(env: Env, id: string, text?: string): Promise<void
 function approveKeyboard(listingId: string): Record<string, unknown> {
   return {
     inline_keyboard: [[
-      { text: '✅ Одобрить', callback_data: `appr:${listingId}` },
-      { text: '❌ Отклонить', callback_data: `rej:${listingId}` },
+      { text: 'Одобрить', callback_data: `appr:${listingId}` },
+      { text: 'Отклонить', callback_data: `rej:${listingId}` },
     ]],
   };
 }
@@ -72,20 +72,20 @@ function approveKeyboard(listingId: string): Record<string, unknown> {
 /* ------------------------------------------------------------------ */
 
 function formatListing(l: Listing, sourceNote = ''): string {
-  const typeLabel = l.type === 'offer' ? '🚚 Водитель везёт' : '📦 Нужно передать';
+  const typeLabel = l.type === 'offer' ? 'Водитель везёт' : 'Нужно передать';
   const parts = [
     `#${l.id.slice(0, 8)} ${typeLabel}`,
-    `📍 ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`,
+    `Маршрут: ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`,
   ];
-  if (l.departureDate) parts.push(`🗓 ${escapeHtml(l.departureDate)}`);
+  if (l.departureDate) parts.push(`Дата: ${escapeHtml(l.departureDate)}`);
   const extras: string[] = [];
-  if (l.weightKg != null) extras.push(`${l.weightKg} кг`);
-  if (l.price) extras.push(escapeHtml(l.price));
-  if (extras.length) parts.push(`⚖️ ${extras.join(' · ')}`);
-  parts.push(`📝 ${escapeHtml(l.description.slice(0, 300))}`);
-  if (l.telegram) parts.push(`✉️ ${escapeHtml(l.telegram)}`);
-  if (l.phone) parts.push(`📞 ${escapeHtml(l.phone)}`);
-  if (l.sourceChat) parts.push(`📡 Источник: ${escapeHtml(l.sourceChat)}`);
+  if (l.weightKg != null) extras.push(`вес ${l.weightKg} кг`);
+  if (l.price) extras.push(`цена ${escapeHtml(l.price)}`);
+  if (extras.length) parts.push(`Детали: ${extras.join(' · ')}`);
+  parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
+  if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
+  if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
+  if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -130,7 +130,7 @@ async function setWizard(env: Env, chatId: number, state: WizardState | null): P
   }
 }
 
-const TYPE_MSG = 'Выберите тип объявления:\n\n1️⃣ <b>Водитель везёт</b> — у вас есть место в машине / посылка\n2️⃣ <b>Нужно передать</b> — ищете, кто передаст посылку\n\nОтправьте <b>1</b> или <b>2</b>, либо <i>/cancel</i> чтобы отменить.';
+const TYPE_MSG = 'Выберите тип объявления:\n\n1. <b>Водитель везёт</b> (у вас есть место в машине или посылка)\n2. <b>Нужно передать</b> (ищете, кто передаст посылку)\n\nОтправьте 1 или 2, либо <i>/cancel</i>, чтобы отменить.';
 
 async function promptStep(env: Env, chatId: number, w: WizardState): Promise<void> {
   switch (w.step) {
@@ -138,19 +138,19 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
       await sendText(env, chatId, TYPE_MSG);
       break;
     case 'from':
-      await sendText(env, chatId, '📍 <b>Откуда?</b>\nНапишите город отправления.');
+      await sendText(env, chatId, '<b>Откуда?</b>\nНапишите город отправления.');
       break;
     case 'to':
-      await sendText(env, chatId, '📍 <b>Куда?</b>\nНапишите город назначения.');
+      await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения.');
       break;
     case 'date':
-      await sendText(env, chatId, '🗓 <b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или просто <i>-</i>, если дата не важна.');
+      await sendText(env, chatId, '<b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или просто минус, если дата не важна.');
       break;
     case 'details':
-      await sendText(env, chatId, '📝 <b>Опишите посылку / условия</b>\nВес, что за груз, сколько мест, цена (если есть). Одним сообщением.');
+      await sendText(env, chatId, '<b>Опишите посылку и условия</b>\nВес, что за груз, сколько мест, цена. Одним сообщением.');
       break;
     case 'contact':
-      await sendText(env, chatId, '✉️ <b>Как с вами связаться?</b>\nНапишите <code>@username</code> или номер телефона.');
+      await sendText(env, chatId, '<b>Как с вами связаться?</b>\nНапишите <code>@username</code> или номер телефона.');
       break;
     case 'confirm':
       await sendConfirmation(env, chatId, w);
@@ -160,23 +160,23 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
 
 function draftSummary(w: WizardState): string {
   const d = w.draft;
-  const typeLabel = d.type === 'offer' ? '🚚 Водитель везёт' : '📦 Нужно передать';
+  const typeLabel = d.type === 'offer' ? 'Водитель везёт' : 'Нужно передать';
   return [
     `<b>Проверьте объявление:</b>`,
     `${typeLabel}`,
-    `📍 ${escapeHtml(d.from ?? '?')} → ${escapeHtml(d.to ?? '?')}`,
-    `🗓 ${d.date ? escapeHtml(d.date) : 'не указана'}`,
-    `📝 ${escapeHtml((d.details ?? '').slice(0, 200))}`,
-    `✉️ ${escapeHtml(d.contact ?? '?')}`,
+    `Маршрут: ${escapeHtml(d.from ?? '?')} → ${escapeHtml(d.to ?? '?')}`,
+    `Дата: ${d.date ? escapeHtml(d.date) : 'не указана'}`,
+    `Описание: ${escapeHtml((d.details ?? '').slice(0, 200))}`,
+    `Контакты: ${escapeHtml(d.contact ?? '?')}`,
   ].join('\n');
 }
 
 async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promise<void> {
-  await sendText(env, chatId, draftSummary(w) + '\n\nОтправьте <b>1</b> — опубликовать, <b>2</b> — отменить.', {
+  await sendText(env, chatId, draftSummary(w) + '\n\nОтправьте <b>1</b>, чтобы опубликовать, или <b>2</b>, чтобы отменить.', {
     reply_markup: {
       inline_keyboard: [[
-        { text: '✅ Опубликовать', callback_data: `cfm:${chatId}` },
-        { text: '❌ Отменить', callback_data: 'cancel' },
+        { text: 'Опубликовать', callback_data: `cfm:${chatId}` },
+        { text: 'Отменить', callback_data: 'cancel' },
       ]],
     },
   });
@@ -194,9 +194,9 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/help': {
         const site = env.SITE_URL ?? 'ваш сайт';
         await sendText(env, chatId,
-          `👋 Привет! Я бот доски попутных посылок.\n\n` +
-          `• <b>/post</b> — разместить объявление\n` +
-          `• Добавьте меня в чаты водителей/релокантов — я буду находить объявления и отправлять их на доску\n` +
+          `Привет! Я бот доски попутных передач.\n\n` +
+          `• <b>/post</b>: разместить объявление\n` +
+          `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
           `• Сайт: ${site}\n\n<i>Важно: у бота должен быть выключен режим приватности (BotFather → Group Privacy → Off), иначе он не увидит сообщения в группах.</i>`
         );
         await setWizard(env, chatId, null);
@@ -219,7 +219,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         }
         const pending = await listPending(env, 10);
         if (pending.length === 0) {
-          await sendText(env, chatId, '✅ Очередь модерации пуста.');
+          await sendText(env, chatId, 'Очередь модерации пуста.');
           return;
         }
         for (const l of pending.slice(0, 3)) {
@@ -233,16 +233,16 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         break;
       }
       default:
-        await sendText(env, chatId, 'Не знаю такую команду. /help — список.');
+        await sendText(env, chatId, 'Не знаю такую команду. Список команд: /help.');
     }
     return;
   }
 
   const w = await getWizard(env, chatId);
   if (!w) {
-    // Текст без активного мастера: если похоже на объявление — предлагаем /post
+    // Текст без активного мастера: если похоже на объявление, предлагаем /post
     if (looksLikeListing(text)) {
-      await sendText(env, chatId, 'Похоже, это объявление! Нажмите /post, чтобы разместить его на доске, — я помогу заполнить поля.');
+      await sendText(env, chatId, 'Похоже, это объявление. Нажмите /post, чтобы разместить его на доске, я помогу заполнить поля.');
     }
     return;
   }
@@ -274,7 +274,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       break;
     }
     case 'details': {
-      if (text.length < 5) { await sendText(env, chatId, 'Опишите чуть подробнее — хотя бы пару слов.'); return; }
+      if (text.length < 5) { await sendText(env, chatId, 'Опишите чуть подробнее, хотя бы пару слов.'); return; }
       draft.details = text.slice(0, 2000);
       w.step = 'contact';
       break;
@@ -321,8 +321,8 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
   await setWizard(env, chatId, null);
   const statusNote =
     input.status === 'published'
-      ? '\n✅ <b>Опубликовано!</b> Объявление уже на доске.'
-      : '\n⏳ <b>Отправлено на модерацию.</b> Администратор одобрит его в ближайшее время.';
+      ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+      : '\n<b>Отправлено на модерацию.</b> Администратор одобрит его в ближайшее время.';
   await sendText(env, chatId, formatListing(listing) + statusNote);
   await notifyAdmins(env, listing);
 }
@@ -348,8 +348,8 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
   const input: ListingInput = {
     type: parsed.intent ?? 'offer',
-    fromCity: parsed.fromCity ?? '—',
-    toCity: parsed.toCity ?? '—',
+    fromCity: parsed.fromCity ?? 'не указано',
+    toCity: parsed.toCity ?? 'не указано',
     departureDate: parsed.departureDate,
     weightKg: parsed.weightKg,
     price: parsed.price,
@@ -378,7 +378,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if (env.REPLY_IN_GROUPS === '1') {
     const site = tgLink(env.SITE_URL);
     await sendText(env, msg.chat.id,
-      `✅ Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? ' 👇' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
+      `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
   await notifyAdmins(env, listing);
@@ -391,7 +391,7 @@ async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
     : null;
   for (const adminId of admins(env)) {
     await sendText(env, Number(adminId),
-      formatListing(listing, link ? `🔗 <a href="${link}">Исходное сообщение</a>` : ''),
+      formatListing(listing, link ? `Ссылка: <a href="${link}">исходное сообщение</a>` : ''),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }
@@ -429,7 +429,7 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
     const id = (appr ?? rej)![1]!;
     const status = appr ? 'published' : 'rejected';
     await updateListingStatus(env, id, status);
-    await answerCallback(env, cb.id, appr ? '✅ Одобрено' : '❌ Отклонено');
+    await answerCallback(env, cb.id, appr ? 'Одобрено' : 'Отклонено');
     if (cb.message?.message_id) {
       await api(env, 'editMessageReplyMarkup', {
         chat_id: cb.message.chat.id,
@@ -441,7 +441,7 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
       const listing = await getListingById(env, id);
       if (listing) {
         for (const adminId of admins(env)) {
-          await sendText(env, Number(adminId), `✅ Опубликовано на доске:\n${formatListing(listing)}`);
+          await sendText(env, Number(adminId), `Опубликовано на доске:\n${formatListing(listing)}`);
         }
       }
     }
