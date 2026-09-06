@@ -64,6 +64,8 @@ binding = "KV"
 id = "ВАШ_KV_ID"
 ```
 
+⚠️ Пока стоят заглушки `REPLACE_WITH_...`, деплой воркера будет падать уже на биндингах. Сначала создайте ресурсы и подставьте ID, затем деплойте.
+
 ## 3. Секреты воркера
 
 ```bash
@@ -82,17 +84,18 @@ npx wrangler secret put ADMIN_API_TOKEN  # случайный токен для 
 
 ## 4. Задеплоить Воркер (это не Pages!)
 
-Воркер деплоится **из вашего компьютера** или **через GitHub Actions**, но НЕ через страницу «Builds» в Pages-проекте. Именно поэтому ваш билд упал: вы поставили в настройках Pages «Deploy command: npx wrangler deploy», а Pages выполняет его в своей среде и не находит статику.
+Сначала, почему упал ваш билд. Причин было две:
+
+1. **Билд собирал ветку `main`, а в ней нет кода.** Сейчас в `main` репозитория лежит только `README.md`. Весь код (включая `public/` и `wrangler.toml`) — на ветке `arena/01a07723-parcel`. Отсюда «Could not detect a directory containing static files».
+2. **Cloudflare просил `wrangler.toml` с `name = 'parcel'`** (сообщение «Update wrangler.toml … keep settings consistent»). Исправлено: `name = "parcel"` теперь совпадает с именем вашего проекта.
+
+Что сделать: **смержите открытый PR** из `arena/01a07723-parcel` в `main` (тогда и Pages, и воркер соберутся), либо в настройках проекта переключите **Production branch** на `arena/01a07723-parcel` без мержа.
+
+Воркер деплоится **из вашего компьютера** или **через GitHub Actions**, но НЕ через страницу «Builds» в Pages-проекте. Поэтому в Pages-проекте уберите «Deploy command: npx wrangler deploy» (см. раздел 5).
 
 ### Вариант А. Авто-деплой через GitHub Actions (рекомендую)
 
-В репозитории есть шаблон workflow: `deploy-workflows/deploy-worker.yml.example`. GitHub App этого репозитория не может создать `.github/workflows/` сам, поэтому скопируйте файл:
-
-```bash
-mkdir -p .github/workflows
-cp deploy-workflows/deploy-worker.yml.example .github/workflows/deploy-worker.yml
-git add .github/workflows/deploy-worker.yml && git commit -m "add worker deploy workflow" && git push
-```
+Файл `.github/workflows/deploy-worker.yml` уже лежит в репозитории — копировать ничего не нужно. Workflow запускается при push в `main` (и вручную через Actions → Deploy Worker → Run workflow).
 
 Теперь в GitHub → репозиторий → Settings → Secrets and variables → Actions → New repository secret:
 - `CLOUDFLARE_API_TOKEN` — токен из Cloudflare (My Profile → API Tokens → Create Token → шаблон **Edit Cloudflare Workers**)
@@ -107,7 +110,7 @@ npm run db:remote          # применить миграции D1 на про�
 npm run deploy             # задеплоить воркер
 ```
 
-Адрес воркера: Workers & Pages → воркер `poputchka` → Settings → Domains, вида `https://poputchka-хэш.ваш-поддомен.workers.dev`.
+Адрес воркера: Workers & Pages → воркер `parcel` → Settings → Domains, вида `https://parcel.ваш-поддомен.workers.dev`.
 
 ---
 
@@ -119,10 +122,11 @@ npm run deploy             # задеплоить воркер
 - **Output directory**: `public`
 - **Deploy command**: пусто (уберите `npx wrangler deploy`)
 - **Root directory**: `/`
+- **Production branch**: `main` после мержа PR (или `arena/01a07723-parcel`, пока не смержили)
 
 Сохраните и перезапустите деплой. Страница будет собираться из папки `public/` при каждом push.
 
-(в `wrangler.toml` уже добавлено `pages_build_output_dir = "./public"` — Cloudflare попросил это для консистентности.)
+(Cloudflare просил обновить `wrangler.toml` для консистентности — сделано: `name = "parcel"` совпадает с именем проекта. `pages_build_output_dir` нужен не здесь: статика Pages задаётся полем **Output directory**, а не в `wrangler.toml`.)
 
 ---
 
@@ -132,7 +136,7 @@ npm run deploy             # задеплоить воркер
 
 ```html
 <script>
-  window.POPUTKA_API_BASE = "https://poputchka-хэш.ваш-поддомен.workers.dev";
+  window.POPUTKA_API_BASE = "https://parcel.ваш-поддомен.workers.dev";
 </script>
 ```
 
