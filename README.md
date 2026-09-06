@@ -86,21 +86,28 @@ npx wrangler secret put ADMIN_API_TOKEN  # случайный токен для 
 
 ### Вариант А. Авто-деплой через GitHub Actions (рекомендую)
 
-В репозитории уже лежит `.github/workflows/deploy-worker.yml`: на каждый push в `main` он применяет миграции и деплоит воркер.
+В репозитории есть шаблон workflow: `deploy-workflows/deploy-worker.yml.example`. GitHub App этого репозитория не может создать `.github/workflows/` сам, поэтому скопируйте файл:
 
-1. В Cloudflare → My Profile → **API Tokens** → Create Token → шаблон **Edit Cloudflare Workers**.
-2. В GitHub → репозиторий → Settings → Secrets and variables → Actions → New repository secret:
-   - `CLOUDFLARE_API_TOKEN` = токен из п.1
-   - `CLOUDFLARE_ACCOUNT_ID` = ваш account id (справа на главной дашборда)
-3. Запушьте изменения на ветку main — воркер задеплоится сам.
-4. Адрес воркера: Workers & Pages → ваш воркер `poputchka` → Domains/Settings, вида `https://poputchka-хэш.ваш-поддомен.workers.dev`.
+```bash
+mkdir -p .github/workflows
+cp deploy-workflows/deploy-worker.yml.example .github/workflows/deploy-worker.yml
+git add .github/workflows/deploy-worker.yml && git commit -m "add worker deploy workflow" && git push
+```
 
-### Вариант Б. Локально
+Теперь в GitHub → репозиторий → Settings → Secrets and variables → Actions → New repository secret:
+- `CLOUDFLARE_API_TOKEN` — токен из Cloudflare (My Profile → API Tokens → Create Token → шаблон **Edit Cloudflare Workers**)
+- `CLOUDFLARE_ACCOUNT_ID` — ваш account id (справа на главной странице дашборда)
+
+После этого каждый push в `main` применяет миграции и деплоит воркер.
+
+### Вариант Б. Локально, одной командой
 
 ```bash
 npm run db:remote          # применить миграции D1 на проде
 npm run deploy             # задеплоить воркер
 ```
+
+Адрес воркера: Workers & Pages → воркер `poputchka` → Settings → Domains, вида `https://poputchka-хэш.ваш-поддомен.workers.dev`.
 
 ---
 
@@ -222,5 +229,5 @@ src/
 public/         — статика Pages (index.html, styles.css, app.js)
 migrations/     — схема D1
 scripts/        — установка/удаление вебхука
-.github/workflows/ — авто-деплой воркера
+deploy-workflows/ — шаблон авто-деплоя воркера
 ```

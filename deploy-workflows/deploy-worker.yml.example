@@ -1,3 +1,13 @@
+# Скопируйте этот файл в .github/workflows/deploy-worker.yml
+# (GitHub App репозитория не может создавать workflow-файлы сам,
+#  поэтому в репо лежит шаблон, а не готовый workflow).
+#
+# Затем в GitHub: Settings → Secrets and variables → Actions → New repository secret:
+#   CLOUDFLARE_API_TOKEN  — токен из Cloudflare (шаблон «Edit Cloudflare Workers»)
+#   CLOUDFLARE_ACCOUNT_ID — ваш account id
+#
+# После этого каждый push в main будет деплоить воркер автоматически.
+
 name: Deploy Worker
 
 on:
