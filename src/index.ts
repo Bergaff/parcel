@@ -6,6 +6,25 @@ import { handleTelegramUpdate } from './telegram';
 
 const app = new Hono<{ Bindings: Env }>();
 
+/* ---------------------- CORS для Pages -> Worker -------------- */
+/* Нужно, когда страница на Pages (pages.dev или свой домен),
+   а API и бот на отдельном воркере (workers.dev или поддомен). */
+
+app.use('/api/*', async (c, next) => {
+  const origin = c.req.header('Origin') ?? '';
+  if (origin) {
+    c.header('Access-Control-Allow-Origin', origin);
+    c.header('Vary', 'Origin');
+    c.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    c.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    c.header('Access-Control-Max-Age', '86400');
+  }
+  if (c.req.method === 'OPTIONS') {
+    return new Response(null, { status: 204 });
+  }
+  await next();
+});
+
 /* ---------------------------- Meta ---------------------------- */
 
 app.get('/api/health', (c) => c.json({ ok: true, time: new Date().toISOString() }));

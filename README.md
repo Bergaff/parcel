@@ -3,10 +3,10 @@
 Сайт для поиска передачи посылок между городами и странами. Водители международных и межгородских рейсов публикуют, что готовы взять посылку; либо человек ищет, кто поможет передать. Плюс Telegram-бот, который собирает объявления из чатов водителей и релокантов и кладёт их на доску.
 
 **Стек:**
-- Cloudflare Workers + [Hono](https://hono.dev/) — один воркер: сайт, API и Telegram-бот
+- **Cloudflare Pages** — статическая страница объявлений (`public/`), или **Workers Assets**, если всё в одном воркере
+- **Cloudflare Workers** + [Hono](https://hono.dev/) — парсер Telegram, API и бот
 - Cloudflare **D1** (SQLite) — объявления, жалобы, учёт обработанных сообщений
 - Cloudflare **KV** — сессии бота, rate limit
-- Cloudflare Workers **Assets** — статический фронтенд (vanilla JS, без сборки)
 - Telegram Bot API — вебхук без сторонних SDK
 
 ## Что умеет
@@ -39,47 +39,99 @@ npm run typecheck
 npm test
 ```
 
-## Деплой на Cloudflare (пошагово)
+## Архитектура: две схемы деплоя
 
-### 1. Создать ресурсы
+Проект поддерживает оба варианта, код один и тот же.
+
+**Вариант 1. Один воркер с Assets (по умолчанию, проще всего).**
+Один воркер раздаёт и страницу, и API, и бота. Один деплой, один домен, без CORS. Подходит для старта.
+
+**Вариант 2. Pages = страница, Worker = парсер/API/бот (то, что вы просили).**
+- **Cloudflare Pages** хостит статику из `public/`: страница объявлений, карточки, форма.
+- **Cloudflare Worker** содержит `src/`: парсер Telegram, вебхук бота, API `/api/*`, D1, KV.
+- Фронтенд обращается к воркеру по адресу из одной строчки в `public/index.html` → `window.POPUTKA_API_BASE`. Пустая строка = API на том же домене (локальная разработка и вариант 1). Для варианта 2 впишите адрес воркера: `https://api.poputchka.workers.dev`.
+- Воркер отвечает CORS-заголовками (`src/index.ts`), поэтому кросс-доменные запросы с Pages работают без настройки.
+
+## Деплой: Вариант 1 (один воркер, быстро)
 
 ```bash
-npm run deploy
-```
-
-Если в `wrangler.toml` ещё стоят `REPLACE_WITH_...`, сначала создайте базу и KV:
-
-```bash
+# 1. Создать D1 и KV, вписать ID в wrangler.toml
 wrangler d1 create poputchka-db
 wrangler kv namespace create KV
-```
 
-Подставьте полученные `database_id` и `id` в `wrangler.toml`.
-
-### 2. Миграции
-
-```bash
+# 2. Миграции
 npm run db:remote
-```
 
-### 3. Секреты
+# 3. Секреты (см. таблицу ниже)
+wrangler secret put BOT_TOKEN
+# ... и так далее
 
-```bash
-wrangler secret put BOT_TOKEN      # токен от @BotFather
-wrangler secret put BOT_SECRET     # длинная случайная строка
-wrangler secret put SITE_URL       # https://poputchka.workers.dev
-wrangler secret put BOT_USERNAME   # юзернейм бота без @
-wrangler secret put ADMIN_IDS      # Telegram ID админов через запятую
-wrangler secret put AUTO_APPROVE   # "1" — публиковать без модерации (для старта)
-wrangler secret put ADMIN_API_TOKEN# токен админ-API, см. ниже
-```
-
-### 4. Деплой и вебхук
-
-```bash
+# 4. Деплой + вебхук
 npm run deploy
 npm run telegram:webhook
 ```
+
+## Деплой: Вариант 2 (Pages + Worker)
+
+### Шаг 1. Воркер (парсер, API, бот)
+
+```bash
+# D1 + KV, потом ID в wrangler.toml (если ещё не сделано)
+wrangler d1 create poputchka-db
+wrangler kv namespace create KV
+
+# миграции и секреты
+npm run db:remote
+wrangler secret put BOT_TOKEN
+wrangler secret put BOT_SECRET
+wrangler secret put SITE_URL       # адрес страницы Pages: https://poputchka.pages.dev
+wrangler secret put BOT_USERNAME
+wrangler secret put ADMIN_IDS
+wrangler secret put AUTO_APPROVE
+wrangler secret put ADMIN_API_TOKEN
+wrangler secret put REPLY_IN_GROUPS
+
+# деплой воркера
+npx wrangler deploy
+# получите адрес вида https://poputchka-api-<хэш>.<поддомен>.workers.dev
+```
+
+### Шаг 2. Pages (страница объявлений)
+
+```bash
+# создать проект Pages (один раз)
+npx wrangler pages project create poputchka
+
+# деплой статики
+npx wrangler pages deploy public --project-name poputchka
+# получите адрес вида https://poputchka.pages.dev
+```
+
+### Шаг 3. Связать их
+
+1. В `public/index.html` впишите адрес воркера:
+   ```html
+   <script>
+     window.POPUTKA_API_BASE = "https://poputchka-api-ХЭШ.ПОДДОМЕН.workers.dev";
+   </script>
+   ```
+2. Перелейте Pages снова:
+   ```bash
+   npx wrangler pages deploy public --project-name poputchka
+   ```
+3. Установите вебхук бота на адрес воркера:
+   ```bash
+   npm run telegram:webhook   # читает SITE_URL из .dev.vars или env
+   ```
+   Либо вручную: `setWebhook` → `https://ВАШ-ВОРКЕР/api/telegram/ВАШ-СЕКРЕТ`.
+
+4. (Необязательно, красивее) свой домен: в Cloudflare Pages добавьте кастомный домен `poputchka.ru`, а воркеру решите поддомен `api.poputchka.ru` в Workers → Routes и укажите его в `POPUTKA_API_BASE`.
+
+### Важно
+
+- **Бот в группах**: в @BotFather `/setprivacy` → Disable и `/setjoingroups` → Enable.
+- **Секреты и .dev.vars различны**: при локальном запуске берутся из `.dev.vars`, на проде — `wrangler secret put`.
+- После изменения `public/` Pages перелейте, после изменения `src/` воркер: `npx wrangler deploy`.
 
 ### 5. Включить бота в чатах
 

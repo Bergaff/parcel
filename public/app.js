@@ -15,6 +15,18 @@ const state = {
 
 let config = { siteName: 'попутка.', botUsername: null, botLink: null };
 
+/* Адрес воркера с API.
+   Пустая строка = API на том же домене (локальная разработка или один воркер с Assets).
+   Если Pages и Worker на разных доменах, укажите адрес воркера:
+   window.POPUTKA_API_BASE = "https://api.poputchka.workers.dev";
+*/
+const API_BASE = (window.POPUTKA_API_BASE || '').replace(/\/+$/, '');
+
+async function api(path, options = {}) {
+  const res = await fetch(`${API_BASE}${path}`, options);
+  return res;
+}
+
 /* ---------- мелкие помощники ---------- */
 
 function el(tag, attrs = {}, children = []) {
@@ -186,7 +198,7 @@ async function loadList(reset = false) {
   if (state.page === 1) $('#list').replaceChildren(el('p', { class: 'empty-note', text: 'смотрю доску…' }));
 
   try {
-    const res = await fetch(`/api/listings?${params}`);
+    const res = await api(`/api/listings?${params}`);
     if (!res.ok) throw new Error('network');
     const data = await res.json();
     state.hasMore = data.hasMore;
@@ -264,7 +276,7 @@ async function loadDetail(id) {
   const box = $('#item-detail');
   box.replaceChildren(el('p', { class: 'empty-note', text: 'достаю карточку…' }));
   try {
-    const res = await fetch(`/api/listings/${encodeURIComponent(id)}`);
+    const res = await api(`/api/listings/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error('not found');
     const { item: l } = await res.json();
 
@@ -358,7 +370,7 @@ function openReport(id) {
 
 async function submitReport(id) {
   try {
-    const res = await fetch(`/api/listings/${encodeURIComponent(id)}/report`, {
+    const res = await api(`/api/listings/${encodeURIComponent(id)}/report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: reportReason }),
@@ -403,7 +415,7 @@ function bindForm() {
     btn.textContent = 'отправляю…';
 
     try {
-      const res = await fetch('/api/listings', {
+      const res = await api('/api/listings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -437,7 +449,7 @@ async function init() {
   bindForm();
 
   try {
-    const res = await fetch('/api/config');
+    const res = await api('/api/config');
     config = await res.json();
   } catch { /* оставляем дефолт */ }
 
