@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText } from './util';
-import { handleTelegramUpdate } from './telegram';
+import { handleTelegramUpdate, notifyAdmins } from './telegram';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -143,6 +143,15 @@ app.post('/api/listings', async (c) => {
 
   input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
   const listing = await createListing(c.env, input);
+
+  // Если объявление ушло на модерацию, тут же шлём его администратору в Telegram
+  // с кнопками «Одобрить / Отклонить» (см. notifyAdmins в src/telegram.ts).
+  if (listing.status === 'pending') {
+    c.executionCtx.waitUntil(
+      notifyAdmins(c.env, listing).catch((e) => console.error('notifyAdmins failed', e))
+    );
+  }
+
   return c.json(
     {
       item: listing,
