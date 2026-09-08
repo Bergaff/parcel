@@ -376,7 +376,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   }
 
   if (env.REPLY_IN_GROUPS === '1') {
-    const site = tgLink(env.SITE_URL);
+    const site = env.SITE_URL?.replace(/\/+$/, '');
     await sendText(env, msg.chat.id,
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );

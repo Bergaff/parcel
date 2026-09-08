@@ -1,32 +1,45 @@
 # Конфигурация Cloudflare Workers.
 # Этот файл читает и локальный `npm run dev`, и сборка на Cloudflare (Workers Builds).
 #
-# ВАЖНО для сборки на Cloudflare:
-#   1. `name` должен совпадать с именем проекта в дашборде (у вас «parcel»).
-#   2. Ветка, которую собирает проект, должна содержать ЭТОТ файл и папку public/.
-#      Код лежит на ветке arena/01a07723-parcel: укажите её в Production branch
-#      проекта или смержите PR из неё в main.
-#   3. Подставьте реальные ID D1 и KV ниже (создать: wrangler d1 create parcel-db,
-#      wrangler kv namespace create KV), иначе deploy упадёт на биндингах.
+# ВАЖНО: перед деплоем замените ДВЕ заглушки на реальные ID из дашборда Cloudflare
+# (подробно — README, раздел «2. Создать ресурсы Cloudflare (D1 + KV)»):
+#   1) d1_databases.database_id — ID базы `poputchka-db`
+#      (Storage & Databases → D1 → poputchka-db → поле Database ID)
+#   2) kv_namespaces.id — ID KV-неймспейса; если его ещё нет, создайте
+#      (Storage & Databases → KV → Create namespace, имя например `parcel-kv`)
+# Пока стоят REPLACE_WITH_..., деплой падает: KV — с ошибкой 10042,
+# D1 — следом с 10021.
 
 name = "parcel"
 main = "src/index.ts"
-compatibility_date = "2025-09-01"
+compatibility_date = "2026-09-06"
 
-# Статика сайта. В схеме «Pages = сайт, Worker = парсер» это тоже не мешает:
-# воркер дополнительно раздаёт страницу на своём домене.
+# Не затирать при деплое переменные, добавленные через дашборд
+# (Workers & Pages → parcel → Settings → Variables and Secrets).
+keep_vars = true
+
+# Несекретные настройки. Секреты — BOT_TOKEN, BOT_SECRET, ADMIN_IDS,
+# ADMIN_API_TOKEN — задаются через дашборд или `wrangler secret put`
+# и в Git не попадают.
+[vars]
+AUTO_APPROVE = "0"                          # "1" — публиковать объявления без модерации
+BOT_USERNAME = "parcel_transfer_bot"        # юзернейм бота без @
+SITE_URL = "https://parcel-61u.pages.dev"   # адрес сайта (Pages), для ссылок в сообщениях бота
+
+# Статика: воркер дополнительно раздаёт сайт на своём домене
+# (основной сайт живёт на Pages, друг другу не мешают).
 [assets]
 directory = "./public"
 not_found_handling = "404-page"
 
-# База объявлений. database_name = имя, которое вы задали при создании.
+# База объявлений.
 [[d1_databases]]
 binding = "DB"
 database_name = "poputchka-db"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 migrations_dir = "migrations"
 
-# KV: сессии бота, rate limit, счётчики.
+# KV: сессии мастера /post и rate limit.
 [[kv_namespaces]]
 binding = "KV"
 id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

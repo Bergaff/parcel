@@ -5,7 +5,7 @@ const NOW = new Date('2026-09-06T12:00:00Z');
 
 describe('parseTelegramMessage', () => {
   it('распознаёт классическое объявление водителя', () => {
-    const p = parseTelegramMessage('Варшава — Львов, завтра, возьму посылку 10 кг, 100 zł, @driver77');
+    const p = parseTelegramMessage('Варшава — Львов, завтра, возьму посылку 10 кг, 100 zł, @driver77', NOW);
     expect(p.intent).toBe('offer');
     expect(p.fromCity).toBe('Варшава');
     expect(p.toCity).toBe('Львов');
@@ -27,7 +27,7 @@ describe('parseTelegramMessage', () => {
   });
 
   it('понимает маршрут через предлог «до»', () => {
-    const p = parseTelegramMessage('Еду Берлин до Варшавы в пятницу. Есть место, 20 кг, 50 евро');
+    const p = parseTelegramMessage('Еду Берлин до Варшавы в пятницу. Есть место, 20 кг, 50 евро', NOW);
     expect(p.fromCity).toBe('Берлин');
     expect(p.toCity).toBe('Варшава');
     expect(p.departureDate).toBe(parseDate('пятница', NOW));

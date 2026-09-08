@@ -287,15 +287,15 @@ function detectIntent(text: string): 'offer' | 'request' | null {
   return offerScore > requestScore ? 'offer' : 'request';
 }
 
-/** Главная точка входа: разбор текста сообщения из чата. */
-export function parseTelegramMessage(text: string): ParsedMessage {
+/** Главная точка входа: разбор текста сообщения из чата. now передаётся в тестах. */
+export function parseTelegramMessage(text: string, now: Date = new Date()): ParsedMessage {
   const route = extractRoute(text);
   const intent = detectIntent(text) ?? (route ? 'offer' : null);
   return {
     intent,
     fromCity: route?.from ?? null,
     toCity: route?.to ?? null,
-    departureDate: parseDate(text),
+    departureDate: parseDate(text, now),
     weightKg: extractWeight(text),
     price: extractPrice(text),
     telegram: extractTelegram(text),
@@ -305,8 +305,8 @@ export function parseTelegramMessage(text: string): ParsedMessage {
 }
 
 /** Должен ли бот вообще реагировать на сообщение (нет маршрута и нет явных подсказок — игнор). */
-export function looksLikeListing(text: string): boolean {
-  const p = parseTelegramMessage(text);
+export function looksLikeListing(text: string, now: Date = new Date()): boolean {
+  const p = parseTelegramMessage(text, now);
   return p.intent !== null && (p.fromCity !== null || p.toCity !== null);
 }
 
