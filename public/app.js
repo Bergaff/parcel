@@ -18,8 +18,9 @@ let config = { siteName: 'попутка.', botUsername: null, botLink: null };
 /* Адрес воркера с API.
    Пустая строка = API на том же домене (локальная разработка или один воркер с Assets).
    Если Pages и Worker на разных доменах, укажите адрес воркера:
-   window.POPUTKA_API_BASE = "https://api.poputchka.workers.dev";
-*/
+   */
+   window.POPUTKA_API_BASE = "parcel.tgmg.workers.dev";
+
 const API_BASE = (window.POPUTKA_API_BASE || '').replace(/\/+$/, '');
 
 async function api(path, options = {}) {
