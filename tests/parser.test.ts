@@ -59,4 +59,35 @@ describe('parseTelegramMessage', () => {
     const p = parseTelegramMessage('Гданьск до Варшавы, беру до 15 кг');
     expect(p.weightKg).toBe(15);
   });
+
+  it('понимает латинские названия городов и разделитель =>', () => {
+    const p = parseTelegramMessage('Warszawa => Lviv, 15.09, до 10 kg, 100 pln', NOW);
+    expect(p.fromCity).toBe('Варшава');
+    expect(p.toCity).toBe('Львов');
+    expect(p.departureDate).toBe('2026-09-15');
+    expect(p.weightKg).toBe(10);
+    expect(p.price).toBe('100 zł');
+  });
+
+  it('понимает латиницу с разделителем >> и словом «еду»', () => {
+    const p = parseTelegramMessage('еду Krakow >> Kyiv в пятницу, есть место', NOW);
+    expect(p.fromCity).toBe('Краков');
+    expect(p.toCity).toBe('Киев');
+    expect(p.intent).toBe('offer');
+    expect(p.departureDate).toBe('2026-09-11');
+  });
+
+  it('понимает дату с названием месяца (рус. и укр.)', () => {
+    expect(parseDate('15 сентября', NOW)).toBe('2026-09-15');
+    expect(parseDate('5 жовтня', NOW)).toBe('2026-10-05');
+    expect(parseDate('выезд 3 декабря', NOW)).toBe('2026-12-03');
+  });
+
+  it('понимает «кто едет» как запрос на передачу', () => {
+    const p = parseTelegramMessage('Кто едет из Познани в Краков? Нужно передать посылку 2 кг', NOW);
+    expect(p.intent).toBe('request');
+    expect(p.fromCity).toBe('Познань');
+    expect(p.toCity).toBe('Краков');
+    expect(p.weightKg).toBe(2);
+  });
 });

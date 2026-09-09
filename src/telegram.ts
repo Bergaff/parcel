@@ -212,6 +212,34 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await setWizard(env, chatId, null);
         await sendText(env, chatId, 'Отменено.');
         break;
+      case '/parse': {
+        // Диагностика парсера: вставьте реальное сообщение из чата — бот покажет,
+        // что он из него извлекёт и возьмёт ли на модерацию.
+        const rest = text.split(/\s+/).slice(1).join(' ');
+        if (!rest) {
+          await sendText(env, chatId,
+            'Пришлите сообщение для проверки сразу после команды:\n' +
+            '<code>/parse Варшава — Львов, завтра, возьму посылку до 10 кг, 100 zł</code>\n\n' +
+            'Бот покажет, что он понимает: маршрут, дату, вес, цену и вердикт.');
+          break;
+        }
+        const p = parseTelegramMessage(rest);
+        const verdict = looksLikeListing(rest) && p.confidence >= 0.7
+          ? '✅ бот возьмёт это объявление на модерацию'
+          : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
+        await sendText(env, chatId,
+          '<b>Разбор сообщения</b>\n\n' +
+          `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
+          `Тип: ${p.intent === 'offer' ? 'водитель везёт' : p.intent === 'request' ? 'нужно передать' : '—'}\n` +
+          `Дата: ${p.departureDate ?? '—'}\n` +
+          `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
+          `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
+          `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
+          `Уверенность: ${p.confidence}\n\n` +
+          verdict
+        );
+        break;
+      }
       case '/pending': {
         if (!admins(env).includes(String(msg.from?.id))) {
           await sendText(env, chatId, 'Команда доступна только администраторам.');
