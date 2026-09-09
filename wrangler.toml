@@ -1,14 +1,9 @@
 # Конфигурация Cloudflare Workers.
 # Этот файл читает и локальный `npm run dev`, и сборка на Cloudflare (Workers Builds).
 #
-# ВАЖНО: перед деплоем замените ДВЕ заглушки на реальные ID из дашборда Cloudflare
-# (подробно — README, раздел «2. Создать ресурсы Cloudflare (D1 + KV)»):
-#   1) d1_databases.database_id — ID базы `poputchka-db`
-#      (Storage & Databases → D1 → poputchka-db → поле Database ID)
-#   2) kv_namespaces.id — ID KV-неймспейса; если его ещё нет, создайте
-#      (Storage & Databases → KV → Create namespace, имя например `parcel-kv`)
-# Пока стоят REPLACE_WITH_..., деплой падает: KV — с ошибкой 10042,
-# D1 — следом с 10021.
+# ID ресурсов: D1 `poputchka-db` и KV-неймспейс уже подставлены.
+# Проверить/создать ресурсы можно в дашборде: Storage & Databases → D1 / KV
+# (подробно — README, раздел «2. Создать ресурсы Cloudflare (D1 + KV)»).
 
 name = "parcel"
 main = "src/index.ts"
@@ -36,7 +31,7 @@ not_found_handling = "404-page"
 [[d1_databases]]
 binding = "DB"
 database_name = "poputchka-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "b97e5a3b-19bd-4a6c-84be-749782f2e90c"
 migrations_dir = "migrations"
 
 # KV: сессии мастера /post и rate limit.
