@@ -13,6 +13,7 @@
     "db:remote": "wrangler d1 migrations apply DB --remote",
     "telegram:webhook": "node scripts/set-webhook.mjs",
     "telegram:delete-webhook": "node scripts/delete-webhook.mjs",
+    "parse:export": "node --experimental-strip-types scripts/parse-export.mjs",
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
   },
   "dependencies": {

@@ -90,4 +90,13 @@ describe('parseTelegramMessage', () => {
     expect(p.toCity).toBe('Краков');
     expect(p.weightKg).toBe(2);
   });
+
+  it('понимает «места свободны» и «сегодня»', () => {
+    const p = parseTelegramMessage('https://t.me/driver88 Krakow >> Kyiv сегодня вечером, 2 места свободны', NOW);
+    expect(p.intent).toBe('offer');
+    expect(p.fromCity).toBe('Краков');
+    expect(p.toCity).toBe('Киев');
+    expect(p.departureDate).toBe('2026-09-06');
+    expect(p.telegram).toBe('@driver88');
+  });
 });

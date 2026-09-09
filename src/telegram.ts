@@ -18,6 +18,9 @@ interface TgMessage {
   date: number;
   text?: string;
   reply_to_message?: TgMessage;
+  /** Признак пересланного сообщения (Bot API: forward_origin). */
+  forward_origin?: unknown;
+  forward_from?: TgUser;
 }
 interface TgCallbackQuery {
   id: string;
@@ -182,9 +185,39 @@ async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promi
   });
 }
 
+/** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
+async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
+  const p = parseTelegramMessage(text);
+  const verdict = looksLikeListing(text) && p.confidence >= 0.7
+    ? '✅ бот возьмёт это объявление на модерацию'
+    : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
+  await sendText(env, chatId,
+    '<b>Разбор сообщения</b>\n\n' +
+    `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
+    `Тип: ${p.intent === 'offer' ? 'водитель везёт' : p.intent === 'request' ? 'нужно передать' : '—'}\n` +
+    `Дата: ${p.departureDate ?? '—'}\n` +
+    `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
+    `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
+    `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
+    `Уверенность: ${p.confidence}\n\n` +
+    verdict
+  );
+}
+
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   const chatId = msg.chat.id;
+
+  // Пересланное из чата сообщение: показываем, как его понимает парсер.
+  // Удобно для настройки: переслали реальное объявление — бот ответил разбором.
+  if (msg.forward_origin != null || msg.forward_from != null) {
+    if (!text) {
+      await sendText(env, chatId, 'Переслано без текста — парсер работает только с текстовыми сообщениями.');
+      return;
+    }
+    await sendParseReport(env, chatId, text);
+    return;
+  }
 
   if (text.startsWith('/')) {
     const parts = text.split(/\s+/);
@@ -196,6 +229,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await sendText(env, chatId,
           `Привет! Я бот доски попутных передач.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
+          `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
           `• Сайт: ${site}\n\n<i>Важно: у бота должен быть выключен режим приватности (BotFather → Group Privacy → Off), иначе он не увидит сообщения в группах.</i>`
         );
@@ -220,24 +254,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           await sendText(env, chatId,
             'Пришлите сообщение для проверки сразу после команды:\n' +
             '<code>/parse Варшава — Львов, завтра, возьму посылку до 10 кг, 100 zł</code>\n\n' +
-            'Бот покажет, что он понимает: маршрут, дату, вес, цену и вердикт.');
+            'Или просто перешлите боту любое сообщение из чата — он разберёт его так же.');
           break;
         }
-        const p = parseTelegramMessage(rest);
-        const verdict = looksLikeListing(rest) && p.confidence >= 0.7
-          ? '✅ бот возьмёт это объявление на модерацию'
-          : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
-        await sendText(env, chatId,
-          '<b>Разбор сообщения</b>\n\n' +
-          `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
-          `Тип: ${p.intent === 'offer' ? 'водитель везёт' : p.intent === 'request' ? 'нужно передать' : '—'}\n` +
-          `Дата: ${p.departureDate ?? '—'}\n` +
-          `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
-          `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
-          `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
-          `Уверенность: ${p.confidence}\n\n` +
-          verdict
-        );
+        await sendParseReport(env, chatId, rest);
         break;
       }
       case '/pending': {
