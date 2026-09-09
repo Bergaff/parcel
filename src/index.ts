@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText } from './util';
-import { handleTelegramUpdate, notifyAdmins } from './telegram';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -174,6 +174,16 @@ app.post('/api/listings/:id/report', async (c) => {
   const reason = typeof body.reason === 'string' ? body.reason.slice(0, 500) : null;
   const res = await addReport(c.env, id, reason, ip);
   if (!res.ok) return c.json({ error: 'not_found' }, 404);
+
+  // Каждая жалоба — сразу в Telegram администраторам, с кнопкой «Скрыть».
+  const listing = await getListingById(c.env, id);
+  if (listing) {
+    c.executionCtx.waitUntil(
+      notifyAdminsReport(c.env, listing, reason, res.count)
+        .catch((e) => console.error('notifyAdminsReport failed', e))
+    );
+  }
+
   return c.json({ ok: true, message: res.autoRejected ? 'Объявление скрыто модерацией.' : 'Жалоба принята, спасибо.' });
 });
 

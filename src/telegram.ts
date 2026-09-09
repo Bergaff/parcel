@@ -445,6 +445,27 @@ export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   }
 }
 
+/** Уведомление администраторов о жалобе на объявление (с кнопкой «Скрыть»). */
+export async function notifyAdminsReport(env: Env, listing: Listing, reason: string | null, count: number): Promise<void> {
+  if (!listing) return;
+  const header = count >= 3
+    ? '🚫 <b>Объявление скрыто автоматически</b> (3 жалобы)'
+    : `⚠️ <b>Жалоба на объявление</b> (${count}/3)`;
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      header + '\n\n' + formatListing(listing) +
+      (reason ? `\n<b>Причина:</b> ${escapeHtml(reason.slice(0, 300))}` : ''),
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: 'Скрыть объявление', callback_data: `rej:${listing.id}` },
+          ]],
+        },
+      }
+    ).catch(() => undefined);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Callback queries                                                     */
 /* ------------------------------------------------------------------ */

@@ -93,9 +93,9 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
-export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean }> {
+export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
-  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false };
+  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };
 
   await env.DB.prepare(
     'INSERT INTO reports (id, listing_id, reason, reporter_ip, created_at) VALUES (?, ?, ?, ?, ?)'
@@ -108,7 +108,7 @@ export async function addReport(env: Env, listingId: string, reason: string | nu
     await updateListingStatus(env, listingId, 'rejected');
     autoRejected = true;
   }
-  return { ok: true, autoRejected };
+  return { ok: true, autoRejected, count };
 }
 
 export async function markSeen(env: Env, chatId: string, messageId: number): Promise<boolean> {
@@ -135,17 +135,33 @@ function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
 }
 
+/** Паттерн для GLOB без учёта регистра (SQLite LIKE не сворачивает регистр кириллицы):
+ *  каждая буква превращается в класс [аА], спецсимволы GLOB (* ? [ ]) экранируются. */
+function globCi(q: string): string {
+  let out = '';
+  for (const ch of q) {
+    const lo = ch.toLowerCase();
+    const up = ch.toUpperCase();
+    if (ch === ']' ) out += '[]]';
+    else if (ch === '*' || ch === '?' || ch === '[') out += `[${ch}]`;
+    else if (lo !== up) out += `[${lo}${up}]`;
+    else out += ch;
+  }
+  return `*${out}*`;
+}
+
 interface WhereClause { sql: string; params: (string | number)[] }
 
 function buildWhere(f: ListFilters): WhereClause {
   let sql = ' WHERE status = ?';
   const params: (string | number)[] = [f.status ?? 'published'];
-  if (f.from) { sql += ' AND from_city LIKE ?'; params.push(`%${escapeLike(f.from)}%`); }
-  if (f.to) { sql += ' AND to_city LIKE ?'; params.push(`%${escapeLike(f.to)}%`); }
+  if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
+  if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
   if (f.q) {
-    sql += ' AND (description LIKE ? OR from_city LIKE ? OR to_city LIKE ?)';
-    params.push(`%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`);
+    const pattern = globCi(f.q);
+    sql += ' AND (description GLOB ? OR from_city GLOB ? OR to_city GLOB ?)';
+    params.push(pattern, pattern, pattern);
   }
   return { sql, params };
 }
