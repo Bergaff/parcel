@@ -42,7 +42,7 @@ migrations_dir = "migrations"
 # KV: сессии мастера /post и rate limit.
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "b882671513e645e5a01a282569f08dee"
 
 [observability]
 enabled = true
