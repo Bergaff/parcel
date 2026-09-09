@@ -377,13 +377,11 @@
 
   <div id="toast" class="toast" hidden></div>
 
-
-
-    window.POPUTKA_API_BASE = "https://parcel.tgmg.workers.dev";
-
-
+  <!-- Адрес API: на домене воркера — тот же origin, на Pages — адрес воркера.
+       Меняется только здесь, app.js лишь читает значение. -->
   <script>
-    window.POPUTKA_API_BASE = "";
+    window.POPUTKA_API_BASE =
+      location.hostname.endsWith('.workers.dev') ? '' : 'https://parcel.tgmg.workers.dev';
   </script>
   <script type="module" src="/app.js"></script>
 </body>
