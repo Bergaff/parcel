@@ -20,7 +20,9 @@ app.use('/api/*', async (c, next) => {
     c.header('Access-Control-Max-Age', '86400');
   }
   if (c.req.method === 'OPTIONS') {
-    return new Response(null, { status: 204 });
+    // Важно: c.body(), а не new Response() — иначе заголовки, установленные
+    // через c.header(), не попадут в ответ, и браузер заблокирует запрос (CORS).
+    return c.body(null, 204);
   }
   await next();
 });
