@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
-import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText } from './util';
+import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -185,6 +185,58 @@ app.post('/api/listings/:id/report', async (c) => {
   }
 
   return c.json({ ok: true, message: res.autoRejected ? 'Объявление скрыто модерацией.' : 'Жалоба принята, спасибо.' });
+});
+
+/* ---------------- Страница объявления для превью (OG) ---------------- */
+/* Мессенджеры (Telegram, WhatsApp, VK и др.) не исполняют JS и не видят
+   hash-роутинг SPA, поэтому для ссылок вида /item/:id отдаём статичный HTML
+   с og-разметкой из базы. Живому человеку страница мгновенно делает
+   redirect на SPA #/item/:id — см. wrangler.toml: run_worker_first. */
+
+app.get('/item/:id', async (c) => {
+  const id = c.req.param('id');
+  const listing = await getListingById(c.env, id);
+  const origin = new URL(c.req.url).origin;
+
+  if (!listing || listing.status !== 'published') {
+    return c.redirect('/');
+  }
+
+  const typeLabel = listing.type === 'offer' ? 'водитель везёт' : 'нужно передать';
+  const title = `${listing.fromCity} → ${listing.toCity} · ${typeLabel}`;
+  const bits = [
+    listing.departureDate ? `выезд ${listing.departureDate}` : null,
+    listing.weightKg != null ? `${String(listing.weightKg).replace('.', ',')} кг` : null,
+    listing.price,
+  ].filter(Boolean).join(' · ');
+  const description = [bits, listing.description.slice(0, 180)].filter(Boolean).join('. ');
+  const image = `${origin}/og-cover.png`;
+
+  return c.html(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>${escapeHtml(title)} — попутка.</title>
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="попутка." />
+  <meta property="og:title" content="${escapeHtml(title)}" />
+  <meta property="og:description" content="${escapeHtml(description)}" />
+  <meta property="og:url" content="${origin}/item/${encodeURIComponent(listing.id)}" />
+  <meta property="og:image" content="${image}" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="${escapeHtml(title)}" />
+  <meta name="twitter:description" content="${escapeHtml(description)}" />
+  <meta name="twitter:image" content="${image}" />
+  <script>location.replace('/#/item/${encodeURIComponent(listing.id)}');</script>
+</head>
+<body style="font-family:Georgia,serif;background:#f2eee5;color:#201d17;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh">
+  <div style="max-width:560px;padding:40px;text-align:center">
+    <div style="font-size:44px;font-weight:700">${escapeHtml(listing.fromCity)} <span style="color:#a43a10">→</span> ${escapeHtml(listing.toCity)}</div>
+    <p style="color:#6f675a">${escapeHtml(description)}</p>
+    <p style="font-size:14px"><a href="/#/item/${encodeURIComponent(listing.id)}" style="color:#201d17">открыть на доске попутка. →</a></p>
+  </div>
+</body>
+</html>`);
 });
 
 /* --------------------- Админка (API-ключ) ---------------------- */

@@ -96,6 +96,31 @@ function sourceLabel(l) {
   return 'с сайта';
 }
 
+/* ---------- поделиться объявлением ---------- */
+
+/* Ссылка ведёт на воркер: там /item/:id отдаёт страницу с OG-разметкой,
+   поэтому в мессенджерах появляется превью с маршрутом и описанием. */
+function shareUrlFor(l) {
+  const base = (API_BASE === '' ? location.origin : API_BASE).replace(/\/+$/, '');
+  return `${base}/item/${l.id}`;
+}
+
+async function shareListing(l) {
+  const url = shareUrlFor(l);
+  const title = `попутка. ${l.fromCity} → ${l.toCity}`;
+  const text = (l.description || '').slice(0, 120);
+  if (navigator.share) {
+    try { await navigator.share({ title, text, url }); } catch { /* отмена — молча */ }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(`${title}\n${url}`);
+    toast('Ссылка скопирована — можно отправлять.');
+  } catch {
+    toast('Не удалось скопировать ссылку.');
+  }
+}
+
 /* ---------- роутинг ---------- */
 
 function showView(name) {
@@ -163,13 +188,14 @@ function buildRow(l) {
         el('span', { class: 'src', text: sourceLabel(l) }),
       ].filter(Boolean)),
     ]),
-    el('div', { class: 'row-side' }, [
-      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-      contact
-        ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
-        : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
-      el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
-    ]),
+ el('div', { class: 'row-side' }, [
+   el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+   contact
+   ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
+   : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
+   el('a', { class: 'write-link share-link', text: 'поделиться', onclick: (e) => { e.preventDefault(); e.stopPropagation(); shareListing(l); } }),
+   el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
+ ]),
   ]);
 
   const open = () => { location.hash = `#/item/${l.id}`; };
@@ -296,6 +322,13 @@ async function loadDetail(id) {
         href: `#/item/${l.id}`,
         onclick: (e) => { e.preventDefault(); openReport(l.id); },
         text: 'пожаловаться',
+      })
+    );
+    actions.push(
+      el('button', {
+        class: 'btn btn-line btn-lg',
+        text: 'поделиться',
+        onclick: () => shareListing(l),
       })
     );
 

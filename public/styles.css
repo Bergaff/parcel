@@ -84,7 +84,17 @@ button { font-family: inherit; }
 .topnav a { text-decoration: none; color: var(--ink-soft); }
 .topnav a:hover { color: var(--accent); }
 .topnav a.on { color: var(--ink); font-weight: 700; border-bottom: 2px solid var(--ink); padding-bottom: 2px; }
-.nav-cta { margin-left: auto; }
+/* Кнопка-CTA в шапке: перебиваем .topnav a (специфичность), текст всегда белый */
+.topnav a.btn-ink, .topnav a.btn-ink:visited { color: #fff; }
+.topnav a.btn-ink:hover { color: #fff; }
+/* Главная кнопка «разместить» — крупная */
+.nav-cta {
+  margin-left: auto;
+  font-size: 19px;
+  padding: 16px 38px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
 
 /* ---------- кнопки ---------- */
 

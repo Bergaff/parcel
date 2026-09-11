@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://parcel-61u.pages.dev/sitemap.xml
