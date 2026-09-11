@@ -445,3 +445,25 @@ button { font-family: inherit; }
   .d-route .r-arrow { margin: 0 6px; }
 }
 .share-link { cursor: pointer; }
+
+/* ---------- админ ---------- */
+.admin-key-row { display: flex; gap: 10px; margin-top: 14px; }
+.admin-key-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 11px 14px;
+  font-size: 15px;
+  font-family: var(--mono);
+  border: 1.5px solid var(--line-strong);
+  background: var(--card);
+  color: var(--ink);
+  border-radius: 0;
+}
+.admin-err { color: var(--accent); font-size: 14px; }
+.admin-count { font-size: 18px; font-weight: 700; }
+.admin-card { border: 1.5px solid var(--line); background: var(--card); padding: 16px 18px; margin-bottom: 14px; }
+.admin-card .route-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+.admin-card .desc { margin: 8px 0; }
+.admin-contact { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
+.admin-card-actions { display: flex; gap: 10px; }
+.admin-actions { display: flex; gap: 18px; align-items: center; margin-top: 20px; }

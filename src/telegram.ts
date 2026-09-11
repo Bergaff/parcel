@@ -197,7 +197,7 @@ function draftSummary(w: WizardState): string {
 }
 
 async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promise<void> {
-  await sendText(env, chatId, draftSummary(w) + '\n\nОтправьте <b>1</b>, чтобы опубликовать, или <b>2</b>, чтобы отменить.', {
+  await sendText(env, chatId, draftSummary(w) + '\n\nОпубликовать — кнопкой выше. Передумали — кнопка «Отменить» или команда /cancel.', {
     reply_markup: {
       inline_keyboard: [[
         { text: 'Опубликовать', callback_data: `cfm:${chatId}` },
@@ -292,18 +292,19 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           await sendText(env, chatId, 'Команда доступна только администраторам.');
           return;
         }
-        const pending = await listPending(env, 10);
+        const pending = await listPending(env, 100);
         if (pending.length === 0) {
-          await sendText(env, chatId, 'Очередь модерации пуста.');
+          await sendText(env, chatId, '✅ Необработанных заявок нет — очередь модерации пуста.');
           return;
         }
-        for (const l of pending.slice(0, 3)) {
-          await sendText(env, chatId, formatListing(l, `\n<i>Заявка ${pending.indexOf(l) + 1} из ${pending.length}</i>`), {
-            reply_markup: approveKeyboard(l.id),
-          });
-        }
-        if (pending.length > 3) {
-          await sendText(env, chatId, `… и ещё ${pending.length - 3}.`);
+        await sendText(env, chatId,
+          `⏳ Необработано заявок: <b>${pending.length}</b>` +
+          (pending.length > 10 ? '\nПоказаны последние 10 — разберите их и напишите /pending снова.' : ''));
+        for (const [i, l] of pending.slice(-10).entries()) {
+          await sendText(env, chatId,
+            formatListing(l, `\n<i>Заявка ${i + 1} из ${pending.length}</i>`),
+            { reply_markup: approveKeyboard(l.id) }
+          );
         }
         break;
       }
@@ -384,7 +385,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       break;
     }
     case 'confirm': {
-      await sendText(env, chatId, 'Мы уже на этапе подтверждения. Кнопки выше 👆');
+      await sendText(env, chatId, 'Мы уже на этапе подтверждения. Кнопки выше 👆\nЕсли передумали — /cancel, всё отменится и черновик удалится.');
       return;
     }
   }

@@ -366,6 +366,35 @@
         короткое объявление об изменении. Продолжая пользоваться сайтом, вы принимаете текущую редакцию.
       </p>
     </section>
+
+    <!-- АДМИН (скрытая страница: #/admin, вход по ключу ADMIN_API_TOKEN) -->
+    <section id="view-admin" class="wrap narrow section-page" hidden>
+      <h1 class="page-title">Админ</h1>
+      <p class="doc-date">Модерация заявок</p>
+
+      <div id="admin-login">
+        <p class="form-note">
+          Введите ключ администратора — тот, что задан в переменной <code>ADMIN_API_TOKEN</code>
+          воркера на Cloudflare. Ключ хранится только в вашем браузере.
+        </p>
+        <form id="admin-key-form">
+          <div class="admin-key-row">
+            <input type="password" id="admin-key" placeholder="ключ администратора" autocomplete="off" />
+            <button type="submit" class="btn btn-ink">войти</button>
+          </div>
+        </form>
+        <p id="admin-err" class="admin-err" hidden></p>
+      </div>
+
+      <div id="admin-panel" hidden>
+        <p id="admin-count" class="admin-count"></p>
+        <div id="admin-list"></div>
+        <div class="admin-actions">
+          <button id="admin-refresh" class="btn btn-line">обновить</button>
+          <button id="admin-logout" class="link-btn">выйти</button>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer class="colophon-foot wrap">
