@@ -1,7 +1,7 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
 import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity } from './parser';
 import {
-  createListing, getListingById, listPending, markSeen, setSeenListing, updateListingStatus,
+  createListing, getListingById, listPending, markSeen, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import { admins, escapeHtml, normalizeTelegram, sanitizeContact, sanitizeText, tgLink } from './util';
 
@@ -207,6 +207,66 @@ async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promi
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* Поиск по городу: /поиск, /search, /серч                             */
+/* ------------------------------------------------------------------ */
+
+const SEARCH_MONTHS = [
+  'янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек',
+];
+
+function searchLine(env: Env, l: Listing): string {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const route = site
+    ? `<a href="${site}/#/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
+    : `${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`;
+  const bits: string[] = [];
+  if (l.departureDate) {
+    const m = l.departureDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) bits.push(`${parseInt(m[3]!, 10)} ${SEARCH_MONTHS[parseInt(m[2]!, 10) - 1]}`);
+    else bits.push(l.departureDate);
+  }
+  if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
+  if (l.price) bits.push(escapeHtml(l.price));
+  if (l.telegram || l.phone) bits.push(escapeHtml(l.telegram ?? l.phone!));
+  return `• ${route}${bits.length ? ' · ' + bits.join(' · ') : ''}`;
+}
+
+async function cmdSearch(env: Env, chatId: number, query: string): Promise<void> {
+  const q = query.trim();
+  if (q.length < 2) {
+    await sendText(env, chatId,
+      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.');
+    return;
+  }
+  const items = await searchByCity(env, q, 40);
+  if (items.length === 0) {
+    const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+    await sendText(env, chatId,
+      `По запросу «${escapeHtml(q)}» пока ничего нет.\n` +
+      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}`);
+    return;
+  }
+  const offers = items.filter((l) => l.type === 'offer');
+  const requests = items.filter((l) => l.type === 'request');
+  const chunks: string[] = [`🔍 <b>${escapeHtml(q)}</b> — заявок: ${items.length}`];
+  if (offers.length) {
+    chunks.push(`\n🚚 <b>Водители везут (${offers.length}):</b>`);
+    for (const l of offers.slice(0, 10)) chunks.push(searchLine(env, l));
+    if (offers.length > 10) chunks.push(`…и ещё ${offers.length - 10}`);
+  }
+  if (requests.length) {
+    chunks.push(`\n📦 <b>Нужно передать (${requests.length}):</b>`);
+    for (const l of requests.slice(0, 10)) chunks.push(searchLine(env, l));
+    if (requests.length > 10) chunks.push(`…и ещё ${requests.length - 10}`);
+  }
+  await sendText(env, chatId, chunks.join('\n'));
+}
+
+function isSearchCommand(text: string): boolean {
+  return /^\/(search|поиск|серч)(@\w+)?(\s|$)/i.test(text);
+}
+
 /** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
 async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
   const p = parseTelegramMessage(text);
@@ -251,6 +311,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await sendText(env, chatId,
           `Привет! Я бот доски попутных передач.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
+          `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
           `• Сайт: ${site}`
@@ -306,6 +367,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
             { reply_markup: approveKeyboard(l.id) }
           );
         }
+        break;
+      }
+      case '/search':
+      case '/поиск':
+      case '/серч': {
+        await cmdSearch(env, chatId, text.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:
@@ -431,9 +498,16 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
 
 async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
-  if (!text || text.length < 10 || text.length > 4000) return;
+  if (!text) return;
   // Не реагируем на собственные сообщения и ботов
   if (msg.from?.username === env.BOT_USERNAME || msg.from?.is_bot) return;
+
+  // /поиск, /search, /серч работают и в группах
+  if (isSearchCommand(text)) {
+    await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
+    return;
+  }
+  if (text.length < 10 || text.length > 4000) return;
 
   const parsed = parseTelegramMessage(text);
   if (parsed.confidence < 0.7) return; // слишком похоже на обычный разговор

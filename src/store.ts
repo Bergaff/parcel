@@ -93,6 +93,17 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
+/** Опубликованные заявки по городу (куда ИЛИ откуда), без учёта регистра. */
+export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
+  const pattern = globCi(city);
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+     WHERE status = 'published' AND (from_city GLOB ? OR to_city GLOB ?)
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(pattern, pattern, limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
   if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };
