@@ -17,6 +17,7 @@
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "hono": "^4.6.14"
   },
   "devDependencies": {

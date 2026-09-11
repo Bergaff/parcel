@@ -1,5 +1,5 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate } from './parser';
+import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity } from './parser';
 import {
   createListing, getListingById, listPending, markSeen, setSeenListing, updateListingStatus,
 } from './store';
@@ -61,6 +61,16 @@ async function answerCallback(env: Env, id: string, text?: string): Promise<void
   await api(env, 'answerCallbackQuery', { callback_query_id: id, text });
 }
 
+async function editMessageText(env: Env, chatId: number, messageId: number, text: string): Promise<void> {
+  await api(env, 'editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  }).catch(() => undefined);
+}
+
 function approveKeyboard(listingId: string): Record<string, unknown> {
   return {
     inline_keyboard: [[
@@ -104,7 +114,9 @@ function chatMessageLink(chatId: number, messageId: number): string | null {
 
 interface WizardState {
   authorId?: number;
+  authorUsername?: string;
   step: 'type' | 'from' | 'to' | 'date' | 'details' | 'contact' | 'confirm';
+  contactMode?: 'tg' | 'phone';
   draft: {
     type?: ListingType;
     from?: string;
@@ -152,9 +164,19 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
     case 'details':
       await sendText(env, chatId, '<b>Опишите посылку и условия</b>\nВес, что за груз, сколько мест, цена. Одним сообщением.');
       break;
-    case 'contact':
-      await sendText(env, chatId, '<b>Как с вами связаться?</b>\nНапишите <code>@username</code> или номер телефона.');
+    case 'contact': {
+      // Способ связи выбирается кнопками (см. handleCallback: contact:*)
+      const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+      if (w.authorUsername) rows.push([{ text: `Мой юзернейм (@${w.authorUsername})`, callback_data: 'contact:me' }]);
+      rows.push([
+        { text: 'Другой юзернейм', callback_data: 'contact:other' },
+        { text: 'Номер телефона', callback_data: 'contact:phone' },
+      ]);
+      await sendText(env, chatId, '<b>Как с вами связаться?</b>\nВыберите кнопку — или просто напишите контакт сообщением.', {
+        reply_markup: { inline_keyboard: rows },
+      });
       break;
+    }
     case 'confirm':
       await sendConfirmation(env, chatId, w);
       break;
@@ -237,7 +259,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         break;
       }
       case '/post': {
-        const wizard: WizardState = { step: 'type', draft: {}, authorId: msg.from?.id };
+        const wizard: WizardState = {
+          step: 'type',
+          draft: {},
+          authorId: msg.from?.id,
+          authorUsername: msg.from?.username,
+        };
         await setWizard(env, chatId, wizard);
         await promptStep(env, chatId, wizard);
         break;
@@ -306,10 +333,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     }
     case 'from':
     case 'to': {
-      const city = text.replace(/[^\p{L}\p{N}\- ]/gu, ' ').trim();
+      const city = text.replace(/[^\p{L}\- ]/gu, ' ').trim();
+      if (/\d/.test(text)) { await sendText(env, chatId, 'В названии города не может быть цифр. Попробуйте ещё раз.'); return; }
       if (city.length < 2 || city.length > 60) { await sendText(env, chatId, 'Похоже, это не город. Попробуйте ещё раз.'); return; }
-      if (w.step === 'from') { draft.from = city; w.step = 'to'; }
-      else { draft.to = city; w.step = 'date'; }
+      // Любое написание (Warsaw, warsawa, Варшаве) → каноническое «Варшава»
+      const canonical = normalizeCity(city);
+      if (w.step === 'from') { draft.from = canonical; w.step = 'to'; }
+      else { draft.to = canonical; w.step = 'date'; }
       break;
     }
     case 'date': {
@@ -328,9 +358,28 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       break;
     }
     case 'contact': {
-      const contact = sanitizeContact(text);
-      if (!contact) { await sendText(env, chatId, 'Нужен <code>@username</code> или телефон в формате <code>+48 123 456 789</code>.'); return; }
-      draft.contact = contact;
+      // Режим выбран кнопкой (contact:other / contact:phone) или юзер пишет сразу
+      if (w.contactMode === 'tg') {
+        const username = text.replace(/^@/, '').trim();
+        if (!/^[a-zA-Z0-9_]{4,32}$/.test(username)) {
+          await sendText(env, chatId, 'Юзернейм — 4–32 символа, латиница/цифры/подчёркивание. Можно без <code>@</code>.');
+          return;
+        }
+        draft.contact = `@${username}`;
+      } else if (w.contactMode === 'phone') {
+        const phone = sanitizeContact(text);
+        if (!phone || phone.startsWith('@')) {
+          await sendText(env, chatId, 'Пришлите номер телефона, например <code>+48 123 456 789</code>.');
+          return;
+        }
+        draft.contact = phone;
+      } else {
+        // Кнопку не нажимали — попробуем понять сам текст, иначе снова покажем кнопки
+        const contact = sanitizeContact(text);
+        if (!contact) { await promptStep(env, chatId, w); return; }
+        draft.contact = contact;
+      }
+      w.contactMode = undefined;
       w.step = 'confirm';
       break;
     }
@@ -474,6 +523,39 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
   const data = cb.data ?? '';
   const userId = cb.from.id;
   const isAdmin = admins(env).includes(String(userId));
+
+  // Выбор способа контакта в мастере /post (шаг «contact»)
+  if (data === 'contact:me' || data === 'contact:other' || data === 'contact:phone') {
+    const chatId = cb.message?.chat.id;
+    if (!chatId) { await answerCallback(env, cb.id, 'Сообщение устарело, начните заново: /post'); return; }
+    const w = await getWizard(env, chatId);
+    if (!w || w.step !== 'contact') { await answerCallback(env, cb.id, 'Начните заново: /post'); return; }
+
+    if (data === 'contact:me') {
+      if (!w.authorUsername) {
+        await answerCallback(env, cb.id, 'У вас не задан юзернейм в Telegram');
+        await sendText(env, chatId, 'В вашем аккаунте нет юзернейма. Введите другой юзернейм или телефон.');
+        return;
+      }
+      w.draft.contact = `@${w.authorUsername}`;
+      w.contactMode = undefined;
+      w.step = 'confirm';
+      await setWizard(env, chatId, w);
+      await answerCallback(env, cb.id, 'Юзернейм выбран');
+      await editMessageText(env, chatId, cb.message!.message_id, `Контакт: @${w.authorUsername}`);
+      await promptStep(env, chatId, w);
+      return;
+    }
+
+    w.contactMode = data === 'contact:other' ? 'tg' : 'phone';
+    await setWizard(env, chatId, w);
+    await answerCallback(env, cb.id, '');
+    await editMessageText(env, chatId, cb.message!.message_id,
+      w.contactMode === 'tg'
+        ? 'Отправьте юзернейм Telegram (можно без <code>@</code>).'
+        : 'Отправьте номер телефона, например <code>+48 123 456 789</code>.');
+    return;
+  }
 
   if (data === 'cancel') {
     await setWizard(env, cb.message?.chat.id ?? 0, null);

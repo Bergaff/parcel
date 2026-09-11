@@ -108,6 +108,10 @@ const CITY_FORMS: Record<string, string> = {
   'варашава': 'Варшава',
   'краковое': 'Краков',
   'вроцлавь': 'Вроцлав',
+  // частые латинские опечатки/транслитерации
+  'warsawa': 'Варшава', 'warshawa': 'Варшава', 'warshava': 'Варшава',
+  'krakov': 'Краков', 'krakiv': 'Краков',
+  'lwow': 'Львов', 'lwów': 'Львов',
 
   // Латиницей — в чатах релокантов часто пишут локальными именами
   // Польша
@@ -217,6 +221,37 @@ function findCities(text: string): Array<{ city: string; index: number; end: num
 }
 
 const SEPARATORS = /^(?:\s*(?:->|=>|>>|→|⇒|—|–|−|-|до|в|на|из|с|от)\s*(?:[а-яёa-z]{0,12}\s*)?)$/;
+
+/**
+ * Каноническое имя города по любому написанию:
+ * «warsawa», «Warsaw», «Варшаве» → «Варшава».
+ * Используется в мастере /post и в форме сайта, чтобы одинаковые города
+ * в базе всегда были записаны одинаково (и поиск их находил).
+ * Неизвестный город возвращается очищенным, как ввели.
+ */
+export function normalizeCity(raw: string): string {
+  const clean = raw
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\- ]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return raw.trim();
+
+  const direct = CITY_FORMS[clean];
+  if (direct) return direct;
+
+  // «варшаве», «до кракова»: findCities допускает одну букву-окончание
+  const found = findCities(clean);
+  if (found.length > 0) return found[0]!.city;
+
+  // Неизвестный город: вернём с заглавной буквы, в разумных пределах
+  const capped = clean
+    .split(' ')
+    .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
+    .join(' ');
+  return capped.slice(0, 60);
+}
 
 /** Извлекает маршрут «Город A — Город B» из текста. */
 function extractRoute(text: string): { from: string; to: string } | null {

@@ -1,8 +1,10 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
+import { normalizeCity } from './parser';
 import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
+import { renderOgImage } from './og';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -62,9 +64,11 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
   const type = b.type;
   if (type !== 'offer' && type !== 'request') return { error: 'type должен быть offer или request' };
 
-  const fromCity = sanitizeCity(b.fromCity);
-  const toCity = sanitizeCity(b.toCity);
-  if (!fromCity || !toCity) return { error: 'fromCity и toCity обязательны' };
+  // Города приводим к каноническому написанию (warsawa/Warsaw/Варшаве → Варшава),
+  // чтобы одинаковые маршруты с сайта и из чатов совпадали в поиске.
+  const fromCity = b.fromCity ? normalizeCity(sanitizeCity(b.fromCity) ?? '') : null;
+  const toCity = b.toCity ? normalizeCity(sanitizeCity(b.toCity) ?? '') : null;
+  if (!fromCity || !toCity || fromCity.length < 2 || toCity.length < 2) return { error: 'fromCity и toCity обязательны' };
 
   const description = sanitizeText(b.description, 2000, 'description');
   if (!description || description.length < 5) return { error: 'description обязательна (от 5 символов)' };
@@ -210,7 +214,7 @@ app.get('/item/:id', async (c) => {
     listing.price,
   ].filter(Boolean).join(' · ');
   const description = [bits, listing.description.slice(0, 180)].filter(Boolean).join('. ');
-  const image = `${origin}/og-cover.png`;
+  const image = `${origin}/og/${encodeURIComponent(listing.id)}.png`;
 
   return c.html(`<!DOCTYPE html>
 <html lang="ru">
@@ -237,6 +241,26 @@ app.get('/item/:id', async (c) => {
   </div>
 </body>
 </html>`);
+});
+
+/* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере
+   (resvg-wasm + шрифты из статики). При любой ошибке — статичная обложка. */
+app.get('/og/:id', async (c) => {
+  const id = c.req.param('id').replace(/\.png$/, '');
+  const listing = await getListingById(c.env, id);
+  if (!listing || listing.status !== 'published') return c.redirect('/og-cover.png');
+  try {
+    const png = await renderOgImage(listing, new URL(c.req.url).origin);
+    return new Response(png.buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=86400',
+      },
+    });
+  } catch (e) {
+    console.error('og render failed', e);
+    return c.redirect('/og-cover.png');
+  }
 });
 
 /* --------------------- Админка (API-ключ) ---------------------- */
