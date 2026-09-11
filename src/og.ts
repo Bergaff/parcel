@@ -2,23 +2,24 @@
  * Динамические OG-картинки объявлений (1200×630, PNG).
  *
  * Растеризация — resvg-wasm. Wasm-бинарник импортируется статически
- * (в воркерах запрещена динамическая компиляция WebAssembly из байтов),
- * шрифты лежат в public/ и подгружаются fetch-ем при первом запросе
- * (кэшируются на время жизни изолята).
+ * (в воркерах запрещена динамическая компиляция WebAssembly из байтов).
+ * Шрифты читаются через биндинг ASSETS: воркер НЕ может сделать fetch()
+ * на собственный домен (self-fetch запрещён), а биндинг отдаёт файлы
+ * из assets-директории напрямую, без сети.
  */
 import wasmModule from './resvg.wasm';
 import { initWasm, Resvg } from '@resvg/resvg-wasm';
-import type { Listing } from './types';
+import type { Env, Listing } from './types';
 import { escapeHtml } from './util';
 
 let initPromise: Promise<Uint8Array[]> | null = null;
 
-async function lazyInit(origin: string): Promise<Uint8Array[]> {
+async function lazyInit(env: Env): Promise<Uint8Array[]> {
   if (!initPromise) {
     initPromise = (async () => {
       const [fontRes, boldRes] = await Promise.all([
-        fetch(`${origin}/og-font.ttf`),
-        fetch(`${origin}/og-font-bold.ttf`),
+        env.ASSETS.fetch(new Request('https://assets/og-font.ttf')),
+        env.ASSETS.fetch(new Request('https://assets/og-font-bold.ttf')),
       ]);
       if (!fontRes.ok || !boldRes.ok) {
         throw new Error(`og fonts unavailable: ${fontRes.status}/${boldRes.status}`);
@@ -97,8 +98,8 @@ function buildSvg(l: Listing): string {
 </svg>`;
 }
 
-export async function renderOgImage(listing: Listing, origin: string): Promise<Uint8Array> {
-  const fontBuffers = await lazyInit(origin);
+export async function renderOgImage(listing: Listing, env: Env): Promise<Uint8Array> {
+  const fontBuffers = await lazyInit(env);
   const resvg = new Resvg(buildSvg(listing), {
     font: {
       fontBuffers,

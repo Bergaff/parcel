@@ -28,7 +28,8 @@ SITE_URL = "https://parcel-61u.pages.dev"   # адрес сайта (Pages), д�
 [assets]
 directory = "./public"
 not_found_handling = "404-page"
-run_worker_first = ["/item/*", "/og/*"]
+binding = "ASSETS"
+run_worker_first = ["/item/*", "/og/*", "/og-debug/*"]
 
 # База объявлений.
 [[d1_databases]]

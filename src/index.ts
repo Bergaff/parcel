@@ -244,13 +244,13 @@ app.get('/item/:id', async (c) => {
 });
 
 /* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере
-   (resvg-wasm + шрифты из статики). При любой ошибке — статичная обложка. */
+   (resvg-wasm + шрифты через биндинг ASSETS). При любой ошибке — статичная обложка. */
 app.get('/og/:id', async (c) => {
   const id = c.req.param('id').replace(/\.png$/, '');
   const listing = await getListingById(c.env, id);
   if (!listing || listing.status !== 'published') return c.redirect('/og-cover.png');
   try {
-    const png = await renderOgImage(listing, new URL(c.req.url).origin);
+    const png = await renderOgImage(listing, c.env);
     return new Response(png.buffer as ArrayBuffer, {
       headers: {
         'Content-Type': 'image/png',
@@ -260,6 +260,19 @@ app.get('/og/:id', async (c) => {
   } catch (e) {
     console.error('og render failed', e);
     return c.redirect('/og-cover.png');
+  }
+});
+
+/* Диагностика OG-рендера: возвращает JSON вместо картинки — видно настоящую ошибку. */
+app.get('/og-debug/:id', async (c) => {
+  const id = c.req.param('id');
+  const listing = await getListingById(c.env, id);
+  if (!listing || listing.status !== 'published') return c.json({ ok: false, error: 'not_found' }, 404);
+  try {
+    const png = await renderOgImage(listing, c.env);
+    return c.json({ ok: true, bytes: png.byteLength });
+  } catch (e) {
+    return c.json({ ok: false, error: String(e) });
   }
 });
 

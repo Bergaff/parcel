@@ -96,7 +96,7 @@ function sourceLabel(l) {
   return 'с сайта';
 }
 
-/* ---------- поделиться объявлением ---------- */
+/* ---------- скопировать ссылку на объявление ---------- */
 
 /* Ссылка ведёт на воркер: там /item/:id отдаёт страницу с OG-разметкой,
    поэтому в мессенджерах появляется превью с маршрутом и описанием. */
@@ -105,20 +105,35 @@ function shareUrlFor(l) {
   return `${base}/item/${l.id}`;
 }
 
-async function shareListing(l) {
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* попробуем резервный способ */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function copyListingLink(l) {
   const url = shareUrlFor(l);
-  const title = `попутка. ${l.fromCity} → ${l.toCity}`;
-  const text = (l.description || '').slice(0, 120);
-  if (navigator.share) {
-    try { await navigator.share({ title, text, url }); } catch { /* отмена — молча */ }
+  const ok = await copyToClipboard(url);
+  if (ok) {
+    toast('Ссылка скопирована — вставьте в любой чат.');
     return;
   }
-  try {
-    await navigator.clipboard.writeText(`${title}\n${url}`);
-    toast('Ссылка скопирована — можно отправлять.');
-  } catch {
-    toast('Не удалось скопировать ссылку.');
-  }
+  // последний шанс: показать ссылку в окне, откуда её можно скопировать руками
+  window.prompt('Скопируйте ссылку:', url);
 }
 
 /* ---------- роутинг ---------- */
@@ -193,7 +208,7 @@ function buildRow(l) {
    contact
    ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
    : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
-   el('a', { class: 'write-link share-link', text: 'поделиться', onclick: (e) => { e.preventDefault(); e.stopPropagation(); shareListing(l); } }),
+   el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
    el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
  ]),
   ]);
@@ -327,8 +342,8 @@ async function loadDetail(id) {
     actions.push(
       el('button', {
         class: 'btn btn-line btn-lg',
-        text: 'поделиться',
-        onclick: () => shareListing(l),
+        text: 'скопировать ссылку',
+        onclick: () => copyListingLink(l),
       })
     );
 

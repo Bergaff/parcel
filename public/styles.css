@@ -444,3 +444,4 @@ button { font-family: inherit; }
   #item-detail { padding: 22px 18px 20px; }
   .d-route .r-arrow { margin: 0 6px; }
 }
+.share-link { cursor: pointer; }
