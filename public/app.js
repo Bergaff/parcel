@@ -5,6 +5,7 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 const state = {
   type: '',
+  archive: false,
   from: '',
   to: '',
   date: '',
@@ -208,6 +209,9 @@ function buildRow(l) {
     ]),
  el('div', { class: 'row-side' }, [
    el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+   (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso()))
+     ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
+     : null,
    contact
    ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
    : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
@@ -230,6 +234,7 @@ function buildRow(l) {
 async function loadList(reset = false) {
   if (reset) state.page = 1;
   const params = new URLSearchParams();
+  if (state.archive) params.set('archive', '1');
   if (state.type) params.set('type', state.type);
   if (state.from) params.set('from', state.from);
   if (state.to) params.set('to', state.to);
@@ -251,7 +256,13 @@ async function loadList(reset = false) {
     for (const l of data.items) listEl.append(buildRow(l));
 
     $('#total-count').textContent = `${state.total} ${plural(state.total, 'объявление', 'объявления', 'объявлений')}`;
-    $('#list-empty').hidden = !(state.total === 0);
+    $('#list-empty').hidden = !(state.total === 0 && !state.archive);
+    if (state.archive && state.total === 0) {
+      listEl.append(el('p', {
+        class: 'empty-note',
+        text: 'В архиве пока пусто. Заявки попадают сюда на следующий день после даты выезда и живут месяц.',
+      }));
+    }
     $('#load-more').hidden = !state.hasMore;
 
     if (data.counts) {
@@ -269,7 +280,13 @@ function bindBoard() {
     tab.addEventListener('click', () => {
       $$('.tab').forEach((t) => t.classList.remove('on'));
       tab.classList.add('on');
-      state.type = tab.dataset.type;
+      if (tab.dataset.type === 'archive') {
+        state.archive = true;
+        state.type = '';
+      } else {
+        state.archive = false;
+        state.type = tab.dataset.type;
+      }
       loadList(true);
     });
   });

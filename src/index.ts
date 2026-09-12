@@ -135,9 +135,10 @@ app.get('/api/listings', async (c) => {
   const to = toRaw ? (normalizeCity(toRaw).trim() || undefined) : undefined;
   const date = url.searchParams.get('date') ?? undefined;
   const q = url.searchParams.get('q') ?? undefined;
+  const archive = url.searchParams.get('archive') === '1';
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
-  const { items, hasMore } = await listListings(c.env, { type, from, to, date, q, page });
-  const counts = await getCounts(c.env, { from, to, date, q });
+  const { items, hasMore } = await listListings(c.env, { type, from, to, date, q, page, archive });
+  const counts = await getCounts(c.env, { from, to, date, q, archive });
   return c.json({ items, hasMore, page, total: counts.offer + counts.request, counts });
 });
 

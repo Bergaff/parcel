@@ -245,12 +245,20 @@ function globCi(q: string): string {
 interface WhereClause { sql: string; params: (string | number)[] }
 
 function buildWhere(f: ListFilters): WhereClause {
-  let sql = ' WHERE status = ?';
-  const params: (string | number)[] = [f.status ?? 'published'];
-  // Доска показывает только актуальные заявки: дата выезда не прошла
-  // (или не указана). Просроченные живут в архиве — см. archiveExpired.
-  if ((f.status ?? 'published') === 'published') {
-    sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+  let sql: string;
+  const params: (string | number)[] = [];
+  if (f.archive) {
+    // Архив (вкладка на доске): помеченные cron'ом ('expired')
+    // и ещё не помеченные просроченные ('published' с прошедшей датой).
+    sql = " WHERE (status = 'expired' OR (status = 'published' AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')))";
+  } else {
+    sql = ' WHERE status = ?';
+    params.push(f.status ?? 'published');
+    // Доска показывает только актуальные заявки: дата выезда не прошла
+    // (или не указана). Просроченные живут в архиве — см. archiveExpired.
+    if ((f.status ?? 'published') === 'published') {
+      sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+    }
   }
   if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
   if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }

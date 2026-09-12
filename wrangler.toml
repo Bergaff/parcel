@@ -19,7 +19,7 @@ keep_vars = true
 [vars]
 AUTO_APPROVE = "0"                          # "1" — публиковать объявления без модерации
 BOT_USERNAME = "parcel_transfer_bot"        # юзернейм бота без @
-SITE_URL = "https://parcel-61u.pages.dev"   # адрес сайта (Pages), для ссылок в сообщениях бота
+SITE_URL = "https://pop-utka.app"           # основной домен сайта (custom domain воркера)
 
 # Статика: воркер дополнительно раздаёт сайт на своём домене
 # (основной сайт живёт на Pages, друг другу не мешает).

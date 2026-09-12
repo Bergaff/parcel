@@ -45,6 +45,8 @@ export interface Listing extends ListingInput {
 
 export interface ListFilters {
   type?: ListingType;
+  /** true — архив: заявки с прошедшей датой (статус expired или published с прошлой датой). */
+  archive?: boolean;
   from?: string;
   to?: string;
   date?: string;

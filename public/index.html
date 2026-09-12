@@ -6,14 +6,14 @@
   <title>попутка. доска попутных передач</title>
   <meta name="description" content="Водители междугородних и международных рейсов берут посылки. Договариваетесь напрямую, без посредников." />
   <meta name="theme-color" content="#f2eee5" />
-  <link rel="canonical" href="https://parcel-61u.pages.dev/" />
+  <link rel="canonical" href="https://pop-utka.app/" />
   <!-- Open Graph: превью при отправке ссылки главной страницы -->
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="попутка." />
   <meta property="og:title" content="попутка. доска попутных передач" />
   <meta property="og:description" content="Водители междугородних и международных рейсов берут посылки. Польша, Украина, Европа. Договариваетесь напрямую, без посредников." />
-  <meta property="og:url" content="https://parcel-61u.pages.dev/" />
-  <meta property="og:image" content="https://parcel.tgmg.workers.dev/og-cover.png" />
+  <meta property="og:url" content="https://pop-utka.app/" />
+  <meta property="og:image" content="https://pop-utka.app/og-cover.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2eee5'/><text x='50' y='68' font-size='52' font-family='Georgia' text-anchor='middle' fill='%23201d17'>п</text></svg>" />
   <link rel="stylesheet" href="/styles.css" />
@@ -68,6 +68,7 @@
         <button class="tab on" data-type="">все <span class="tab-count" id="c-all"></span></button>
         <button class="tab" data-type="offer">водители везут <span class="tab-count" id="c-offer"></span></button>
         <button class="tab" data-type="request">ищу передачу <span class="tab-count" id="c-request"></span></button>
+        <button class="tab" data-type="archive">архив</button>
       </div>
 
       <div id="list" class="rows" aria-live="polite"></div>
@@ -423,7 +424,9 @@
        Меняется только здесь, app.js лишь читает значение. -->
   <script>
     window.POPUTKA_API_BASE =
-      location.hostname.endsWith('.workers.dev') ? '' : 'https://parcel.tgmg.workers.dev';
+      location.hostname === 'pop-utka.app' || location.hostname.endsWith('.workers.dev')
+        ? ''
+        : 'https://parcel.tgmg.workers.dev';
   </script>
   <script type="module" src="/app.js"></script>
 </body>
