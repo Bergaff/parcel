@@ -311,6 +311,11 @@ function bindBoard() {
   });
 }
 
+/* Сегодняшняя дата YYYY-MM-DD по Москве/Минску (UTC+3) — день выезда сравниваем с ней */
+function mskTodayIso() {
+  return new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 /* ---------- карточка ---------- */
 
 async function loadDetail(id) {
@@ -320,6 +325,10 @@ async function loadDetail(id) {
     const res = await api(`/api/listings/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error('not found');
     const { item: l } = await res.json();
+    // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
+    const archived =
+      l.status === 'expired' ||
+      (l.departureDate != null && l.departureDate < mskTodayIso());
 
     const contact = contactInfo(l);
     const actions = [];
@@ -391,8 +400,15 @@ async function loadDetail(id) {
           el('span', { class: 'r-to', text: l.toCity }),
         ]),
         el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+        ...(archived ? [el('span', { class: 'stamp stamp-expired', text: 'архив' })] : []),
       ]),
       el('div', { class: 'd-meta' }, cells),
+      ...(archived
+        ? [el('p', {
+            class: 'd-note',
+            text: 'Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
+          })]
+        : []),
       el('p', { class: 'd-desc', text: l.description }),
       el('div', { class: 'd-actions' }, actions),
       el('p', {

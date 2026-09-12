@@ -3,7 +3,7 @@ import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity } from
 import {
   createListing, getListingById, listPending, markSeen, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
-import { admins, escapeHtml, normalizeTelegram, sanitizeContact, sanitizeText, tgLink } from './util';
+import { admins, escapeHtml, normalizeTelegram, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -153,10 +153,10 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
       await sendText(env, chatId, TYPE_MSG);
       break;
     case 'from':
-      await sendText(env, chatId, '<b>Откуда?</b>\nНапишите город отправления.');
+      await sendText(env, chatId, '<b>Откуда?</b>\nНапишите город отправления — по-русски, например <i>Варшава</i>.');
       break;
     case 'to':
-      await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения.');
+      await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения — по-русски, например <i>Минск</i>.');
       break;
     case 'date':
       await sendText(env, chatId, '<b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или просто минус, если дата не важна.');
@@ -215,7 +215,7 @@ const SEARCH_MONTHS = [
   'янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек',
 ];
 
-function searchLine(env: Env, l: Listing): string {
+function searchLine(env: Env, l: Listing, today: string): string {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const route = site
     ? `<a href="${site}/#/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
@@ -229,37 +229,64 @@ function searchLine(env: Env, l: Listing): string {
   if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
   if (l.price) bits.push(escapeHtml(l.price));
   if (l.telegram || l.phone) bits.push(escapeHtml(l.telegram ?? l.phone!));
+  // Поездка уже прошла — заявка из архива (ещё месяц доступна, потом удаляется)
+  if (l.status === 'expired' || (l.departureDate != null && l.departureDate < today)) bits.push('🗄️ архив');
   return `• ${route}${bits.length ? ' · ' + bits.join(' · ') : ''}`;
 }
 
 async function cmdSearch(env: Env, chatId: number, query: string): Promise<void> {
-  const q = query.trim();
-  if (q.length < 2) {
+  const raw = query.trim();
+  // Правило доски: города пишут по-русски — объявляем об этом в каждом ответе поиска
+  const rule = '\n\n✍️ Города у нас — по-русски: /поиск Минск, /поиск Варшава.';
+  if (raw.length < 2) {
     await sendText(env, chatId,
-      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.');
+      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.' + rule);
+    return;
+  }
+  // Знакомое латинское написание переводим сами и говорим об этом,
+  // незнакомое просим написать кириллицей.
+  let q = raw;
+  let hint = '';
+  if (/[a-z]/i.test(raw)) {
+    const normalized = normalizeCity(raw);
+    if (isRussianCity(normalized)) {
+      q = normalized;
+      hint = `Города у нас — по-русски, искал «${escapeHtml(normalized)}».\n\n`;
+    } else {
+      await sendText(env, chatId,
+        '✍️ Города пишите по-русски, кириллицей.\n' +
+        'Например: <code>/поиск Варшава</code> или <code>/поиск Минск</code>.');
+      return;
+    }
+  }
+  if (!/[а-яё]/i.test(q)) {
+    await sendText(env, chatId,
+      '✍️ Название города пишите по-русски: <code>/поиск Минск</code>.');
     return;
   }
   const items = await searchByCity(env, q, 40);
   if (items.length === 0) {
     const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
     await sendText(env, chatId,
-      `По запросу «${escapeHtml(q)}» пока ничего нет.\n` +
-      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}`);
+      `${hint}По запросу «${escapeHtml(q)}» ничего нет.\n` +
+      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}` + rule);
     return;
   }
+  const today = mskTodayIso();
   const offers = items.filter((l) => l.type === 'offer');
   const requests = items.filter((l) => l.type === 'request');
-  const chunks: string[] = [`🔍 <b>${escapeHtml(q)}</b> — заявок: ${items.length}`];
+  const chunks: string[] = [`${hint}🔍 <b>${escapeHtml(q)}</b> — заявок: ${items.length}`];
   if (offers.length) {
     chunks.push(`\n🚚 <b>Водители везут (${offers.length}):</b>`);
-    for (const l of offers.slice(0, 10)) chunks.push(searchLine(env, l));
+    for (const l of offers.slice(0, 10)) chunks.push(searchLine(env, l, today));
     if (offers.length > 10) chunks.push(`…и ещё ${offers.length - 10}`);
   }
   if (requests.length) {
     chunks.push(`\n📦 <b>Нужно передать (${requests.length}):</b>`);
-    for (const l of requests.slice(0, 10)) chunks.push(searchLine(env, l));
+    for (const l of requests.slice(0, 10)) chunks.push(searchLine(env, l, today));
     if (requests.length > 10) chunks.push(`…и ещё ${requests.length - 10}`);
   }
+  if (!hint) chunks.push(rule.trimStart());
   await sendText(env, chatId, chunks.join('\n'));
 }
 
@@ -311,7 +338,8 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await sendText(env, chatId,
           `Привет! Я бот доски попутных передач.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
-          `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать\n` +
+          `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
+          `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
           `• Сайт: ${site}`
@@ -406,6 +434,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       if (city.length < 2 || city.length > 60) { await sendText(env, chatId, 'Похоже, это не город. Попробуйте ещё раз.'); return; }
       // Любое написание (Warsaw, warsawa, Варшаве) → каноническое «Варшава»
       const canonical = normalizeCity(city);
+      // Латиницу перевести не смогли — просим по-русски
+      if (!isRussianCity(canonical)) {
+        await sendText(env, chatId,
+          '✍️ Город пишите по-русски, кириллицей: например <i>Варшава</i>, а не Warsaw. Попробуйте ещё раз.');
+        return;
+      }
       if (w.step === 'from') { draft.from = canonical; w.step = 'to'; }
       else { draft.to = canonical; w.step = 'date'; }
       break;

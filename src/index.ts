@@ -1,8 +1,8 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
-import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml } from './util';
+import { addReport, archiveExpired, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
+import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
 
@@ -70,6 +70,13 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
   const toCity = b.toCity ? normalizeCity(sanitizeCity(b.toCity) ?? '') : null;
   if (!fromCity || !toCity || fromCity.length < 2 || toCity.length < 2) return { error: 'fromCity и toCity обязательны' };
 
+  // Города — только по-русски: аудитория русскоязычная, а при разнобое написаний
+  // поиск по доске перестаёт сходиться. Известные латинские написания (Warsaw)
+  // normalizeCity уже перевёл в «Варшаву»; незнакомые просим написать кириллицей.
+  if (!isRussianCity(fromCity) || !isRussianCity(toCity)) {
+    return { error: 'Названия городов пишите по-русски, кириллицей: «Варшава», а не Warsaw' };
+  }
+
   const description = sanitizeText(b.description, 2000, 'description');
   if (!description || description.length < 5) return { error: 'description обязательна (от 5 символов)' };
 
@@ -121,8 +128,11 @@ app.get('/api/listings', async (c) => {
   const url = new URL(c.req.url);
   const typeRaw = url.searchParams.get('type');
   const type = typeRaw === 'offer' || typeRaw === 'request' ? typeRaw : undefined;
-  const from = url.searchParams.get('from') ?? undefined;
-  const to = url.searchParams.get('to') ?? undefined;
+  // Поиск по доске понимает и латиницу: «warsaw» → «Варшава»
+  const fromRaw = url.searchParams.get('from');
+  const from = fromRaw ? (normalizeCity(fromRaw).trim() || undefined) : undefined;
+  const toRaw = url.searchParams.get('to');
+  const to = toRaw ? (normalizeCity(toRaw).trim() || undefined) : undefined;
   const date = url.searchParams.get('date') ?? undefined;
   const q = url.searchParams.get('q') ?? undefined;
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
@@ -134,7 +144,11 @@ app.get('/api/listings', async (c) => {
 app.get('/api/listings/:id', async (c) => {
   const id = c.req.param('id');
   const listing = await getListingById(c.env, id, { hitView: true });
-  if (!listing || listing.status !== 'published') return c.json({ error: 'not_found' }, 404);
+  // Архивные ('expired') заявки остаются доступны по ссылке:
+  // месяц после даты выезда по ним ещё можно написать автору.
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
+    return c.json({ error: 'not_found' }, 404);
+  }
   return c.json({ item: listing });
 });
 
@@ -202,12 +216,16 @@ app.get('/item/:id', async (c) => {
   const listing = await getListingById(c.env, id);
   const origin = new URL(c.req.url).origin;
 
-  if (!listing || listing.status !== 'published') {
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
     return c.redirect('/');
   }
+  // Отметка «архив» для заявок с прошедшей датой — видна и в превью-ссылке
+  const archived =
+    listing.status === 'expired' ||
+    (listing.departureDate != null && listing.departureDate < mskTodayIso());
 
   const typeLabel = listing.type === 'offer' ? 'водитель везёт' : 'нужно передать';
-  const title = `${listing.fromCity} → ${listing.toCity} · ${typeLabel}`;
+  const title = `${listing.fromCity} → ${listing.toCity} · ${typeLabel}${archived ? ' · архив' : ''}`;
   const bits = [
     listing.departureDate ? `выезд ${listing.departureDate}` : null,
     listing.weightKg != null ? `${String(listing.weightKg).replace('.', ',')} кг` : null,
@@ -248,7 +266,7 @@ app.get('/item/:id', async (c) => {
 app.get('/og/:id', async (c) => {
   const id = c.req.param('id').replace(/\.png$/, '');
   const listing = await getListingById(c.env, id);
-  if (!listing || listing.status !== 'published') return c.redirect('/og-cover.png');
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) return c.redirect('/og-cover.png');
   try {
     const png = await renderOgImage(listing, c.env);
     return new Response(png.buffer as ArrayBuffer, {
@@ -267,7 +285,7 @@ app.get('/og/:id', async (c) => {
 app.get('/og-debug/:id', async (c) => {
   const id = c.req.param('id');
   const listing = await getListingById(c.env, id);
-  if (!listing || listing.status !== 'published') return c.json({ ok: false, error: 'not_found' }, 404);
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) return c.json({ ok: false, error: 'not_found' }, 404);
   try {
     const png = await renderOgImage(listing, c.env);
     return c.json({ ok: true, bytes: png.byteLength });
@@ -301,4 +319,21 @@ app.post('/api/admin/listings/:id/status', async (c) => {
   return c.json({ ok: true });
 });
 
-export default app;
+/* Ручной запуск архивации — то же самое cron делает раз в сутки:
+   просроченные заявки уходят в архив, старше 30 дней — удаляются. */
+app.post('/api/admin/archive', async (c) => {
+  const res = await archiveExpired(c.env);
+  return c.json({ ok: true, archived: res.archived, deleted: res.deleted });
+});
+
+/* Cron: раз в сутки архивируем просроченные заявки и подчищаем старый архив.
+   Расписание — [triggers] в wrangler.toml; ручной запуск — POST /api/admin/archive. */
+const worker = {
+  fetch: app.fetch,
+  scheduled: async (_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> => {
+    const res = await archiveExpired(env);
+    console.log('archiveExpired:', JSON.stringify(res));
+  },
+};
+
+export default worker;

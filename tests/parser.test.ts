@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeListing, parseDate, parseTelegramMessage } from '../src/parser';
+import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage } from '../src/parser';
+import { isRussianCity } from '../src/util';
 
 const NOW = new Date('2026-09-06T12:00:00Z');
+
+describe('города — по-русски', () => {
+  it('знакомую латиницу переводит в русское название', () => {
+    expect(normalizeCity('warsawa')).toBe('Варшава');
+    expect(normalizeCity('Warsaw')).toBe('Варшава');
+    expect(normalizeCity('kraków')).toBe('Краков');
+    expect(normalizeCity('минске')).toBe('Минск');
+  });
+  it('незнакомую латиницу не пропускает как город', () => {
+    expect(isRussianCity(normalizeCity('Qwertyville'))).toBe(false);
+    expect(isRussianCity(normalizeCity('123'))).toBe(false);
+    expect(isRussianCity(normalizeCity('Варшава'))).toBe(true);
+    expect(isRussianCity(normalizeCity('Санкт-Петербург'))).toBe(true);
+    expect(isRussianCity(normalizeCity('Зелёна-Гура'))).toBe(true);
+  });
+});
 
 describe('parseTelegramMessage', () => {
   it('распознаёт классическое объявление водителя', () => {

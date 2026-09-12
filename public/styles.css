@@ -262,6 +262,7 @@ button { font-family: inherit; }
 }
 .stamp-offer { color: var(--olive); border-color: var(--olive); }
 .stamp-request { color: var(--accent); border-color: var(--accent); }
+.stamp-expired { color: #8a8172; border-color: #8a8172; }
 
 .write-link {
   font-size: 13.5px;

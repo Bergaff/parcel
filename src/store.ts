@@ -93,15 +93,44 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
-/** Опубликованные заявки по городу (куда ИЛИ откуда), без учёта регистра. */
+/**
+ * Заявки по городу (куда ИЛИ откуда), без учёта регистра.
+ * Кроме действующих показывает и архив — заявки с прошедшей датой,
+ * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
+ */
 export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
   const pattern = globCi(city);
   const res = await env.DB.prepare(
     `SELECT * FROM listings
-     WHERE status = 'published' AND (from_city GLOB ? OR to_city GLOB ?)
-     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+     WHERE status IN ('published', 'expired')
+       AND (from_city GLOB ? OR to_city GLOB ?)
+       AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
+     ORDER BY (CASE WHEN status = 'expired' OR departure_date < date('now', '+3 hours') THEN 1 ELSE 0 END),
+              COALESCE(published_at, created_at) DESC
+     LIMIT ?`
   ).bind(pattern, pattern, limit).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/**
+ * Архивация по расписанию (cron, раз в сутки):
+ * 1) опубликованные заявки с прошедшей датой выезда → статус 'expired' (архив):
+ *    они пропадают с доски, но месяц ещё доступны по ссылке и в /поиск;
+ * 2) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE).
+ */
+export async function archiveExpired(env: Env): Promise<{ archived: number; deleted: number }> {
+  const upd = await env.DB.prepare(
+    `UPDATE listings SET status = 'expired'
+     WHERE status = 'published'
+       AND departure_date IS NOT NULL
+       AND departure_date < date('now', '+3 hours')`
+  ).run();
+  const del = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE departure_date IS NOT NULL
+       AND departure_date < date('now', '+3 hours', '-30 days')`
+  ).run();
+  return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0 };
 }
 
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
@@ -166,6 +195,11 @@ interface WhereClause { sql: string; params: (string | number)[] }
 function buildWhere(f: ListFilters): WhereClause {
   let sql = ' WHERE status = ?';
   const params: (string | number)[] = [f.status ?? 'published'];
+  // Доска показывает только актуальные заявки: дата выезда не прошла
+  // (или не указана). Просроченные живут в архиве — см. archiveExpired.
+  if ((f.status ?? 'published') === 'published') {
+    sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+  }
   if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
   if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
