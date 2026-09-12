@@ -6,16 +6,18 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote",
     "telegram:webhook": "node scripts/set-webhook.mjs",
-    "telegram:delete-webhook": "node scripts/delete-webhook.mjs"
+    "telegram:delete-webhook": "node scripts/delete-webhook.mjs",
+    "parse:export": "node --experimental-strip-types scripts/parse-export.mjs",
+    "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy"
   },
   "dependencies": {
+    "@resvg/resvg-wasm": "^2.6.2",
     "hono": "^4.6.14"
   },
   "devDependencies": {

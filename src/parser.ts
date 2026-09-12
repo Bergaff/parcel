@@ -99,6 +99,10 @@ const CITY_FORMS: Record<string, string> = {
   'рига': 'Рига',
   'таллин': 'Таллин', 'таллинн': 'Таллин',
   'минск': 'Минск', 'мінск': 'Минск',
+  'брест': 'Брест', 'гродно': 'Гродно', 'гомель': 'Гомель',
+  'витебск': 'Витебск', 'могилев': 'Могилёв', 'могилёв': 'Могилёв',
+  'бобруйск': 'Бобруйск', 'барановичи': 'Барановичи', 'пинск': 'Пинск',
+  'житомир': 'Житомир', 'черкассы': 'Черкассы',
   'калининград': 'Калининград', 'кенигсберг': 'Калининград',
   'москва': 'Москва',
   'санкт-петербург': 'Санкт-Петербург', 'питер': 'Санкт-Петербург',
@@ -108,6 +112,54 @@ const CITY_FORMS: Record<string, string> = {
   'варашава': 'Варшава',
   'краковое': 'Краков',
   'вроцлавь': 'Вроцлав',
+  // частые латинские опечатки/транслитерации
+  'warsawa': 'Варшава', 'warshawa': 'Варшава', 'warshava': 'Варшава',
+  'krakov': 'Краков', 'krakiv': 'Краков',
+  'lwow': 'Львов', 'lwów': 'Львов',
+
+  // Латиницей — в чатах релокантов часто пишут локальными именами
+  // Польша
+  'warszawa': 'Варшава', 'warsaw': 'Варшава',
+  'krakow': 'Краков', 'kraków': 'Краков',
+  'wroclaw': 'Вроцлав', 'wrocław': 'Вроцлав',
+  'gdansk': 'Гданьск', 'gdańsk': 'Гданьск',
+  'poznan': 'Познань', 'poznań': 'Познань',
+  'lodz': 'Лодзь', 'łódź': 'Лодзь',
+  'katowice': 'Катовице', 'lublin': 'Люблин',
+  'bialystok': 'Белосток', 'szczecin': 'Щецин',
+  'bydgoszcz': 'Быдгощ', 'torun': 'Торунь', 'toruń': 'Торунь',
+  'olsztyn': 'Ольштын', 'rzeszow': 'Жешув',
+  'czestochowa': 'Ченстохова', 'gdynia': 'Гдыня',
+  'sosnowiec': 'Сосновец', 'gliwice': 'Гливице',
+  // Украина
+  'kyiv': 'Киев', 'kiev': 'Киев',
+  'lviv': 'Львов', 'lvov': 'Львов',
+  'kharkiv': 'Харьков', 'kharkov': 'Харьков',
+  'odessa': 'Одесса', 'odesa': 'Одесса',
+  'dnipro': 'Днепр', 'zaporizhzhia': 'Запорожье',
+  'zhytomyr': 'Житомир', 'vinnytsia': 'Винница',
+  'ivano-frankivsk': 'Ивано-Франковск', 'ternopil': 'Тернополь',
+  'chernivtsi': 'Черновцы', 'uzhhorod': 'Ужгород', 'uzhorod': 'Ужгород',
+  'rivne': 'Ровно', 'lutsk': 'Луцк',
+  'khmelnytskyi': 'Хмельницкий', 'mykolaiv': 'Николаев',
+  'kherson': 'Херсон', 'poltava': 'Полтава',
+  'cherkasy': 'Черкассы', 'chernihiv': 'Чернигов', 'sumy': 'Сумы',
+  'mukachevo': 'Мукачево',
+  // Европа
+  'berlin': 'Берлин', 'munich': 'Мюнхен', 'munchen': 'Мюнхен',
+  'hamburg': 'Гамбург', 'frankfurt': 'Франкфурт',
+  'hannover': 'Ганновер', 'dresden': 'Дрезден',
+  'koln': 'Кёльн', 'köln': 'Кёльн', 'bremen': 'Бремен',
+  'stuttgart': 'Штутгарт', 'dusseldorf': 'Дюссельдорф',
+  'dortmund': 'Дортмунд', 'leipzig': 'Лейпциг',
+  'wien': 'Вена', 'prague': 'Прага', 'praha': 'Прага', 'brno': 'Брно',
+  'bratislava': 'Братислава', 'budapest': 'Будапешт',
+  'vilnius': 'Вильнюс', 'kaunas': 'Каунас', 'klaipeda': 'Клайпеда',
+  'riga': 'Рига', 'tallinn': 'Таллин',
+  'amsterdam': 'Амстердам', 'brussels': 'Брюссель',
+  'paris': 'Париж', 'london': 'Лондон',
+  'milan': 'Милан', 'milano': 'Милан', 'rome': 'Рим', 'roma': 'Рим',
+  'madrid': 'Мадрид', 'barcelona': 'Барселона',
 };
 
 const CITY_KEYS = Object.keys(CITY_FORMS).sort((a, b) => b.length - a.length);
@@ -115,25 +167,37 @@ const CITY_KEYS = Object.keys(CITY_FORMS).sort((a, b) => b.length - a.length);
 const OFFER_HINTS = [
   /возьму/i, /могу взять/i, /взять посылк/i, /могу передать/i, /везу/i,
   /везём/i, /везем/i, /везёт/i, /везет/i, /перевезу/i, /доставлю/i, /заберу/i,
-  /попутк/i, /попутно/i, /есть место/i, /свободн\w* мест\w*/i, /доставк/i,
+  /попутк/i, /попутно/i, /есть место/i, /место есть/i, /мест\w*\s+свободн/i, /свободн\w* мест\w*/i, /доставк/i,
   /перевозк/i, /перевоз/i, /груз/i, /погрузк/i, /загруж\w+\s*(?:сам|машину)/i,
   /выезжаю/i, /выезд\w*/i, /рейс/i, /маршрут/i, /бронь/i, /бронир/i,
   /могу забрать/i, /отвожу/i, /заряд/i,
+  /еду/i, /поеду/i, /беру/i, /отвез/i,
 ];
 
 const REQUEST_HINTS = [
   /нужно передать/i, /надо передать/i, /нужн\w* (?:передать|отправить|забрать)/i,
-  /ищу/i, /кто (?:может|возьм[её]т|перевез[её]т|привез[её]т)/i,
+  /ищу/i, /кто (?:может|возьм[её]т|перевез[её]т|привез[её]т|едет|поедет|летит|везет|везёт)/i,
   /может кто/i, /кто-нибудь/i, /помогите/i, /помож[её]т/i, /переслать/i,
   /передать посылк/i, /посылк\w* (?:передать|доставить)/i, /привезти/i,
   /подвезти/i, /нужн\w* (?:водитель|курьер)/i, /ищ[уе] (?:водителя|курьера|попутку)/i,
   /кто передаёт/i, /кто передает/i, /осталось передать/i, /помощь с передачей/i,
+  /передайте/i, /прошу/i, /необходим\w*\s*(?:передать|отправить|забрать)/i,
 ];
 
 const WEEKDAYS: Record<string, number> = {
   'понедельник': 1, 'вторник': 2, 'среда': 3, 'среду': 3, 'четверг': 4,
   'пятница': 5, 'пятницу': 5, 'суббота': 6, 'субботу': 6, 'воскресенье': 0, 'воскресенья': 0,
 };
+
+/** Названия месяцев (рус./укр.) по префиксу: «15 сентября», «5 жовтня». */
+const MONTHS: Array<[string, number]> = [
+  ['январ', 1], ['феврал', 2], ['март', 3], ['апрел', 4], ['ма[йея]', 5],
+  ['июн', 6], ['июл', 7], ['август', 8], ['сентябр', 9], ['октябр', 10],
+  ['ноябр', 11], ['декабр', 12],
+  ['січен', 1], ['лют', 2], ['березн', 3], ['квітн', 4], ['травн', 5],
+  ['черв', 6], ['лип', 7], ['серп', 8], ['вересн', 9], ['жовтн', 10],
+  ['листопад', 11], ['грудн', 12],
+];
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9\- ]/gi, ' ').replace(/\s+/g, ' ').trim();
@@ -160,7 +224,38 @@ function findCities(text: string): Array<{ city: string; index: number; end: num
   return found.sort((a, b) => a.index - b.index);
 }
 
-const SEPARATORS = /^(?:\s*(?:->|→|⇒|—|–|−|-|до|в|на|из|с|от)\s*(?:[а-яёa-z]{0,12}\s*)?)$/;
+const SEPARATORS = /^(?:\s*(?:->|=>|>>|→|⇒|—|–|−|-|до|в|на|из|с|от)\s*(?:[а-яёa-z]{0,12}\s*)?)$/;
+
+/**
+ * Каноническое имя города по любому написанию:
+ * «warsawa», «Warsaw», «Варшаве» → «Варшава».
+ * Используется в мастере /post и в форме сайта, чтобы одинаковые города
+ * в базе всегда были записаны одинаково (и поиск их находил).
+ * Неизвестный город возвращается очищенным, как ввели.
+ */
+export function normalizeCity(raw: string): string {
+  const clean = raw
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^\p{L}\- ]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return raw.trim();
+
+  const direct = CITY_FORMS[clean];
+  if (direct) return direct;
+
+  // «варшаве», «до кракова»: findCities допускает одну букву-окончание
+  const found = findCities(clean);
+  if (found.length > 0) return found[0]!.city;
+
+  // Неизвестный город: вернём с заглавной буквы, в разумных пределах
+  const capped = clean
+    .split(' ')
+    .map((w) => (w.length > 0 ? w[0]!.toUpperCase() + w.slice(1) : w))
+    .join(' ');
+  return capped.slice(0, 60);
+}
 
 /** Извлекает маршрут «Город A — Город B» из текста. */
 function extractRoute(text: string): { from: string; to: string } | null {
@@ -218,6 +313,22 @@ export function parseDate(text: string, now: Date = new Date()): string | null {
         // Если дата без года уже прошла — предполагаем следующий год (актуально для анонсов).
         if (!m[3] && candidate < startOfDay(now)) candidate.setFullYear(candidate.getFullYear() + 1);
         return toIso(candidate);
+      }
+    }
+  }
+
+  // «15 сентября», «5 жовтня» — число + название месяца
+  for (const [prefix, month] of MONTHS) {
+    const re = new RegExp(`(\\d{1,2})[^\\dа-яё]{0,3}${prefix}`);
+    const mm = lower.match(re);
+    if (mm) {
+      const day = parseInt(mm[1]!, 10);
+      if (day >= 1 && day <= 31) {
+        const candidate = new Date(now.getFullYear(), month - 1, day);
+        if (candidate.getDate() === day) {
+          if (candidate < startOfDay(now)) candidate.setFullYear(candidate.getFullYear() + 1);
+          return toIso(candidate);
+        }
       }
     }
   }
@@ -287,15 +398,15 @@ function detectIntent(text: string): 'offer' | 'request' | null {
   return offerScore > requestScore ? 'offer' : 'request';
 }
 
-/** Главная точка входа: разбор текста сообщения из чата. */
-export function parseTelegramMessage(text: string): ParsedMessage {
+/** Главная точка входа: разбор текста сообщения из чата. now передаётся в тестах. */
+export function parseTelegramMessage(text: string, now: Date = new Date()): ParsedMessage {
   const route = extractRoute(text);
   const intent = detectIntent(text) ?? (route ? 'offer' : null);
   return {
     intent,
     fromCity: route?.from ?? null,
     toCity: route?.to ?? null,
-    departureDate: parseDate(text),
+    departureDate: parseDate(text, now),
     weightKg: extractWeight(text),
     price: extractPrice(text),
     telegram: extractTelegram(text),
@@ -305,8 +416,8 @@ export function parseTelegramMessage(text: string): ParsedMessage {
 }
 
 /** Должен ли бот вообще реагировать на сообщение (нет маршрута и нет явных подсказок — игнор). */
-export function looksLikeListing(text: string): boolean {
-  const p = parseTelegramMessage(text);
+export function looksLikeListing(text: string, now: Date = new Date()): boolean {
+  const p = parseTelegramMessage(text, now);
   return p.intent !== null && (p.fromCity !== null || p.toCity !== null);
 }
 

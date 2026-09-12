@@ -5,6 +5,7 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 const state = {
   type: '',
+  archive: false,
   from: '',
   to: '',
   date: '',
@@ -15,12 +16,8 @@ const state = {
 
 let config = { siteName: 'попутка.', botUsername: null, botLink: null };
 
-/* Адрес воркера с API.
-   Пустая строка = API на том же домене (локальная разработка или один воркер с Assets).
-   Если Pages и Worker на разных доменах, укажите адрес воркера:
-   */
-   window.POPUTKA_API_BASE = "https://parcel.tgmg.workers.dev";
-
+/* Адрес API воркера задаётся в index.html (window.POPUTKA_API_BASE) до загрузки app.js:
+   пустая строка = API на том же домене, иначе — полный адрес воркера. */
 const API_BASE = (window.POPUTKA_API_BASE || '').replace(/\/+$/, '');
 
 async function api(path, options = {}) {
@@ -40,6 +37,7 @@ function el(tag, attrs = {}, children = []) {
     else node.setAttribute(k, v);
   }
   for (const child of children) {
+    if (child === null || child === undefined || child === false) continue;
     node.append(typeof child === 'string' ? document.createTextNode(child) : child);
   }
   return node;
@@ -100,10 +98,50 @@ function sourceLabel(l) {
   return 'с сайта';
 }
 
+/* ---------- скопировать ссылку на объявление ---------- */
+
+/* Ссылка ведёт на воркер: там /item/:id отдаёт страницу с OG-разметкой,
+   поэтому в мессенджерах появляется превью с маршрутом и описанием. */
+function shareUrlFor(l) {
+  // Делимся всегда главным доменом — с какого бы адреса ни открыли доску
+  return `https://pop-utka.app/item/${l.id}`;
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch { /* попробуем резервный способ */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function copyListingLink(l) {
+  const url = shareUrlFor(l);
+  const ok = await copyToClipboard(url);
+  if (ok) {
+    toast('Ссылка скопирована — вставьте в любой чат.');
+    return;
+  }
+  // последний шанс: показать ссылку в окне, откуда её можно скопировать руками
+  window.prompt('Скопируйте ссылку:', url);
+}
+
 /* ---------- роутинг ---------- */
 
 function showView(name) {
-  for (const v of ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy']) {
+  for (const v of ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy', 'admin']) {
     $(`#view-${v}`).hidden = v !== name;
   }
   const navOn = name === 'how' ? '#/how' : name === 'bot' ? '#/bot' : name === 'list' || name === 'item' ? '#/' : null;
@@ -118,6 +156,7 @@ function showView(name) {
     privacy: 'попутка. политика приватности',
     new: 'попутка. новое объявление',
     item: 'попутка. объявление',
+    admin: 'попутка. админ',
   };
   document.title = titles[name] ?? titles.list;
   window.scrollTo({ top: 0 });
@@ -131,6 +170,7 @@ function parseHash() {
   if (parts[0] === 'bot') return { view: 'bot' };
   if (parts[0] === 'terms') return { view: 'terms' };
   if (parts[0] === 'privacy') return { view: 'privacy' };
+  if (parts[0] === 'admin') return { view: 'admin' };
   return { view: 'list' };
 }
 
@@ -141,6 +181,7 @@ async function route() {
   else if (r.view === 'bot') showView('bot');
   else if (r.view === 'terms') showView('terms');
   else if (r.view === 'privacy') showView('privacy');
+  else if (r.view === 'admin') { showView('admin'); await loadAdmin(); }
   else if (r.view === 'item') { showView('item'); await loadDetail(r.id); }
   else { showView('list'); await loadList(true); }
 }
@@ -167,13 +208,17 @@ function buildRow(l) {
         el('span', { class: 'src', text: sourceLabel(l) }),
       ].filter(Boolean)),
     ]),
-    el('div', { class: 'row-side' }, [
-      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-      contact
-        ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
-        : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
-      el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
-    ]),
+ el('div', { class: 'row-side' }, [
+   el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+   (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso()))
+     ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
+     : null,
+   contact
+   ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
+   : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
+   el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
+   el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
+ ].filter(Boolean)),
   ]);
 
   const open = () => { location.hash = `#/item/${l.id}`; };
@@ -190,6 +235,7 @@ function buildRow(l) {
 async function loadList(reset = false) {
   if (reset) state.page = 1;
   const params = new URLSearchParams();
+  if (state.archive) params.set('archive', '1');
   if (state.type) params.set('type', state.type);
   if (state.from) params.set('from', state.from);
   if (state.to) params.set('to', state.to);
@@ -211,7 +257,13 @@ async function loadList(reset = false) {
     for (const l of data.items) listEl.append(buildRow(l));
 
     $('#total-count').textContent = `${state.total} ${plural(state.total, 'объявление', 'объявления', 'объявлений')}`;
-    $('#list-empty').hidden = !(state.total === 0);
+    $('#list-empty').hidden = !(state.total === 0 && !state.archive);
+    if (state.archive && state.total === 0) {
+      listEl.append(el('p', {
+        class: 'empty-note',
+        text: 'В архиве пока пусто. Заявки попадают сюда на следующий день после даты выезда и живут месяц.',
+      }));
+    }
     $('#load-more').hidden = !state.hasMore;
 
     if (data.counts) {
@@ -229,7 +281,13 @@ function bindBoard() {
     tab.addEventListener('click', () => {
       $$('.tab').forEach((t) => t.classList.remove('on'));
       tab.classList.add('on');
-      state.type = tab.dataset.type;
+      if (tab.dataset.type === 'archive') {
+        state.archive = true;
+        state.type = '';
+      } else {
+        state.archive = false;
+        state.type = tab.dataset.type;
+      }
       loadList(true);
     });
   });
@@ -271,6 +329,11 @@ function bindBoard() {
   });
 }
 
+/* Сегодняшняя дата YYYY-MM-DD по Москве/Минску (UTC+3) — день выезда сравниваем с ней */
+function mskTodayIso() {
+  return new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 /* ---------- карточка ---------- */
 
 async function loadDetail(id) {
@@ -280,6 +343,10 @@ async function loadDetail(id) {
     const res = await api(`/api/listings/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error('not found');
     const { item: l } = await res.json();
+    // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
+    const archived =
+      l.status === 'expired' ||
+      (l.departureDate != null && l.departureDate < mskTodayIso());
 
     const contact = contactInfo(l);
     const actions = [];
@@ -300,6 +367,13 @@ async function loadDetail(id) {
         href: `#/item/${l.id}`,
         onclick: (e) => { e.preventDefault(); openReport(l.id); },
         text: 'пожаловаться',
+      })
+    );
+    actions.push(
+      el('button', {
+        class: 'btn btn-line btn-lg',
+        text: 'скопировать ссылку',
+        onclick: () => copyListingLink(l),
       })
     );
 
@@ -344,8 +418,15 @@ async function loadDetail(id) {
           el('span', { class: 'r-to', text: l.toCity }),
         ]),
         el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+        ...(archived ? [el('span', { class: 'stamp stamp-expired', text: 'архив' })] : []),
       ]),
       el('div', { class: 'd-meta' }, cells),
+      ...(archived
+        ? [el('p', {
+            class: 'd-note',
+            text: 'Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
+          })]
+        : []),
       el('p', { class: 'd-desc', text: l.description }),
       el('div', { class: 'd-actions' }, actions),
       el('p', {
@@ -437,6 +518,236 @@ function bindForm() {
   });
 }
 
+/* ---------- админ-панель ---------- */
+
+const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
+let adminTab = 'pending'; // 'pending' | 'board'
+let adminEditId = null; // id заявки, открытой на редактирование
+
+function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
+
+async function adminApi(path, options = {}) {
+  return api(path, {
+    ...options,
+    headers: { Authorization: `Bearer ${adminKey()}`, ...(options.headers || {}) },
+  });
+}
+
+function adminCard(l, mode = 'pending') {
+  const contact = contactInfo(l);
+  const meta = [
+    el('span', { text: ago(l.publishedAt || l.createdAt) }),
+    l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
+    l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
+    l.price ? el('span', { class: 'mono', text: l.price }) : null,
+    el('span', { class: 'src', text: sourceLabel(l) }),
+  ];
+  const editBtn = el('button', {
+    class: 'btn btn-line btn-sm',
+    text: adminEditId === l.id ? 'закрыть' : 'редактировать',
+    onclick: () => { adminEditId = adminEditId === l.id ? null : l.id; loadAdmin(); },
+  });
+  const actions = mode === 'pending'
+    ? [
+        el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
+        el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
+        editBtn,
+      ]
+    : [
+        editBtn,
+        l.status === 'expired'
+          ? el('button', { class: 'btn btn-ink btn-sm', text: 'на доску', onclick: () => adminSetStatus(l.id, 'published') })
+          : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
+        el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
+      ];
+  return el('article', { class: 'admin-card' }, [
+    el('h3', { class: 'route-line' }, [
+      l.fromCity,
+      el('span', { class: 'r-arrow', text: '→' }),
+      el('span', { class: 'r-to', text: l.toCity }),
+      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
+    ].filter(Boolean)),
+    el('div', { class: 'meta-line' }, [
+      ...meta,
+      mode === 'board' ? el('span', { text: `${l.views || 0} ${plural(l.views || 0, 'просмотр', 'просмотра', 'просмотров')}` }) : null,
+      el('span', { class: 'mono', text: `№ ${l.id.slice(0, 8)}` }),
+    ].filter(Boolean)),
+    el('p', { class: 'desc', text: l.description }),
+    contact
+      ? el('p', { class: 'admin-contact' }, [
+          'контакт: ',
+          el('a', { href: contact.href, target: '_blank', rel: 'noopener', text: contact.label }),
+        ])
+      : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
+    ...(adminEditId === l.id ? [adminEditForm(l)] : []),
+    el('div', { class: 'admin-card-actions' }, actions),
+  ]);
+}
+
+/* Форма редактирования заявки: те же поля, что и на сайте. */
+function adminEditForm(l) {
+  const field = (labelText, control) =>
+    el('label', { class: 'field' }, [el('span', { class: 'label', text: labelText }), control]);
+  const input = (name, value, attrs = {}) =>
+    el('input', { class: 'q', name, value: value ?? '', ...attrs });
+
+  const form = el('form', { class: 'admin-edit' }, [
+    el('div', { class: 'row2' }, [
+      field('Тип', el('select', { class: 'q', name: 'type' }, [
+        el('option', { value: 'offer', ...(l.type === 'offer' ? { selected: true } : {}), text: 'водитель везёт' }),
+        el('option', { value: 'request', ...(l.type === 'request' ? { selected: true } : {}), text: 'нужно передать' }),
+      ])),
+      field('Дата выезда', input('departureDate', l.departureDate ?? '', { type: 'date' })),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Откуда', input('fromCity', l.fromCity)),
+      field('Куда', input('toCity', l.toCity)),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Вес, кг', input('weightKg', l.weightKg ?? '', { type: 'number', min: '0.1', max: '1000', step: '0.1' })),
+      field('Цена', input('price', l.price ?? '')),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Telegram', input('telegram', l.telegram ?? '')),
+      field('Телефон', input('phone', l.phone ?? '')),
+    ]),
+    field('Описание', el('textarea', { class: 'q', name: 'description', rows: '3' }, [l.description])),
+    el('div', { class: 'admin-card-actions' }, [
+      el('button', { class: 'btn btn-ink btn-sm', type: 'submit', text: 'сохранить' }),
+      el('button', { class: 'btn btn-line btn-sm', type: 'button', text: 'отмена', onclick: () => { adminEditId = null; loadAdmin(); } }),
+    ]),
+  ]);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = {
+      type: fd.get('type'),
+      fromCity: fd.get('fromCity'),
+      toCity: fd.get('toCity'),
+      departureDate: fd.get('departureDate') || null,
+      weightKg: fd.get('weightKg') ? Number(fd.get('weightKg')) : null,
+      price: fd.get('price') || null,
+      description: fd.get('description'),
+      telegram: fd.get('telegram') || null,
+      phone: fd.get('phone') || null,
+    };
+    try {
+      const res = await adminApi(`/api/admin/listings/${encodeURIComponent(l.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Ошибка');
+      adminEditId = null;
+      toast('Сохранено.');
+      await loadAdmin();
+    } catch (ex) {
+      toast(`Не сохранилось: ${ex.message}`);
+    }
+  });
+  return form;
+}
+
+async function loadAdmin() {
+  if (!adminKey()) {
+    $('#admin-login').hidden = false;
+    $('#admin-panel').hidden = true;
+    return;
+  }
+  $('#admin-login').hidden = true;
+  $('#admin-panel').hidden = false;
+  $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
+  try {
+    const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
+    if (res.status === 401) {
+      localStorage.removeItem(ADMIN_KEY_STORAGE);
+      $('#admin-login').hidden = false;
+      $('#admin-panel').hidden = true;
+      const err = $('#admin-err');
+      err.textContent = 'Ключ неверный или ADMIN_API_TOKEN не задан в воркере.';
+      err.hidden = false;
+      return;
+    }
+    if (!res.ok) throw new Error('network');
+    const { items } = await res.json();
+    $('#admin-count').textContent = adminTab === 'pending'
+      ? (items.length === 0
+          ? '✅ Необработанных заявок нет.'
+          : `⏳ Необработано заявок: ${items.length}`)
+      : (items.length === 0
+          ? 'На доске пока пусто.'
+          : `На доске: ${items.length} — действующие и архив`);
+    const listEl = $('#admin-list');
+    listEl.replaceChildren();
+    if (items.length === 0) {
+      listEl.append(el('p', {
+        class: 'empty-note',
+        text: adminTab === 'pending' ? 'Очередь пуста. Новые заявки появятся здесь.' : 'На доске ничего нет.',
+      }));
+    } else {
+      for (const l of items) listEl.append(adminCard(l, adminTab));
+    }
+  } catch {
+    $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
+  }
+}
+
+async function adminDelete(id) {
+  if (!window.confirm('Удалить объявление навсегда? Вместе с жалобами.')) return;
+  try {
+    const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/delete`, { method: 'POST' });
+    if (!res.ok) throw new Error();
+    toast('Удалено.');
+    await loadAdmin();
+  } catch {
+    toast('Не получилось удалить. Попробуйте ещё раз.');
+  }
+}
+
+function switchAdminTab(tab) {
+  adminTab = tab;
+  $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
+  $('#admin-tab-board').classList.toggle('on', tab === 'board');
+  loadAdmin();
+}
+
+async function adminSetStatus(id, status) {
+  try {
+    const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error();
+    const labels = { published: 'Опубликовано.', rejected: 'Отклонено.', expired: 'Отправлено в архив.' };
+    toast(labels[status] || 'Готово.');
+    await loadAdmin();
+  } catch {
+    toast('Не получилось. Попробуйте ещё раз.');
+  }
+}
+
+function bindAdmin() {
+  $('#admin-tab-pending').addEventListener('click', () => switchAdminTab('pending'));
+  $('#admin-tab-board').addEventListener('click', () => switchAdminTab('board'));
+  $('#admin-key-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const key = $('#admin-key').value.trim();
+    if (!key) return;
+    localStorage.setItem(ADMIN_KEY_STORAGE, key);
+    loadAdmin();
+  });
+  $('#admin-refresh').addEventListener('click', () => loadAdmin());
+  $('#admin-logout').addEventListener('click', () => {
+    localStorage.removeItem(ADMIN_KEY_STORAGE);
+    $('#admin-key').value = '';
+    loadAdmin();
+  });
+}
+
 /* ---------- шапка и прочее ---------- */
 
 function setToday() {
@@ -448,6 +759,16 @@ async function init() {
   setToday();
   bindBoard();
   bindForm();
+  bindAdmin();
+
+  // Глубокая ссылка с SEO-страницы маршрута: /?from=Варшава&to=Львов#/
+  try {
+    const qp = new URLSearchParams(location.search);
+    const from = qp.get('from');
+    const to = qp.get('to');
+    if (from) { state.from = from; $('#f-from').value = from; }
+    if (to) { state.to = to; $('#f-to').value = to; }
+  } catch { /* ничего страшного */ }
 
   try {
     const res = await api('/api/config');

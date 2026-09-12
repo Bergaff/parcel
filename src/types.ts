@@ -2,6 +2,8 @@
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
+  /** Доступ к статическим файлам из public/ без сетевого запроса (для OG-шрифтов). */
+  ASSETS: Fetcher;
   BOT_TOKEN?: string;
   BOT_SECRET?: string;
   ADMIN_IDS?: string;
@@ -43,6 +45,8 @@ export interface Listing extends ListingInput {
 
 export interface ListFilters {
   type?: ListingType;
+  /** true — архив: заявки с прошедшей датой (статус expired или published с прошлой датой). */
+  archive?: boolean;
   from?: string;
   to?: string;
   date?: string;

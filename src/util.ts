@@ -38,6 +38,18 @@ export function sanitizeCity(s: unknown): string | null {
   return clean;
 }
 
+/** Название города — кириллицей: у нас русскоговорящая аудитория,
+ *  и города в базе должны быть записаны единообразно (иначе поиск не найдёт). */
+export function isRussianCity(s: string): boolean {
+  return /^[А-Яа-яЁё][А-Яа-яЁё\s-]*$/.test(s.trim());
+}
+
+/** Сегодняшняя дата YYYY-MM-DD по Москве/Минску (UTC+3) —
+ *  с ней сравнивается дата выезда заявки. */
+export function mskTodayIso(): string {
+  return new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 export function sanitizeContact(s: unknown): string | null {
   if (typeof s !== 'string') return null;
   const clean = s.trim();
