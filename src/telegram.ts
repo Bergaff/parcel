@@ -237,11 +237,9 @@ function searchLine(env: Env, l: Listing, today: string): string {
 
 async function cmdSearch(env: Env, chatId: number, query: string): Promise<void> {
   const raw = query.trim();
-  // Правило доски: города пишут по-русски — объявляем об этом в каждом ответе поиска
-  const rule = '\n\n✍️ Города у нас — по-русски: /поиск Минск, /поиск Варшава.';
   if (raw.length < 2) {
     await sendText(env, chatId,
-      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.' + rule);
+      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.');
     return;
   }
   // Знакомое латинское написание переводим сами и говорим об этом,
@@ -270,7 +268,7 @@ async function cmdSearch(env: Env, chatId: number, query: string): Promise<void>
     const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
     await sendText(env, chatId,
       `${hint}По запросу «${escapeHtml(q)}» ничего нет.\n` +
-      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}` + rule);
+      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}`);
     return;
   }
   const today = mskTodayIso();
@@ -287,7 +285,6 @@ async function cmdSearch(env: Env, chatId: number, query: string): Promise<void>
     for (const l of requests.slice(0, 10)) chunks.push(searchLine(env, l, today));
     if (requests.length > 10) chunks.push(`…и ещё ${requests.length - 10}`);
   }
-  if (!hint) chunks.push(rule.trimStart());
   await sendText(env, chatId, chunks.join('\n'));
 }
 

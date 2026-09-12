@@ -37,6 +37,7 @@ function el(tag, attrs = {}, children = []) {
     else node.setAttribute(k, v);
   }
   for (const child of children) {
+    if (child === null || child === undefined || child === false) continue;
     node.append(typeof child === 'string' ? document.createTextNode(child) : child);
   }
   return node;
@@ -102,8 +103,8 @@ function sourceLabel(l) {
 /* Ссылка ведёт на воркер: там /item/:id отдаёт страницу с OG-разметкой,
    поэтому в мессенджерах появляется превью с маршрутом и описанием. */
 function shareUrlFor(l) {
-  const base = (API_BASE === '' ? location.origin : API_BASE).replace(/\/+$/, '');
-  return `${base}/item/${l.id}`;
+  // Делимся всегда главным доменом — с какого бы адреса ни открыли доску
+  return `https://pop-utka.app/item/${l.id}`;
 }
 
 async function copyToClipboard(text) {
@@ -217,7 +218,7 @@ function buildRow(l) {
    : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
    el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
    el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
- ]),
+ ].filter(Boolean)),
   ]);
 
   const open = () => { location.hash = `#/item/${l.id}`; };
