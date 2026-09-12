@@ -29,7 +29,7 @@ SITE_URL = "https://pop-utka.app"           # основной домен сай
 directory = "./public"
 not_found_handling = "404-page"
 binding = "ASSETS"
-run_worker_first = ["/item/*", "/og/*", "/og-debug/*"]
+run_worker_first = ["/item/*", "/og/*", "/og-debug/*", "/r/*", "/routes", "/sitemap.xml"]
 
 # База объявлений.
 [[d1_databases]]

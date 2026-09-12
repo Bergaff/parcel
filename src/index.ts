@@ -5,6 +5,7 @@ import { addReport, archiveExpired, createListing, deleteListing, getCounts, get
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
+import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml } from './seo-routes';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -260,6 +261,26 @@ app.get('/item/:id', async (c) => {
   </div>
 </body>
 </html>`);
+});
+
+/* ---------------- SEO-страницы маршрутов ---------------- */
+/* Статичные страницы под запросы «передать посылку Варшава → Львов»:
+   текст + живые заявки по маршруту. Список маршрутов — src/seo-routes.ts. */
+app.get('/r/:slug', async (c) => {
+  const origin = new URL(c.req.url).origin;
+  const html = await buildRoutePage(c.env, c.req.param('slug'), origin);
+  if (!html) return c.redirect('/');
+  return c.html(html);
+});
+
+app.get('/routes', (c) => {
+  return c.html(buildRoutesIndexPage(new URL(c.req.url).origin));
+});
+
+/* Динамическая карта сайта: главная, страницы маршрутов, активные объявления. */
+app.get('/sitemap.xml', async (c) => {
+  const xml = await buildSitemapXml(c.env, new URL(c.req.url).origin);
+  return new Response(xml, { headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
 });
 
 /* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере

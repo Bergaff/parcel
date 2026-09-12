@@ -761,6 +761,15 @@ async function init() {
   bindForm();
   bindAdmin();
 
+  // Глубокая ссылка с SEO-страницы маршрута: /?from=Варшава&to=Львов#/
+  try {
+    const qp = new URLSearchParams(location.search);
+    const from = qp.get('from');
+    const to = qp.get('to');
+    if (from) { state.from = from; $('#f-from').value = from; }
+    if (to) { state.to = to; $('#f-to').value = to; }
+  } catch { /* ничего страшного */ }
+
   try {
     const res = await api('/api/config');
     config = await res.json();
