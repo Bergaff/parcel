@@ -503,6 +503,7 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
+let adminTab = 'pending'; // 'pending' | 'board'
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -513,21 +514,35 @@ async function adminApi(path, options = {}) {
   });
 }
 
-function adminCard(l) {
+function adminCard(l, mode = 'pending') {
   const contact = contactInfo(l);
+  const meta = [
+    el('span', { text: ago(l.publishedAt || l.createdAt) }),
+    l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
+    l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
+    l.price ? el('span', { class: 'mono', text: l.price }) : null,
+    el('span', { class: 'src', text: sourceLabel(l) }),
+  ];
+  const actions = mode === 'pending'
+    ? [
+        el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
+        el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
+      ]
+    : [
+        el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
+      ];
   return el('article', { class: 'admin-card' }, [
     el('h3', { class: 'route-line' }, [
       l.fromCity,
       el('span', { class: 'r-arrow', text: '→' }),
       el('span', { class: 'r-to', text: l.toCity }),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-    ]),
+      l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
+    ].filter(Boolean)),
     el('div', { class: 'meta-line' }, [
-      el('span', { text: ago(l.createdAt) }),
-      l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
-      l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
-      l.price ? el('span', { class: 'mono', text: l.price }) : null,
-      el('span', { class: 'src', text: sourceLabel(l) }),
+      ...meta,
+      mode === 'board' ? el('span', { text: `${l.views || 0} ${plural(l.views || 0, 'просмотр', 'просмотра', 'просмотров')}` }) : null,
+      el('span', { class: 'mono', text: `№ ${l.id.slice(0, 8)}` }),
     ].filter(Boolean)),
     el('p', { class: 'desc', text: l.description }),
     contact
@@ -536,10 +551,7 @@ function adminCard(l) {
           el('a', { href: contact.href, target: '_blank', rel: 'noopener', text: contact.label }),
         ])
       : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
-    el('div', { class: 'admin-card-actions' }, [
-      el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
-      el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
-    ]),
+    el('div', { class: 'admin-card-actions' }, actions),
   ]);
 }
 
@@ -553,7 +565,7 @@ async function loadAdmin() {
   $('#admin-panel').hidden = false;
   $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
   try {
-    const res = await adminApi('/api/admin/pending');
+    const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
     if (res.status === 401) {
       localStorage.removeItem(ADMIN_KEY_STORAGE);
       $('#admin-login').hidden = false;
@@ -565,19 +577,45 @@ async function loadAdmin() {
     }
     if (!res.ok) throw new Error('network');
     const { items } = await res.json();
-    $('#admin-count').textContent = items.length === 0
-      ? '✅ Необработанных заявок нет.'
-      : `⏳ Необработано заявок: ${items.length}`;
+    $('#admin-count').textContent = adminTab === 'pending'
+      ? (items.length === 0
+          ? '✅ Необработанных заявок нет.'
+          : `⏳ Необработано заявок: ${items.length}`)
+      : (items.length === 0
+          ? 'На доске пока пусто.'
+          : `На доске: ${items.length} — действующие и архив`);
     const listEl = $('#admin-list');
     listEl.replaceChildren();
     if (items.length === 0) {
-      listEl.append(el('p', { class: 'empty-note', text: 'Очередь пуста. Новые заявки появятся здесь.' }));
+      listEl.append(el('p', {
+        class: 'empty-note',
+        text: adminTab === 'pending' ? 'Очередь пуста. Новые заявки появятся здесь.' : 'На доске ничего нет.',
+      }));
     } else {
-      for (const l of items) listEl.append(adminCard(l));
+      for (const l of items) listEl.append(adminCard(l, adminTab));
     }
   } catch {
     $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
   }
+}
+
+async function adminDelete(id) {
+  if (!window.confirm('Удалить объявление навсегда? Вместе с жалобами.')) return;
+  try {
+    const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/delete`, { method: 'POST' });
+    if (!res.ok) throw new Error();
+    toast('Удалено.');
+    await loadAdmin();
+  } catch {
+    toast('Не получилось удалить. Попробуйте ещё раз.');
+  }
+}
+
+function switchAdminTab(tab) {
+  adminTab = tab;
+  $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
+  $('#admin-tab-board').classList.toggle('on', tab === 'board');
+  loadAdmin();
 }
 
 async function adminSetStatus(id, status) {
@@ -596,6 +634,8 @@ async function adminSetStatus(id, status) {
 }
 
 function bindAdmin() {
+  $('#admin-tab-pending').addEventListener('click', () => switchAdminTab('pending'));
+  $('#admin-tab-board').addEventListener('click', () => switchAdminTab('board'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();

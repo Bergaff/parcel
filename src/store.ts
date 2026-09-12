@@ -133,6 +133,34 @@ export async function archiveExpired(env: Env): Promise<{ archived: number; dele
   return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0 };
 }
 
+/** Заявка по префиксу id (от 4 символов): «a1b2» из «№ A1B2» на сайте,
+ *  короткий id из сообщения бота (#a1b2c3d4) или полный uuid из ссылки. */
+export async function findByIdPrefix(env: Env, prefix: string): Promise<Listing[]> {
+  const clean = prefix.toLowerCase().replace(/[^0-9a-f-]/g, '');
+  if (clean.length < 4 || clean.length > 36) return [];
+  const res = await env.DB.prepare('SELECT * FROM listings WHERE id LIKE ?').bind(`${clean}%`).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Заявки на доске (действующие + архив) — для админ-панели сайта. */
+export async function listAdminBoard(env: Env, limit = 200): Promise<Listing[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ('published', 'expired')
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Полное удаление заявки (админ-панель): вместе с жалобами и отметками обработанных сообщений. */
+export async function deleteListing(env: Env, id: string): Promise<boolean> {
+  const res = await env.DB.batch([
+    env.DB.prepare('DELETE FROM reports WHERE listing_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM tg_seen WHERE listing_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM listings WHERE id = ?').bind(id),
+  ]);
+  return Number(res[2]?.meta.changes ?? 0) > 0;
+}
+
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
   if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };

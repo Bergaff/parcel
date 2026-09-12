@@ -1,9 +1,10 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
 import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity } from './parser';
 import {
-  createListing, getListingById, listPending, markSeen, searchByCity, setSeenListing, updateListingStatus,
+  addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
+  searchByCity, setSeenListing, updateListingStatus,
 } from './store';
-import { admins, escapeHtml, normalizeTelegram, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
+import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -294,6 +295,105 @@ function isSearchCommand(text: string): boolean {
   return /^\/(search|поиск|серч)(@\w+)?(\s|$)/i.test(text);
 }
 
+/* ------------------------------------------------------------------ */
+/* Жалоба: /репорт, /report, /жалоба                                   */
+/* ------------------------------------------------------------------ */
+
+function isReportCommand(text: string): boolean {
+  return /^\/(report|репорт|жалоба)(@\w+)?(\s|$)/i.test(text);
+}
+
+const REPORT_HINT =
+  '<b>Пожаловаться</b>\n\n' +
+  '• на объявление — номер заявки или ссылку:\n' +
+  '<code>/репорт a1b2c3d4</code> — номер из сообщения бота или «№» на сайте\n' +
+  '<code>/репорт https://…/item/…</code> — скопированная ссылка на карточку\n' +
+  '• на что угодно другое — просто напишите текстом:\n' +
+  '<code>/репорт человек просит предоплату и пропадает</code>';
+
+/** Достаём из аргумента номер заявки: ссылка …/item/<id>, «#a1b2c3d4» или голый id. */
+function extractListingId(arg: string): { id: string; reason: string } | null {
+  const parts = arg.split(/\s+/);
+  const first = (parts[0] ?? '').replace(/^#/, '');
+  const link = arg.match(/item\/([0-9a-fA-F-]{4,36})/);
+  if (link) {
+    return {
+      id: link[1]!.toLowerCase(),
+      reason: arg.replace(link[0], '').replace(/\s+/g, ' ').trim().slice(0, 500),
+    };
+  }
+  if (/^[0-9a-fA-F-]{4,36}$/.test(first)) {
+    return { id: first.toLowerCase(), reason: parts.slice(1).join(' ').slice(0, 500) };
+  }
+  return null;
+}
+
+async function cmdReport(env: Env, msg: TgMessage, query: string): Promise<void> {
+  const chatId = msg.chat.id;
+  const arg = query.trim();
+  if (!arg) {
+    await sendText(env, chatId, REPORT_HINT);
+    return;
+  }
+
+  // Не чаще 5 жалоб в час с одного аккаунта
+  const rl = await rateLimit(env, `tg-report:${msg.from?.id ?? chatId}`, 5, 3600);
+  if (!rl.allowed) {
+    await sendText(env, chatId, 'Слишком много жалоб подряд. Подождите немного и попробуйте снова.');
+    return;
+  }
+
+  const target = extractListingId(arg);
+  if (target) {
+    const matches = await findByIdPrefix(env, target.id);
+    if (matches.length === 0) {
+      await sendText(env, chatId,
+        `Заявку с номером «${escapeHtml(target.id)}» не нашёл. ` +
+        'На сайте у объявления есть кнопка «скопировать ссылку» — пришлите её.');
+      return;
+    }
+    if (matches.length > 1) {
+      await sendText(env, chatId,
+        `Под номером «${escapeHtml(target.id)}» несколько заявок. Пришлите полную ссылку на карточку, чтобы я понял, о какой речь.`);
+      return;
+    }
+    const l = matches[0]!;
+    const res = await addReport(env, l.id, target.reason || 'жалоба через бота', `telegram:${msg.from?.id ?? chatId}`);
+    if (!res.ok) {
+      await sendText(env, chatId, 'Эта заявка уже не на доске (в архиве или удалена) — жаловаться не на что.');
+      return;
+    }
+    await notifyAdminsReport(env, l, target.reason || 'жалоба через бота', res.count);
+    await sendText(env, chatId,
+      res.autoRejected
+        ? 'Жалоба принята — объявление скрыто автоматически (набралось 3 жалобы).'
+        : `Жалоба на «${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}» отправлена модераторам. Спасибо.`);
+    return;
+  }
+
+  // Не похоже на номер заявки — свободная жалоба, пересылаем админам как есть
+  const text = sanitizeText(arg, 2000);
+  if (!text || text.length < 3) {
+    await sendText(env, chatId, REPORT_HINT);
+    return;
+  }
+  const from = msg.from;
+  const who = [
+    from?.first_name ? escapeHtml(from.first_name) : null,
+    from?.username ? `@${escapeHtml(from.username)}` : null,
+    from ? `id ${from.id}` : null,
+  ].filter(Boolean).join(' ');
+  const where = msg.chat.type === 'private'
+    ? 'личка бота'
+    : `${escapeHtml(msg.chat.title ?? msg.chat.type)} (${chatId})`;
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `⚠️ <b>Жалоба (не по заявке)</b>\nОт: ${who}\nГде: ${where}\n\n${escapeHtml(text)}`
+    ).catch(() => undefined);
+  }
+  await sendText(env, chatId, 'Передал администраторам, спасибо.');
+}
+
 /** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
 async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
   const p = parseTelegramMessage(text);
@@ -339,6 +439,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `Привет! Я бот доски попутных передач.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
           `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
+          `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
@@ -401,6 +502,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/поиск':
       case '/серч': {
         await cmdSearch(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
+      case '/report':
+      case '/репорт':
+      case '/жалоба': {
+        await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:
@@ -539,6 +646,11 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // /поиск, /search, /серч работают и в группах
   if (isSearchCommand(text)) {
     await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
+    return;
+  }
+  // /репорт, /report, /жалоба — тоже
+  if (isReportCommand(text)) {
+    await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
     return;
   }
   if (text.length < 10 || text.length > 4000) return;

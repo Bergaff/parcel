@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, getCounts, getListingById, listListings, updateListingStatus } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, getCounts, getListingById, listAdminBoard, listListings, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -315,6 +315,22 @@ app.post('/api/admin/listings/:id/status', async (c) => {
     return c.json({ error: 'status должен быть published или rejected' }, 400);
   }
   const ok = await updateListingStatus(c.env, c.req.param('id'), body.status as 'published' | 'rejected');
+  if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+/* Список заявок для админ-панели: tab=pending (очередь модерации)
+   или tab=board (всё, что на доске, включая архив). */
+app.get('/api/admin/listings', async (c) => {
+  const items = c.req.query('tab') === 'board'
+    ? await listAdminBoard(c.env, 200)
+    : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
+  return c.json({ items });
+});
+
+/* Полное удаление заявки (вместе с жалобами) — админ-панель сайта. */
+app.post('/api/admin/listings/:id/delete', async (c) => {
+  const ok = await deleteListing(c.env, c.req.param('id'));
   if (!ok) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
 });
