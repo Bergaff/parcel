@@ -151,6 +151,30 @@ export async function listAdminBoard(env: Env, limit = 200): Promise<Listing[]> 
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
+/** Редактирование заявки в админ-панели: обновляет поля и возвращает обновлённую заявку. */
+export async function updateListing(
+  env: Env,
+  id: string,
+  patch: Partial<Pick<ListingInput,
+    'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
+): Promise<Listing | null> {
+  const res = await env.DB.prepare(
+    `UPDATE listings SET
+       type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
+       price = ?, description = ?, telegram = ?, phone = ?
+     WHERE id = ?`
+  ).bind(
+    patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
+    patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
+    patch.description ?? '', patch.telegram ?? null, patch.phone ?? null, id
+  ).run();
+  if ((res.meta.changes ?? 0) === 0) return null;
+  const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
+    | Record<string, unknown>
+    | null;
+  return row ? mapRow(row) : null;
+}
+
 /** Полное удаление заявки (админ-панель): вместе с жалобами и отметками обработанных сообщений. */
 export async function deleteListing(env: Env, id: string): Promise<boolean> {
   const res = await env.DB.batch([

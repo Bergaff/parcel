@@ -476,5 +476,9 @@ button { font-family: inherit; }
 .admin-card .route-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
 .admin-card .desc { margin: 8px 0; }
 .admin-contact { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
-.admin-card-actions { display: flex; gap: 10px; }
+.admin-card-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.admin-edit { border-top: 1.5px dashed var(--line); margin-top: 12px; padding-top: 14px; display: grid; gap: 10px; }
+.admin-edit .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.admin-edit textarea { width: 100%; resize: vertical; }
+@media (max-width: 640px) { .admin-edit .row2 { grid-template-columns: 1fr; } }
 .admin-actions { display: flex; gap: 18px; align-items: center; margin-top: 20px; }

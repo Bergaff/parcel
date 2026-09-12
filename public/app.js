@@ -504,6 +504,7 @@ function bindForm() {
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
 let adminTab = 'pending'; // 'pending' | 'board'
+let adminEditId = null; // id заявки, открытой на редактирование
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -523,12 +524,22 @@ function adminCard(l, mode = 'pending') {
     l.price ? el('span', { class: 'mono', text: l.price }) : null,
     el('span', { class: 'src', text: sourceLabel(l) }),
   ];
+  const editBtn = el('button', {
+    class: 'btn btn-line btn-sm',
+    text: adminEditId === l.id ? 'закрыть' : 'редактировать',
+    onclick: () => { adminEditId = adminEditId === l.id ? null : l.id; loadAdmin(); },
+  });
   const actions = mode === 'pending'
     ? [
         el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
         el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
+        editBtn,
       ]
     : [
+        editBtn,
+        l.status === 'expired'
+          ? el('button', { class: 'btn btn-ink btn-sm', text: 'на доску', onclick: () => adminSetStatus(l.id, 'published') })
+          : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
         el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
       ];
   return el('article', { class: 'admin-card' }, [
@@ -551,8 +562,75 @@ function adminCard(l, mode = 'pending') {
           el('a', { href: contact.href, target: '_blank', rel: 'noopener', text: contact.label }),
         ])
       : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
+    ...(adminEditId === l.id ? [adminEditForm(l)] : []),
     el('div', { class: 'admin-card-actions' }, actions),
   ]);
+}
+
+/* Форма редактирования заявки: те же поля, что и на сайте. */
+function adminEditForm(l) {
+  const field = (labelText, control) =>
+    el('label', { class: 'field' }, [el('span', { class: 'label', text: labelText }), control]);
+  const input = (name, value, attrs = {}) =>
+    el('input', { class: 'q', name, value: value ?? '', ...attrs });
+
+  const form = el('form', { class: 'admin-edit' }, [
+    el('div', { class: 'row2' }, [
+      field('Тип', el('select', { class: 'q', name: 'type' }, [
+        el('option', { value: 'offer', ...(l.type === 'offer' ? { selected: true } : {}), text: 'водитель везёт' }),
+        el('option', { value: 'request', ...(l.type === 'request' ? { selected: true } : {}), text: 'нужно передать' }),
+      ])),
+      field('Дата выезда', input('departureDate', l.departureDate ?? '', { type: 'date' })),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Откуда', input('fromCity', l.fromCity)),
+      field('Куда', input('toCity', l.toCity)),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Вес, кг', input('weightKg', l.weightKg ?? '', { type: 'number', min: '0.1', max: '1000', step: '0.1' })),
+      field('Цена', input('price', l.price ?? '')),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Telegram', input('telegram', l.telegram ?? '')),
+      field('Телефон', input('phone', l.phone ?? '')),
+    ]),
+    field('Описание', el('textarea', { class: 'q', name: 'description', rows: '3' }, [l.description])),
+    el('div', { class: 'admin-card-actions' }, [
+      el('button', { class: 'btn btn-ink btn-sm', type: 'submit', text: 'сохранить' }),
+      el('button', { class: 'btn btn-line btn-sm', type: 'button', text: 'отмена', onclick: () => { adminEditId = null; loadAdmin(); } }),
+    ]),
+  ]);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const payload = {
+      type: fd.get('type'),
+      fromCity: fd.get('fromCity'),
+      toCity: fd.get('toCity'),
+      departureDate: fd.get('departureDate') || null,
+      weightKg: fd.get('weightKg') ? Number(fd.get('weightKg')) : null,
+      price: fd.get('price') || null,
+      description: fd.get('description'),
+      telegram: fd.get('telegram') || null,
+      phone: fd.get('phone') || null,
+    };
+    try {
+      const res = await adminApi(`/api/admin/listings/${encodeURIComponent(l.id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Ошибка');
+      adminEditId = null;
+      toast('Сохранено.');
+      await loadAdmin();
+    } catch (ex) {
+      toast(`Не сохранилось: ${ex.message}`);
+    }
+  });
+  return form;
 }
 
 async function loadAdmin() {
@@ -626,7 +704,8 @@ async function adminSetStatus(id, status) {
       body: JSON.stringify({ status }),
     });
     if (!res.ok) throw new Error();
-    toast(status === 'published' ? 'Опубликовано.' : 'Отклонено.');
+    const labels = { published: 'Опубликовано.', rejected: 'Отклонено.', expired: 'Отправлено в архив.' };
+    toast(labels[status] || 'Готово.');
     await loadAdmin();
   } catch {
     toast('Не получилось. Попробуйте ещё раз.');

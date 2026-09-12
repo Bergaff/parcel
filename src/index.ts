@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, getCounts, getListingById, listAdminBoard, listListings, updateListingStatus } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, getCounts, getListingById, listAdminBoard, listListings, updateListing, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -311,10 +311,10 @@ app.get('/api/admin/pending', async (c) => {
 
 app.post('/api/admin/listings/:id/status', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { status?: string };
-  if (!['published', 'rejected'].includes(body.status ?? '')) {
-    return c.json({ error: 'status должен быть published или rejected' }, 400);
+  if (!['published', 'rejected', 'expired'].includes(body.status ?? '')) {
+    return c.json({ error: 'status должен быть published, rejected или expired' }, 400);
   }
-  const ok = await updateListingStatus(c.env, c.req.param('id'), body.status as 'published' | 'rejected');
+  const ok = await updateListingStatus(c.env, c.req.param('id'), body.status as 'published' | 'rejected' | 'expired');
   if (!ok) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
 });
@@ -326,6 +326,59 @@ app.get('/api/admin/listings', async (c) => {
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
   return c.json({ items });
+});
+
+/* Редактирование заявки — админ-панель сайта. */
+app.put('/api/admin/listings/:id', async (c) => {
+  const b = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!b) return c.json({ error: 'bad_request' }, 400);
+
+  const type = b.type === 'offer' || b.type === 'request' ? b.type : null;
+  if (!type) return c.json({ error: 'type должен быть offer или request' }, 400);
+
+  // Те же правила, что и при создании: города по-русски (знакомую латиницу переводим)
+  const fromCity = b.fromCity ? normalizeCity(sanitizeCity(b.fromCity) ?? '') : null;
+  const toCity = b.toCity ? normalizeCity(sanitizeCity(b.toCity) ?? '') : null;
+  if (!fromCity || !toCity || !isRussianCity(fromCity) || !isRussianCity(toCity)) {
+    return c.json({ error: 'Города пишите по-русски, кириллицей' }, 400);
+  }
+
+  let departureDate: string | null = null;
+  if (typeof b.departureDate === 'string' && b.departureDate !== '') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(b.departureDate)) {
+      return c.json({ error: 'departureDate в формате YYYY-MM-DD' }, 400);
+    }
+    departureDate = b.departureDate;
+  }
+
+  let weightKg: number | null = null;
+  if (b.weightKg != null && b.weightKg !== '') {
+    weightKg = Number(b.weightKg);
+    if (!Number.isFinite(weightKg) || weightKg <= 0 || weightKg > 1000) {
+      return c.json({ error: 'weightKg должен быть числом от 0 до 1000' }, 400);
+    }
+  }
+
+  const price = (typeof b.price === 'string' && b.price.trim().length > 0)
+    ? b.price.trim().slice(0, 40)
+    : null;
+
+  const description = sanitizeText(b.description, 2000, 'description');
+  if (!description || description.length < 5) return c.json({ error: 'description обязательна (от 5 символов)' }, 400);
+
+  const telegram = typeof b.telegram === 'string' && b.telegram.trim()
+    ? sanitizeContact(b.telegram.trim())
+    : null;
+  const phone = typeof b.phone === 'string' && b.phone.trim()
+    ? sanitizeContact(b.phone.trim())
+    : null;
+  if (!telegram && !phone) return c.json({ error: 'Нужен хотя бы один контакт: telegram или телефон' }, 400);
+
+  const item = await updateListing(c.env, c.req.param('id'), {
+    type, fromCity, toCity, departureDate, weightKg, price, description, telegram, phone,
+  });
+  if (!item) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true, item });
 });
 
 /* Полное удаление заявки (вместе с жалобами) — админ-панель сайта. */
