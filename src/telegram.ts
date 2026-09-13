@@ -1,5 +1,5 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity } from './parser';
+import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly } from './parser';
 import {
   addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
@@ -394,9 +394,11 @@ async function cmdReport(env: Env, msg: TgMessage, query: string): Promise<void>
 /** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
 async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
   const p = parseTelegramMessage(text);
-  const verdict = looksLikeListing(text) && p.confidence >= 0.7
-    ? '✅ бот возьмёт это объявление на модерацию'
-    : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
+  const verdict = isPassengerOnly(text)
+    ? '❌ бот пропустит это сообщение (пассажирская попутка — доска только про посылки)'
+    : looksLikeListing(text) && p.confidence >= 0.7
+      ? '✅ бот возьмёт это объявление на модерацию'
+      : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
   await sendText(env, chatId,
     '<b>Разбор сообщения</b>\n\n' +
     `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
@@ -433,7 +435,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/help': {
         const site = env.SITE_URL ?? 'ваш сайт';
         await sendText(env, chatId,
-          `Привет! Я бот доски попутных передач.\n\n` +
+          `Привет! Я бот доски попутных передач посылок.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
           `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
           `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
@@ -517,7 +519,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   if (!w) {
     // Текст без активного мастера: если похоже на объявление, предлагаем /post
     if (looksLikeListing(text)) {
-      await sendText(env, chatId, 'Похоже, это объявление. Нажмите /post, чтобы разместить его на доске, я помогу заполнить поля.');
+      if (isPassengerOnly(text)) {
+        await sendText(env, chatId,
+          'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.\n' +
+          'Если нужно что-то передать — нажмите /post, помогу разместить.');
+      } else {
+        await sendText(env, chatId, 'Похоже, это объявление. Нажмите /post, чтобы разместить его на доске, я помогу заполнить поля.');
+      }
     }
     return;
   }
@@ -651,6 +659,10 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
     return;
   }
   if (text.length < 10 || text.length > 4000) return;
+
+  // Доска — про посылки: пассажирские попутки («Пассажир. Гродно-Минск»,
+  // «кто подвезёт до…») пропускаем молча. Водители остаются.
+  if (isPassengerOnly(text)) return;
 
   const parsed = parseTelegramMessage(text);
   if (parsed.confidence < 0.7) return; // слишком похоже на обычный разговор

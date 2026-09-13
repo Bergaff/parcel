@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage } from '../src/parser';
+import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly } from '../src/parser';
 import { isRussianCity } from '../src/util';
 
 const NOW = new Date('2026-09-06T12:00:00Z');
@@ -17,6 +17,20 @@ describe('города — по-русски', () => {
     expect(isRussianCity(normalizeCity('Варшава'))).toBe(true);
     expect(isRussianCity(normalizeCity('Санкт-Петербург'))).toBe(true);
     expect(isRussianCity(normalizeCity('Зелёна-Гура'))).toBe(true);
+  });
+});
+
+describe('пассажирские попутки — мимо доски', () => {
+  it('просьбы пассажиров распознаёт и отделяет от посылок', () => {
+    expect(isPassengerOnly('Пассажир. Воскресенье - 01.09. Гродно-Минск. Желательно с утра, ибо опоздаю на экзамен!!!')).toBe(true);
+    expect(isPassengerOnly('2 Пассажира. Сегодня. 07.09. Минск-Гродно. В любое время. Скучно не будет)')).toBe(true);
+    expect(isPassengerOnly('Кто подвезёт до Минска с утра? Оплачу')).toBe(true);
+  });
+  it('водителей и посылки не трогает', () => {
+    expect(isPassengerOnly('Водитель. Понедельник - 02.09. Минск-Гродно. Выезд с 18 до 19 вечера. Комфортно и безопасно.')).toBe(false);
+    expect(isPassengerOnly('Водитель грузового автомобиля (Sprinter). Среда. Гродно-Минск. Кому надо завезти пианино, обращайтесь!')).toBe(false);
+    expect(isPassengerOnly('Нужно передать посылку Варшава - Львов, конверт с документами')).toBe(false);
+    expect(isPassengerOnly('Возьму пассажира и посылки, Варшава - Минск, место есть')).toBe(false);
   });
 });
 

@@ -415,6 +415,21 @@ export function parseTelegramMessage(text: string, now: Date = new Date()): Pars
   };
 }
 
+/** Пассажирские попутки доска не публикует: «попутка.» — про посылки и вещи.
+ *  Правило: есть явный пассажирский признак и ни одного посылочного слова. */
+const PASSENGER_HINTS = [
+  /пассажир/i,
+  /(?:довез|подвез|подброс|доехать|проехать)/i,
+  /ищ[уе]\s+попутк/i,
+];
+const PARCEL_HINTS = /посылк|бандерол|переда|груз|вещи|коробк|документ|печат|лекарств|медикамент|запечат/i;
+
+/** Похоже ли сообщение на пассажирскую попутку (а не на передачу посылки). */
+export function isPassengerOnly(text: string): boolean {
+  if (!PASSENGER_HINTS.some((re) => re.test(text))) return false;
+  return !PARCEL_HINTS.test(text);
+}
+
 /** Должен ли бот вообще реагировать на сообщение (нет маршрута и нет явных подсказок — игнор). */
 export function looksLikeListing(text: string, now: Date = new Date()): boolean {
   const p = parseTelegramMessage(text, now);
