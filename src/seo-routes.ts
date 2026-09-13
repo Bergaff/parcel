@@ -240,7 +240,7 @@ function pageShell(opts: {
   <meta property="og:title" content="${escapeHtml(opts.title)}" />
   <meta property="og:description" content="${escapeHtml(opts.description)}" />
   <meta property="og:url" content="${opts.canonical}" />
-  <meta property="og:image" content="${opts.origin}/og-cover.png" />
+  <meta property="og:image" content="${opts.origin}/og-cover.png?v=3" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2eee5'/><text x='50' y='68' font-size='52' font-family='Georgia' text-anchor='middle' fill='%23201d17'>п</text></svg>" />
   <link rel="stylesheet" href="/styles.css" />
   <style>
