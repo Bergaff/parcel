@@ -1,9 +1,11 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate } from './parser';
+import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
 import {
-  createListing, getListingById, listPending, markSeen, setSeenListing, updateListingStatus,
+  addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
+  searchByCity, setSeenListing, updateListingStatus,
 } from './store';
-import { admins, escapeHtml, normalizeTelegram, sanitizeContact, sanitizeText, tgLink } from './util';
+import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
+import { aiExtractListing, type AiFields } from './ai';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -18,6 +20,9 @@ interface TgMessage {
   date: number;
   text?: string;
   reply_to_message?: TgMessage;
+  /** Признак пересланного сообщения (Bot API: forward_origin). */
+  forward_origin?: unknown;
+  forward_from?: TgUser;
 }
 interface TgCallbackQuery {
   id: string;
@@ -58,6 +63,16 @@ async function answerCallback(env: Env, id: string, text?: string): Promise<void
   await api(env, 'answerCallbackQuery', { callback_query_id: id, text });
 }
 
+async function editMessageText(env: Env, chatId: number, messageId: number, text: string): Promise<void> {
+  await api(env, 'editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  }).catch(() => undefined);
+}
+
 function approveKeyboard(listingId: string): Record<string, unknown> {
   return {
     inline_keyboard: [[
@@ -85,7 +100,8 @@ function formatListing(l: Listing, sourceNote = ''): string {
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
   if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
   if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
-  if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
+  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${l.sourceChat ? `, чат «${escapeHtml(l.sourceChat)}»` : ''}`);
+  else if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -101,7 +117,9 @@ function chatMessageLink(chatId: number, messageId: number): string | null {
 
 interface WizardState {
   authorId?: number;
+  authorUsername?: string;
   step: 'type' | 'from' | 'to' | 'date' | 'details' | 'contact' | 'confirm';
+  contactMode?: 'tg' | 'phone';
   draft: {
     type?: ListingType;
     from?: string;
@@ -138,10 +156,10 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
       await sendText(env, chatId, TYPE_MSG);
       break;
     case 'from':
-      await sendText(env, chatId, '<b>Откуда?</b>\nНапишите город отправления.');
+      await sendText(env, chatId, '<b>Откуда?</b>\nНапишите город отправления — по-русски, например <i>Варшава</i>.');
       break;
     case 'to':
-      await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения.');
+      await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения — по-русски, например <i>Минск</i>.');
       break;
     case 'date':
       await sendText(env, chatId, '<b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или просто минус, если дата не важна.');
@@ -149,9 +167,19 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
     case 'details':
       await sendText(env, chatId, '<b>Опишите посылку и условия</b>\nВес, что за груз, сколько мест, цена. Одним сообщением.');
       break;
-    case 'contact':
-      await sendText(env, chatId, '<b>Как с вами связаться?</b>\nНапишите <code>@username</code> или номер телефона.');
+    case 'contact': {
+      // Способ связи выбирается кнопками (см. handleCallback: contact:*)
+      const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+      if (w.authorUsername) rows.push([{ text: `Мой юзернейм (@${w.authorUsername})`, callback_data: 'contact:me' }]);
+      rows.push([
+        { text: 'Другой юзернейм', callback_data: 'contact:other' },
+        { text: 'Номер телефона', callback_data: 'contact:phone' },
+      ]);
+      await sendText(env, chatId, '<b>Как с вами связаться?</b>\nВыберите кнопку — или просто напишите контакт сообщением.', {
+        reply_markup: { inline_keyboard: rows },
+      });
       break;
+    }
     case 'confirm':
       await sendConfirmation(env, chatId, w);
       break;
@@ -172,7 +200,7 @@ function draftSummary(w: WizardState): string {
 }
 
 async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promise<void> {
-  await sendText(env, chatId, draftSummary(w) + '\n\nОтправьте <b>1</b>, чтобы опубликовать, или <b>2</b>, чтобы отменить.', {
+  await sendText(env, chatId, draftSummary(w) + '\n\nОпубликовать — кнопкой выше. Передумали — кнопка «Отменить» или команда /cancel.', {
     reply_markup: {
       inline_keyboard: [[
         { text: 'Опубликовать', callback_data: `cfm:${chatId}` },
@@ -182,9 +210,224 @@ async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promi
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* Поиск по городу: /поиск, /search, /серч                             */
+/* ------------------------------------------------------------------ */
+
+const SEARCH_MONTHS = [
+  'янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек',
+];
+
+function searchLine(env: Env, l: Listing, today: string): string {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const route = site
+    ? `<a href="${site}/#/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
+    : `${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`;
+  const bits: string[] = [];
+  if (l.departureDate) {
+    const m = l.departureDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) bits.push(`${parseInt(m[3]!, 10)} ${SEARCH_MONTHS[parseInt(m[2]!, 10) - 1]}`);
+    else bits.push(l.departureDate);
+  }
+  if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
+  if (l.price) bits.push(escapeHtml(l.price));
+  if (l.telegram || l.phone) bits.push(escapeHtml(l.telegram ?? l.phone!));
+  // Поездка уже прошла — заявка из архива (ещё месяц доступна, потом удаляется)
+  if (l.status === 'expired' || (l.departureDate != null && l.departureDate < today)) bits.push('🗄️ архив');
+  return `• ${route}${bits.length ? ' · ' + bits.join(' · ') : ''}`;
+}
+
+async function cmdSearch(env: Env, chatId: number, query: string): Promise<void> {
+  const raw = query.trim();
+  if (raw.length < 2) {
+    await sendText(env, chatId,
+      'Напишите город после команды:\n<code>/поиск Москва</code> — покажу все заявки в Москву и из Москвы.');
+    return;
+  }
+  // Знакомое латинское написание переводим сами и говорим об этом,
+  // незнакомое просим написать кириллицей.
+  let q = raw;
+  let hint = '';
+  if (/[a-z]/i.test(raw)) {
+    const normalized = normalizeCity(raw);
+    if (isRussianCity(normalized)) {
+      q = normalized;
+      hint = `Города у нас — по-русски, искал «${escapeHtml(normalized)}».\n\n`;
+    } else {
+      await sendText(env, chatId,
+        '✍️ Города пишите по-русски, кириллицей.\n' +
+        'Например: <code>/поиск Варшава</code> или <code>/поиск Минск</code>.');
+      return;
+    }
+  }
+  if (!/[а-яё]/i.test(q)) {
+    await sendText(env, chatId,
+      '✍️ Название города пишите по-русски: <code>/поиск Минск</code>.');
+    return;
+  }
+  const items = await searchByCity(env, q, 40);
+  if (items.length === 0) {
+    const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+    await sendText(env, chatId,
+      `${hint}По запросу «${escapeHtml(q)}» ничего нет.\n` +
+      `Загляните на доску позже или разместите своё объявление: /post${site ? `\n${site}` : ''}`);
+    return;
+  }
+  const today = mskTodayIso();
+  const offers = items.filter((l) => l.type === 'offer');
+  const requests = items.filter((l) => l.type === 'request');
+  const chunks: string[] = [`${hint}🔍 <b>${escapeHtml(q)}</b> — заявок: ${items.length}`];
+  if (offers.length) {
+    chunks.push(`\n🚚 <b>Водители везут (${offers.length}):</b>`);
+    for (const l of offers.slice(0, 10)) chunks.push(searchLine(env, l, today));
+    if (offers.length > 10) chunks.push(`…и ещё ${offers.length - 10}`);
+  }
+  if (requests.length) {
+    chunks.push(`\n📦 <b>Нужно передать (${requests.length}):</b>`);
+    for (const l of requests.slice(0, 10)) chunks.push(searchLine(env, l, today));
+    if (requests.length > 10) chunks.push(`…и ещё ${requests.length - 10}`);
+  }
+  await sendText(env, chatId, chunks.join('\n'));
+}
+
+function isSearchCommand(text: string): boolean {
+  return /^\/(search|поиск|серч)(@\w+)?(\s|$)/i.test(text);
+}
+
+/* ------------------------------------------------------------------ */
+/* Жалоба: /репорт, /report, /жалоба                                   */
+/* ------------------------------------------------------------------ */
+
+function isReportCommand(text: string): boolean {
+  return /^\/(report|репорт|жалоба)(@\w+)?(\s|$)/i.test(text);
+}
+
+const REPORT_HINT =
+  '<b>Пожаловаться</b>\n\n' +
+  '• на объявление — номер заявки или ссылку:\n' +
+  '<code>/репорт a1b2c3d4</code> — номер из сообщения бота или «№» на сайте\n' +
+  '<code>/репорт https://…/item/…</code> — скопированная ссылка на карточку\n' +
+  '• на что угодно другое — просто напишите текстом:\n' +
+  '<code>/репорт человек просит предоплату и пропадает</code>';
+
+/** Достаём из аргумента номер заявки: ссылка …/item/<id>, «#a1b2c3d4» или голый id. */
+function extractListingId(arg: string): { id: string; reason: string } | null {
+  const parts = arg.split(/\s+/);
+  const first = (parts[0] ?? '').replace(/^#/, '');
+  const link = arg.match(/item\/([0-9a-fA-F-]{4,36})/);
+  if (link) {
+    return {
+      id: link[1]!.toLowerCase(),
+      reason: arg.replace(link[0], '').replace(/\s+/g, ' ').trim().slice(0, 500),
+    };
+  }
+  if (/^[0-9a-fA-F-]{4,36}$/.test(first)) {
+    return { id: first.toLowerCase(), reason: parts.slice(1).join(' ').slice(0, 500) };
+  }
+  return null;
+}
+
+async function cmdReport(env: Env, msg: TgMessage, query: string): Promise<void> {
+  const chatId = msg.chat.id;
+  const arg = query.trim();
+  if (!arg) {
+    await sendText(env, chatId, REPORT_HINT);
+    return;
+  }
+
+  // Не чаще 5 жалоб в час с одного аккаунта
+  const rl = await rateLimit(env, `tg-report:${msg.from?.id ?? chatId}`, 5, 3600);
+  if (!rl.allowed) {
+    await sendText(env, chatId, 'Слишком много жалоб подряд. Подождите немного и попробуйте снова.');
+    return;
+  }
+
+  const target = extractListingId(arg);
+  if (target) {
+    const matches = await findByIdPrefix(env, target.id);
+    if (matches.length === 0) {
+      await sendText(env, chatId,
+        `Заявку с номером «${escapeHtml(target.id)}» не нашёл. ` +
+        'На сайте у объявления есть кнопка «скопировать ссылку» — пришлите её.');
+      return;
+    }
+    if (matches.length > 1) {
+      await sendText(env, chatId,
+        `Под номером «${escapeHtml(target.id)}» несколько заявок. Пришлите полную ссылку на карточку, чтобы я понял, о какой речь.`);
+      return;
+    }
+    const l = matches[0]!;
+    const res = await addReport(env, l.id, target.reason || 'жалоба через бота', `telegram:${msg.from?.id ?? chatId}`);
+    if (!res.ok) {
+      await sendText(env, chatId, 'Эта заявка уже не на доске (в архиве или удалена) — жаловаться не на что.');
+      return;
+    }
+    await notifyAdminsReport(env, l, target.reason || 'жалоба через бота', res.count);
+    await sendText(env, chatId,
+      res.autoRejected
+        ? 'Жалоба принята — объявление скрыто автоматически (набралось 3 жалобы).'
+        : `Жалоба на «${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}» отправлена модераторам. Спасибо.`);
+    return;
+  }
+
+  // Не похоже на номер заявки — свободная жалоба, пересылаем админам как есть
+  const text = sanitizeText(arg, 2000);
+  if (!text || text.length < 3) {
+    await sendText(env, chatId, REPORT_HINT);
+    return;
+  }
+  const from = msg.from;
+  const who = [
+    from?.first_name ? escapeHtml(from.first_name) : null,
+    from?.username ? `@${escapeHtml(from.username)}` : null,
+    from ? `id ${from.id}` : null,
+  ].filter(Boolean).join(' ');
+  const where = msg.chat.type === 'private'
+    ? 'личка бота'
+    : `${escapeHtml(msg.chat.title ?? msg.chat.type)} (${chatId})`;
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `⚠️ <b>Жалоба (не по заявке)</b>\nОт: ${who}\nГде: ${where}\n\n${escapeHtml(text)}`
+    ).catch(() => undefined);
+  }
+  await sendText(env, chatId, 'Передал администраторам, спасибо.');
+}
+
+/** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
+async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
+  const p = parseTelegramMessage(text);
+  const verdict = isPassengerOnly(text)
+    ? '❌ бот пропустит это сообщение (пассажирская попутка — доска только про посылки)'
+    : looksLikeListing(text) && p.confidence >= 0.7
+      ? '✅ бот возьмёт это объявление на модерацию'
+      : '❌ бот пропустит это сообщение (не хватает маршрута или слов-признаков)';
+  await sendText(env, chatId,
+    '<b>Разбор сообщения</b>\n\n' +
+    `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
+    `Тип: ${p.intent === 'offer' ? 'водитель везёт' : p.intent === 'request' ? 'нужно передать' : '—'}\n` +
+    `Дата: ${p.departureDate ?? '—'}\n` +
+    `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
+    `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
+    `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
+    `Уверенность: ${p.confidence}\n\n` +
+    verdict
+  );
+}
+
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   const chatId = msg.chat.id;
+
+  // Пересланное из чата сообщение: показываем, как его понимает парсер.
+  // Удобно для настройки: переслали реальное объявление — бот ответил разбором.
+  if (msg.forward_origin != null || msg.forward_from != null) {
+    if (!text) {
+      await sendText(env, chatId, 'Переслано без текста — парсер работает только с текстовыми сообщениями.');
+      return;
+    }
+    await sendParseReport(env, chatId, text);
+    return;
+  }
 
   if (text.startsWith('/')) {
     const parts = text.split(/\s+/);
@@ -194,16 +437,25 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/help': {
         const site = env.SITE_URL ?? 'ваш сайт';
         await sendText(env, chatId,
-          `Привет! Я бот доски попутных передач.\n\n` +
+          `Привет! Я бот доски попутных передач посылок.\n\n` +
           `• <b>/post</b>: разместить объявление\n` +
+          `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
+          `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
+          `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
+          `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
-          `• Сайт: ${site}\n\n<i>Важно: у бота должен быть выключен режим приватности (BotFather → Group Privacy → Off), иначе он не увидит сообщения в группах.</i>`
+          `• Сайт: ${site}`
         );
         await setWizard(env, chatId, null);
         break;
       }
       case '/post': {
-        const wizard: WizardState = { step: 'type', draft: {}, authorId: msg.from?.id };
+        const wizard: WizardState = {
+          step: 'type',
+          draft: {},
+          authorId: msg.from?.id,
+          authorUsername: msg.from?.username,
+        };
         await setWizard(env, chatId, wizard);
         await promptStep(env, chatId, wizard);
         break;
@@ -212,24 +464,51 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await setWizard(env, chatId, null);
         await sendText(env, chatId, 'Отменено.');
         break;
+      case '/parse': {
+        // Диагностика парсера: вставьте реальное сообщение из чата — бот покажет,
+        // что он из него извлекёт и возьмёт ли на модерацию.
+        const rest = text.split(/\s+/).slice(1).join(' ');
+        if (!rest) {
+          await sendText(env, chatId,
+            'Пришлите сообщение для проверки сразу после команды:\n' +
+            '<code>/parse Варшава — Львов, завтра, возьму посылку до 10 кг, 100 zł</code>\n\n' +
+            'Или просто перешлите боту любое сообщение из чата — он разберёт его так же.');
+          break;
+        }
+        await sendParseReport(env, chatId, rest);
+        break;
+      }
       case '/pending': {
         if (!admins(env).includes(String(msg.from?.id))) {
           await sendText(env, chatId, 'Команда доступна только администраторам.');
           return;
         }
-        const pending = await listPending(env, 10);
+        const pending = await listPending(env, 100);
         if (pending.length === 0) {
-          await sendText(env, chatId, 'Очередь модерации пуста.');
+          await sendText(env, chatId, '✅ Необработанных заявок нет — очередь модерации пуста.');
           return;
         }
-        for (const l of pending.slice(0, 3)) {
-          await sendText(env, chatId, formatListing(l, `\n<i>Заявка ${pending.indexOf(l) + 1} из ${pending.length}</i>`), {
-            reply_markup: approveKeyboard(l.id),
-          });
+        await sendText(env, chatId,
+          `⏳ Необработано заявок: <b>${pending.length}</b>` +
+          (pending.length > 10 ? '\nПоказаны последние 10 — разберите их и напишите /pending снова.' : ''));
+        for (const [i, l] of pending.slice(-10).entries()) {
+          await sendText(env, chatId,
+            formatListing(l, `\n<i>Заявка ${i + 1} из ${pending.length}</i>`),
+            { reply_markup: approveKeyboard(l.id) }
+          );
         }
-        if (pending.length > 3) {
-          await sendText(env, chatId, `… и ещё ${pending.length - 3}.`);
-        }
+        break;
+      }
+      case '/search':
+      case '/поиск':
+      case '/серч': {
+        await cmdSearch(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
+      case '/report':
+      case '/репорт':
+      case '/жалоба': {
+        await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:
@@ -240,9 +519,71 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
 
   const w = await getWizard(env, chatId);
   if (!w) {
-    // Текст без активного мастера: если похоже на объявление, предлагаем /post
-    if (looksLikeListing(text)) {
-      await sendText(env, chatId, 'Похоже, это объявление. Нажмите /post, чтобы разместить его на доске, я помогу заполнить поля.');
+    // Пассажирские попутки — вежливо отказываем (доска только про посылки)
+    if (isPassengerOnly(text)) {
+      await sendText(env, chatId,
+        'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.\n' +
+        'Если нужно что-то передать — напишите объявление сюда одним сообщением, я оформлю.');
+      return;
+    }
+    // Текст без активного мастера: пробуем оформить сразу —
+    // сначала правилами, затем ИИ (если задан AI_API_KEY).
+    if (looksLikeListing(text) || worthAiCheck(text)) {
+      const chatKey = String(chatId);
+      const parsed = parseTelegramMessage(text);
+      let fields: AiFields | null = null;
+      let source: ListingInput['source'] = 'telegram';
+      if (parsed.confidence >= 0.7) {
+        if (await markSeen(env, chatKey, msg.message_id)) {
+          fields = {
+            type: parsed.intent ?? 'offer',
+            fromCity: parsed.fromCity ?? 'не указано',
+            toCity: parsed.toCity ?? 'не указано',
+            departureDate: parsed.departureDate,
+            weightKg: parsed.weightKg,
+            price: parsed.price,
+            telegram: parsed.telegram,
+            phone: parsed.phone,
+            description: text.slice(0, 2000),
+          };
+        }
+      } else if (env.AI_API_KEY) {
+        if (await markSeen(env, chatKey, msg.message_id)) {
+          const ai = await aiExtractListing(env, text);
+          if (ai) { fields = ai; source = 'parser'; }
+        }
+      }
+      if (fields) {
+        const input: ListingInput = {
+          type: fields.type,
+          fromCity: fields.fromCity,
+          toCity: fields.toCity,
+          departureDate: fields.departureDate,
+          weightKg: fields.weightKg,
+          price: fields.price,
+          description: fields.description,
+          phone: fields.phone,
+          telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+          status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+          source,
+          sourceChat: 'Личное сообщение боту',
+          sourceChatId: String(chatId),
+          sourceMessageId: msg.message_id,
+        };
+        const listing = await createListing(env, input);
+        await notifyAdmins(env, listing);
+        const statusNote = input.status === 'published'
+          ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+          : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
+        await sendText(env, chatId,
+          formatListing(listing, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '') + statusNote);
+        return;
+      }
+      if (looksLikeListing(text)) {
+        await sendText(env, chatId,
+          'Похоже, это объявление, но целиком я его не разобрал. Нажмите /post — проведу по шагам.');
+        return;
+      }
     }
     return;
   }
@@ -258,10 +599,19 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     }
     case 'from':
     case 'to': {
-      const city = text.replace(/[^\p{L}\p{N}\- ]/gu, ' ').trim();
+      const city = text.replace(/[^\p{L}\- ]/gu, ' ').trim();
+      if (/\d/.test(text)) { await sendText(env, chatId, 'В названии города не может быть цифр. Попробуйте ещё раз.'); return; }
       if (city.length < 2 || city.length > 60) { await sendText(env, chatId, 'Похоже, это не город. Попробуйте ещё раз.'); return; }
-      if (w.step === 'from') { draft.from = city; w.step = 'to'; }
-      else { draft.to = city; w.step = 'date'; }
+      // Любое написание (Warsaw, warsawa, Варшаве) → каноническое «Варшава»
+      const canonical = normalizeCity(city);
+      // Латиницу перевести не смогли — просим по-русски
+      if (!isRussianCity(canonical)) {
+        await sendText(env, chatId,
+          '✍️ Город пишите по-русски, кириллицей: например <i>Варшава</i>, а не Warsaw. Попробуйте ещё раз.');
+        return;
+      }
+      if (w.step === 'from') { draft.from = canonical; w.step = 'to'; }
+      else { draft.to = canonical; w.step = 'date'; }
       break;
     }
     case 'date': {
@@ -280,14 +630,33 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       break;
     }
     case 'contact': {
-      const contact = sanitizeContact(text);
-      if (!contact) { await sendText(env, chatId, 'Нужен <code>@username</code> или телефон в формате <code>+48 123 456 789</code>.'); return; }
-      draft.contact = contact;
+      // Режим выбран кнопкой (contact:other / contact:phone) или юзер пишет сразу
+      if (w.contactMode === 'tg') {
+        const username = text.replace(/^@/, '').trim();
+        if (!/^[a-zA-Z0-9_]{4,32}$/.test(username)) {
+          await sendText(env, chatId, 'Юзернейм — 4–32 символа, латиница/цифры/подчёркивание. Можно без <code>@</code>.');
+          return;
+        }
+        draft.contact = `@${username}`;
+      } else if (w.contactMode === 'phone') {
+        const phone = sanitizeContact(text);
+        if (!phone || phone.startsWith('@')) {
+          await sendText(env, chatId, 'Пришлите номер телефона, например <code>+48 123 456 789</code>.');
+          return;
+        }
+        draft.contact = phone;
+      } else {
+        // Кнопку не нажимали — попробуем понять сам текст, иначе снова покажем кнопки
+        const contact = sanitizeContact(text);
+        if (!contact) { await promptStep(env, chatId, w); return; }
+        draft.contact = contact;
+      }
+      w.contactMode = undefined;
       w.step = 'confirm';
       break;
     }
     case 'confirm': {
-      await sendText(env, chatId, 'Мы уже на этапе подтверждения. Кнопки выше 👆');
+      await sendText(env, chatId, 'Мы уже на этапе подтверждения. Кнопки выше 👆\nЕсли передумали — /cancel, всё отменится и черновик удалится.');
       return;
     }
   }
@@ -333,31 +702,74 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
 
 async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
-  if (!text || text.length < 10 || text.length > 4000) return;
+  if (!text) return;
   // Не реагируем на собственные сообщения и ботов
   if (msg.from?.username === env.BOT_USERNAME || msg.from?.is_bot) return;
 
+  // /поиск, /search, /серч работают и в группах
+  if (isSearchCommand(text)) {
+    await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
+    return;
+  }
+  // /репорт, /report, /жалоба — тоже
+  if (isReportCommand(text)) {
+    await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
+    return;
+  }
+  if (text.length < 10 || text.length > 4000) return;
+
+  // Доска — про посылки: пассажирские попутки («Пассажир. Гродно-Минск»,
+  // «кто подвезёт до…») пропускаем молча. Водители остаются.
+  if (isPassengerOnly(text)) return;
+
   const parsed = parseTelegramMessage(text);
-  if (parsed.confidence < 0.7) return; // слишком похоже на обычный разговор
-
   const chatKey = String(msg.chat.id);
-  if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
-
-  const telegram = parsed.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
   const sourceChatId = String(msg.chat.id);
 
+  // Каскад: сначала правила. Уверенно (маршрут + тип) — как раньше, бесплатно.
+  // Неуверенно — ИИ-оформление через DeepSeek (если задан AI_API_KEY),
+  // с жёсткой валидацией ответа и пометкой для модератора.
+  let fields: AiFields | null = null;
+  let source: ListingInput['source'] = 'telegram';
+
+  if (parsed.confidence >= 0.7) {
+    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
+    fields = {
+      type: parsed.intent ?? 'offer',
+      fromCity: parsed.fromCity ?? 'не указано',
+      toCity: parsed.toCity ?? 'не указано',
+      departureDate: parsed.departureDate,
+      weightKg: parsed.weightKg,
+      price: parsed.price,
+      telegram: parsed.telegram,
+      phone: parsed.phone,
+      description: text.slice(0, 2000),
+    };
+  } else if (env.AI_API_KEY && worthAiCheck(text)) {
+    // дешёвый фильтр прошёл (есть слова-признаки) — можно звать ИИ
+    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
+    const ai = await aiExtractListing(env, text);
+    if (!ai) return; // не объявление, пассажирская попутка или ошибка — мимо
+    fields = ai;
+    source = 'parser'; // разбирали ИИ — модератор посмотрит внимательнее
+  } else {
+    return; // слишком похоже на обычный разговор
+  }
+
+  const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
+
   const input: ListingInput = {
-    type: parsed.intent ?? 'offer',
-    fromCity: parsed.fromCity ?? 'не указано',
-    toCity: parsed.toCity ?? 'не указано',
-    departureDate: parsed.departureDate,
-    weightKg: parsed.weightKg,
-    price: parsed.price,
-    description: text.slice(0, 2000),
-    phone: parsed.phone,
+    type: fields.type,
+    fromCity: fields.fromCity,
+    toCity: fields.toCity,
+    departureDate: fields.departureDate,
+    weightKg: fields.weightKg,
+    price: fields.price,
+    description: fields.description,
+    phone: fields.phone,
     telegram,
     status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-    source: 'telegram',
+    source,
     sourceChat: msg.chat.title ?? null,
     sourceChatId,
     sourceMessageId: msg.message_id,
@@ -376,7 +788,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   }
 
   if (env.REPLY_IN_GROUPS === '1') {
-    const site = tgLink(env.SITE_URL);
+    const site = env.SITE_URL?.replace(/\/+$/, '');
     await sendText(env, msg.chat.id,
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
@@ -397,6 +809,27 @@ export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   }
 }
 
+/** Уведомление администраторов о жалобе на объявление (с кнопкой «Скрыть»). */
+export async function notifyAdminsReport(env: Env, listing: Listing, reason: string | null, count: number): Promise<void> {
+  if (!listing) return;
+  const header = count >= 3
+    ? '🚫 <b>Объявление скрыто автоматически</b> (3 жалобы)'
+    : `⚠️ <b>Жалоба на объявление</b> (${count}/3)`;
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      header + '\n\n' + formatListing(listing) +
+      (reason ? `\n<b>Причина:</b> ${escapeHtml(reason.slice(0, 300))}` : ''),
+      {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: 'Скрыть объявление', callback_data: `rej:${listing.id}` },
+          ]],
+        },
+      }
+    ).catch(() => undefined);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Callback queries                                                     */
 /* ------------------------------------------------------------------ */
@@ -405,6 +838,39 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
   const data = cb.data ?? '';
   const userId = cb.from.id;
   const isAdmin = admins(env).includes(String(userId));
+
+  // Выбор способа контакта в мастере /post (шаг «contact»)
+  if (data === 'contact:me' || data === 'contact:other' || data === 'contact:phone') {
+    const chatId = cb.message?.chat.id;
+    if (!chatId) { await answerCallback(env, cb.id, 'Сообщение устарело, начните заново: /post'); return; }
+    const w = await getWizard(env, chatId);
+    if (!w || w.step !== 'contact') { await answerCallback(env, cb.id, 'Начните заново: /post'); return; }
+
+    if (data === 'contact:me') {
+      if (!w.authorUsername) {
+        await answerCallback(env, cb.id, 'У вас не задан юзернейм в Telegram');
+        await sendText(env, chatId, 'В вашем аккаунте нет юзернейма. Введите другой юзернейм или телефон.');
+        return;
+      }
+      w.draft.contact = `@${w.authorUsername}`;
+      w.contactMode = undefined;
+      w.step = 'confirm';
+      await setWizard(env, chatId, w);
+      await answerCallback(env, cb.id, 'Юзернейм выбран');
+      await editMessageText(env, chatId, cb.message!.message_id, `Контакт: @${w.authorUsername}`);
+      await promptStep(env, chatId, w);
+      return;
+    }
+
+    w.contactMode = data === 'contact:other' ? 'tg' : 'phone';
+    await setWizard(env, chatId, w);
+    await answerCallback(env, cb.id, '');
+    await editMessageText(env, chatId, cb.message!.message_id,
+      w.contactMode === 'tg'
+        ? 'Отправьте юзернейм Telegram (можно без <code>@</code>).'
+        : 'Отправьте номер телефона, например <code>+48 123 456 789</code>.');
+    return;
+  }
 
   if (data === 'cancel') {
     await setWizard(env, cb.message?.chat.id ?? 0, null);

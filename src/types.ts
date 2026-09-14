@@ -2,6 +2,8 @@
 export interface Env {
   DB: D1Database;
   KV: KVNamespace;
+  /** Доступ к статическим файлам из public/ без сетевого запроса (для OG-шрифтов). */
+  ASSETS: Fetcher;
   BOT_TOKEN?: string;
   BOT_SECRET?: string;
   ADMIN_IDS?: string;
@@ -11,6 +13,12 @@ export interface Env {
   ADMIN_API_TOKEN?: string;
   /** "1" — бот отвечает в группах после распознавания объявления (по умолчанию молчит). */
   REPLY_IN_GROUPS?: string;
+  /** Ключ DeepSeek API: включает ИИ-оформление «трудных» объявлений (вторая ступень после правил). */
+  AI_API_KEY?: string;
+  /** Модель DeepSeek (по умолчанию deepseek-chat). */
+  AI_MODEL?: string;
+  /** Базовый URL API — для локальных тестов. */
+  AI_BASE_URL?: string;
 }
 
 export type ListingType = 'offer' | 'request';
@@ -43,6 +51,8 @@ export interface Listing extends ListingInput {
 
 export interface ListFilters {
   type?: ListingType;
+  /** true — архив: заявки с прошедшей датой (статус expired или published с прошлой датой). */
+  archive?: boolean;
   from?: string;
   to?: string;
   date?: string;
