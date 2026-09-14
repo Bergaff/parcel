@@ -1,10 +1,11 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly } from './parser';
+import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, hasIntent } from './parser';
 import {
   addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
+import { aiExtractListing } from './ai';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -99,7 +100,8 @@ function formatListing(l: Listing, sourceNote = ''): string {
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
   if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
   if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
-  if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
+  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${l.sourceChat ? `, чат «${escapeHtml(l.sourceChat)}»` : ''}`);
+  else if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -665,26 +667,57 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if (isPassengerOnly(text)) return;
 
   const parsed = parseTelegramMessage(text);
-  if (parsed.confidence < 0.7) return; // слишком похоже на обычный разговор
-
   const chatKey = String(msg.chat.id);
-  if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
-
-  const telegram = parsed.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
   const sourceChatId = String(msg.chat.id);
 
+  // Каскад: сначала правила. Уверенно (маршрут + тип) — как раньше, бесплатно.
+  // Неуверенно — ИИ-оформление через DeepSeek (если задан AI_API_KEY),
+  // с жёсткой валидацией ответа и пометкой для модератора.
+  let fields: {
+    type: ListingType; fromCity: string; toCity: string;
+    departureDate: string | null; weightKg: number | null; price: string | null;
+    telegram: string | null; phone: string | null; description: string;
+  } | null = null;
+  let source: ListingInput['source'] = 'telegram';
+
+  if (parsed.confidence >= 0.7) {
+    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
+    fields = {
+      type: parsed.intent ?? 'offer',
+      fromCity: parsed.fromCity ?? 'не указано',
+      toCity: parsed.toCity ?? 'не указано',
+      departureDate: parsed.departureDate,
+      weightKg: parsed.weightKg,
+      price: parsed.price,
+      telegram: parsed.telegram,
+      phone: parsed.phone,
+      description: text.slice(0, 2000),
+    };
+  } else if (env.AI_API_KEY && hasIntent(text)) {
+    // дешёвый фильтр прошёл (есть слова-признаки) — можно звать ИИ
+    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
+    const ai = await aiExtractListing(env, text);
+    if (!ai) return; // не объявление, пассажирская попутка или ошибка — мимо
+    fields = ai;
+    source = 'parser'; // разбирали ИИ — модератор посмотрит внимательнее
+  } else {
+    return; // слишком похоже на обычный разговор
+  }
+
+  const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
+
   const input: ListingInput = {
-    type: parsed.intent ?? 'offer',
-    fromCity: parsed.fromCity ?? 'не указано',
-    toCity: parsed.toCity ?? 'не указано',
-    departureDate: parsed.departureDate,
-    weightKg: parsed.weightKg,
-    price: parsed.price,
-    description: text.slice(0, 2000),
-    phone: parsed.phone,
+    type: fields.type,
+    fromCity: fields.fromCity,
+    toCity: fields.toCity,
+    departureDate: fields.departureDate,
+    weightKg: fields.weightKg,
+    price: fields.price,
+    description: fields.description,
+    phone: fields.phone,
     telegram,
     status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-    source: 'telegram',
+    source,
     sourceChat: msg.chat.title ?? null,
     sourceChatId,
     sourceMessageId: msg.message_id,

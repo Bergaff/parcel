@@ -13,6 +13,12 @@ export interface Env {
   ADMIN_API_TOKEN?: string;
   /** "1" — бот отвечает в группах после распознавания объявления (по умолчанию молчит). */
   REPLY_IN_GROUPS?: string;
+  /** Ключ DeepSeek API: включает ИИ-оформление «трудных» объявлений (вторая ступень после правил). */
+  AI_API_KEY?: string;
+  /** Модель DeepSeek (по умолчанию deepseek-chat). */
+  AI_MODEL?: string;
+  /** Базовый URL API — для локальных тестов. */
+  AI_BASE_URL?: string;
 }
 
 export type ListingType = 'offer' | 'request';

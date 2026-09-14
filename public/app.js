@@ -94,6 +94,7 @@ function contactInfo(l) {
 }
 
 function sourceLabel(l) {
+  if (l.source === 'parser') return l.sourceChat ? `ИИ-разбор из чата «${l.sourceChat}»` : 'ИИ-разбор';
   if (l.source === 'telegram') return l.sourceChat ? `из чата «${l.sourceChat}»` : 'из Telegram';
   return 'с сайта';
 }

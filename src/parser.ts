@@ -430,6 +430,11 @@ export function isPassengerOnly(text: string): boolean {
   return !PARCEL_HINTS.test(text);
 }
 
+/** Есть ли слова-признаки объявления (везу, нужно передать, ищу…). Дешёвый фильтр перед ИИ. */
+export function hasIntent(text: string): boolean {
+  return detectIntent(text) !== null;
+}
+
 /** Должен ли бот вообще реагировать на сообщение (нет маршрута и нет явных подсказок — игнор). */
 export function looksLikeListing(text: string, now: Date = new Date()): boolean {
   const p = parseTelegramMessage(text, now);
