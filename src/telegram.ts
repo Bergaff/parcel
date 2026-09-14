@@ -1,11 +1,11 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, hasIntent } from './parser';
+import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
 import {
   addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
-import { aiExtractListing } from './ai';
+import { aiExtractListing, type AiFields } from './ai';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -519,14 +519,70 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
 
   const w = await getWizard(env, chatId);
   if (!w) {
-    // Текст без активного мастера: если похоже на объявление, предлагаем /post
-    if (looksLikeListing(text)) {
-      if (isPassengerOnly(text)) {
+    // Пассажирские попутки — вежливо отказываем (доска только про посылки)
+    if (isPassengerOnly(text)) {
+      await sendText(env, chatId,
+        'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.\n' +
+        'Если нужно что-то передать — напишите объявление сюда одним сообщением, я оформлю.');
+      return;
+    }
+    // Текст без активного мастера: пробуем оформить сразу —
+    // сначала правилами, затем ИИ (если задан AI_API_KEY).
+    if (looksLikeListing(text) || worthAiCheck(text)) {
+      const chatKey = String(chatId);
+      const parsed = parseTelegramMessage(text);
+      let fields: AiFields | null = null;
+      let source: ListingInput['source'] = 'telegram';
+      if (parsed.confidence >= 0.7) {
+        if (await markSeen(env, chatKey, msg.message_id)) {
+          fields = {
+            type: parsed.intent ?? 'offer',
+            fromCity: parsed.fromCity ?? 'не указано',
+            toCity: parsed.toCity ?? 'не указано',
+            departureDate: parsed.departureDate,
+            weightKg: parsed.weightKg,
+            price: parsed.price,
+            telegram: parsed.telegram,
+            phone: parsed.phone,
+            description: text.slice(0, 2000),
+          };
+        }
+      } else if (env.AI_API_KEY) {
+        if (await markSeen(env, chatKey, msg.message_id)) {
+          const ai = await aiExtractListing(env, text);
+          if (ai) { fields = ai; source = 'parser'; }
+        }
+      }
+      if (fields) {
+        const input: ListingInput = {
+          type: fields.type,
+          fromCity: fields.fromCity,
+          toCity: fields.toCity,
+          departureDate: fields.departureDate,
+          weightKg: fields.weightKg,
+          price: fields.price,
+          description: fields.description,
+          phone: fields.phone,
+          telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+          status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+          source,
+          sourceChat: 'Личное сообщение боту',
+          sourceChatId: String(chatId),
+          sourceMessageId: msg.message_id,
+        };
+        const listing = await createListing(env, input);
+        await notifyAdmins(env, listing);
+        const statusNote = input.status === 'published'
+          ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+          : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
         await sendText(env, chatId,
-          'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.\n' +
-          'Если нужно что-то передать — нажмите /post, помогу разместить.');
-      } else {
-        await sendText(env, chatId, 'Похоже, это объявление. Нажмите /post, чтобы разместить его на доске, я помогу заполнить поля.');
+          formatListing(listing, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '') + statusNote);
+        return;
+      }
+      if (looksLikeListing(text)) {
+        await sendText(env, chatId,
+          'Похоже, это объявление, но целиком я его не разобрал. Нажмите /post — проведу по шагам.');
+        return;
       }
     }
     return;
@@ -673,11 +729,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // Каскад: сначала правила. Уверенно (маршрут + тип) — как раньше, бесплатно.
   // Неуверенно — ИИ-оформление через DeepSeek (если задан AI_API_KEY),
   // с жёсткой валидацией ответа и пометкой для модератора.
-  let fields: {
-    type: ListingType; fromCity: string; toCity: string;
-    departureDate: string | null; weightKg: number | null; price: string | null;
-    telegram: string | null; phone: string | null; description: string;
-  } | null = null;
+  let fields: AiFields | null = null;
   let source: ListingInput['source'] = 'telegram';
 
   if (parsed.confidence >= 0.7) {
@@ -693,7 +745,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       phone: parsed.phone,
       description: text.slice(0, 2000),
     };
-  } else if (env.AI_API_KEY && hasIntent(text)) {
+  } else if (env.AI_API_KEY && worthAiCheck(text)) {
     // дешёвый фильтр прошёл (есть слова-признаки) — можно звать ИИ
     if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
     const ai = await aiExtractListing(env, text);

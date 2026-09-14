@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly } from '../src/parser';
+import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly, worthAiCheck } from '../src/parser';
 import { isRussianCity } from '../src/util';
 
 const NOW = new Date('2026-09-06T12:00:00Z');
@@ -31,6 +31,17 @@ describe('пассажирские попутки — мимо доски', () =
     expect(isPassengerOnly('Водитель грузового автомобиля (Sprinter). Среда. Гродно-Минск. Кому надо завезти пианино, обращайтесь!')).toBe(false);
     expect(isPassengerOnly('Нужно передать посылку Варшава - Львов, конверт с документами')).toBe(false);
     expect(isPassengerOnly('Возьму пассажира и посылки, Варшава - Минск, место есть')).toBe(false);
+  });
+});
+
+describe('фильтр перед ИИ (worthAiCheck)', () => {
+  it('живые формулировки пускает к ИИ', () => {
+    expect(worthAiCheck('есть кто из Бреста в Варшаву в пятницу? надо коробку передать')).toBe(true);
+    expect(worthAiCheck('Ребят, надо документы передать в Минск, заплачу')).toBe(true);
+  });
+  it('болтовню не пускает — ИИ не тратится', () => {
+    expect(worthAiCheck('Спасибо большое!')).toBe(false);
+    expect(worthAiCheck('ахах, классный мем')).toBe(false);
   });
 });
 
