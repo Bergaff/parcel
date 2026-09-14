@@ -93,9 +93,101 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
-export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean }> {
+/**
+ * Заявки по городу (куда ИЛИ откуда), без учёта регистра.
+ * Кроме действующих показывает и архив — заявки с прошедшей датой,
+ * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
+ */
+export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
+  const pattern = globCi(city);
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+     WHERE status IN ('published', 'expired')
+       AND (from_city GLOB ? OR to_city GLOB ?)
+       AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
+     ORDER BY (CASE WHEN status = 'expired' OR departure_date < date('now', '+3 hours') THEN 1 ELSE 0 END),
+              COALESCE(published_at, created_at) DESC
+     LIMIT ?`
+  ).bind(pattern, pattern, limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/**
+ * Архивация по расписанию (cron, раз в сутки):
+ * 1) опубликованные заявки с прошедшей датой выезда → статус 'expired' (архив):
+ *    они пропадают с доски, но месяц ещё доступны по ссылке и в /поиск;
+ * 2) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE).
+ */
+export async function archiveExpired(env: Env): Promise<{ archived: number; deleted: number }> {
+  const upd = await env.DB.prepare(
+    `UPDATE listings SET status = 'expired'
+     WHERE status = 'published'
+       AND departure_date IS NOT NULL
+       AND departure_date < date('now', '+3 hours')`
+  ).run();
+  const del = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE departure_date IS NOT NULL
+       AND departure_date < date('now', '+3 hours', '-30 days')`
+  ).run();
+  return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0 };
+}
+
+/** Заявка по префиксу id (от 4 символов): «a1b2» из «№ A1B2» на сайте,
+ *  короткий id из сообщения бота (#a1b2c3d4) или полный uuid из ссылки. */
+export async function findByIdPrefix(env: Env, prefix: string): Promise<Listing[]> {
+  const clean = prefix.toLowerCase().replace(/[^0-9a-f-]/g, '');
+  if (clean.length < 4 || clean.length > 36) return [];
+  const res = await env.DB.prepare('SELECT * FROM listings WHERE id LIKE ?').bind(`${clean}%`).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Заявки на доске (действующие + архив) — для админ-панели сайта. */
+export async function listAdminBoard(env: Env, limit = 200): Promise<Listing[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ('published', 'expired')
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Редактирование заявки в админ-панели: обновляет поля и возвращает обновлённую заявку. */
+export async function updateListing(
+  env: Env,
+  id: string,
+  patch: Partial<Pick<ListingInput,
+    'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
+): Promise<Listing | null> {
+  const res = await env.DB.prepare(
+    `UPDATE listings SET
+       type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
+       price = ?, description = ?, telegram = ?, phone = ?
+     WHERE id = ?`
+  ).bind(
+    patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
+    patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
+    patch.description ?? '', patch.telegram ?? null, patch.phone ?? null, id
+  ).run();
+  if ((res.meta.changes ?? 0) === 0) return null;
+  const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
+    | Record<string, unknown>
+    | null;
+  return row ? mapRow(row) : null;
+}
+
+/** Полное удаление заявки (админ-панель): вместе с жалобами и отметками обработанных сообщений. */
+export async function deleteListing(env: Env, id: string): Promise<boolean> {
+  const res = await env.DB.batch([
+    env.DB.prepare('DELETE FROM reports WHERE listing_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM tg_seen WHERE listing_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM listings WHERE id = ?').bind(id),
+  ]);
+  return Number(res[2]?.meta.changes ?? 0) > 0;
+}
+
+export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
-  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false };
+  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };
 
   await env.DB.prepare(
     'INSERT INTO reports (id, listing_id, reason, reporter_ip, created_at) VALUES (?, ?, ?, ?, ?)'
@@ -108,7 +200,7 @@ export async function addReport(env: Env, listingId: string, reason: string | nu
     await updateListingStatus(env, listingId, 'rejected');
     autoRejected = true;
   }
-  return { ok: true, autoRejected };
+  return { ok: true, autoRejected, count };
 }
 
 export async function markSeen(env: Env, chatId: string, messageId: number): Promise<boolean> {
@@ -135,17 +227,46 @@ function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
 }
 
+/** Паттерн для GLOB без учёта регистра (SQLite LIKE не сворачивает регистр кириллицы):
+ *  каждая буква превращается в класс [аА], спецсимволы GLOB (* ? [ ]) экранируются. */
+function globCi(q: string): string {
+  let out = '';
+  for (const ch of q) {
+    const lo = ch.toLowerCase();
+    const up = ch.toUpperCase();
+    if (ch === ']' ) out += '[]]';
+    else if (ch === '*' || ch === '?' || ch === '[') out += `[${ch}]`;
+    else if (lo !== up) out += `[${lo}${up}]`;
+    else out += ch;
+  }
+  return `*${out}*`;
+}
+
 interface WhereClause { sql: string; params: (string | number)[] }
 
 function buildWhere(f: ListFilters): WhereClause {
-  let sql = ' WHERE status = ?';
-  const params: (string | number)[] = [f.status ?? 'published'];
-  if (f.from) { sql += ' AND from_city LIKE ?'; params.push(`%${escapeLike(f.from)}%`); }
-  if (f.to) { sql += ' AND to_city LIKE ?'; params.push(`%${escapeLike(f.to)}%`); }
+  let sql: string;
+  const params: (string | number)[] = [];
+  if (f.archive) {
+    // Архив (вкладка на доске): помеченные cron'ом ('expired')
+    // и ещё не помеченные просроченные ('published' с прошедшей датой).
+    sql = " WHERE (status = 'expired' OR (status = 'published' AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')))";
+  } else {
+    sql = ' WHERE status = ?';
+    params.push(f.status ?? 'published');
+    // Доска показывает только актуальные заявки: дата выезда не прошла
+    // (или не указана). Просроченные живут в архиве — см. archiveExpired.
+    if ((f.status ?? 'published') === 'published') {
+      sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+    }
+  }
+  if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
+  if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
   if (f.q) {
-    sql += ' AND (description LIKE ? OR from_city LIKE ? OR to_city LIKE ?)';
-    params.push(`%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`, `%${escapeLike(f.q)}%`);
+    const pattern = globCi(f.q);
+    sql += ' AND (description GLOB ? OR from_city GLOB ? OR to_city GLOB ?)';
+    params.push(pattern, pattern, pattern);
   }
   return { sql, params };
 }

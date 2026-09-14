@@ -1,35 +1,53 @@
 # Конфигурация Cloudflare Workers.
 # Этот файл читает и локальный `npm run dev`, и сборка на Cloudflare (Workers Builds).
 #
-# ВАЖНО для сборки на Cloudflare:
-#   1. `name` должен совпадать с именем проекта в дашборде (у вас «parcel»).
-#   2. Ветка, которую собирает проект, должна содержать ЭТОТ файл и папку public/.
-#      Код лежит на ветке arena/01a07723-parcel: укажите её в Production branch
-#      проекта или смержите PR из неё в main.
-#   3. Подставьте реальные ID D1 и KV ниже (создать: wrangler d1 create parcel-db,
-#      wrangler kv namespace create KV), иначе deploy упадёт на биндингах.
+# ID ресурсов: D1 `poputchka-db` и KV-неймспейс уже подставлены.
+# Проверить/создать ресурсы можно в дашборде: Storage & Databases → D1 / KV
+# (подробно — README, раздел «2. Создать ресурсы Cloudflare (D1 + KV)»).
 
 name = "parcel"
 main = "src/index.ts"
-compatibility_date = "2025-09-01"
+compatibility_date = "2026-09-06"
 
-# Статика сайта. В схеме «Pages = сайт, Worker = парсер» это тоже не мешает:
-# воркер дополнительно раздаёт страницу на своём домене.
+# Не затирать при деплое переменные, добавленные через дашборд
+# (Workers & Pages → parcel → Settings → Variables and Secrets).
+keep_vars = true
+
+# Несекретные настройки. Секреты — BOT_TOKEN, BOT_SECRET, ADMIN_IDS,
+# ADMIN_API_TOKEN — задаются через дашборд или `wrangler secret put`
+# и в Git не попадают.
+[vars]
+AUTO_APPROVE = "0"                          # "1" — публиковать объявления без модерации
+BOT_USERNAME = "parcel_transfer_bot"        # юзернейм бота без @
+SITE_URL = "https://pop-utka.app"           # основной домен сайта (custom domain воркера)
+
+# Статика: воркер дополнительно раздаёт сайт на своём домене
+# (основной сайт живёт на Pages, друг другу не мешает).
+# /item/* и /og/* всегда идут в воркер: страница с og-разметкой и
+# динамическая OG-картинка объявления для превью в мессенджерах.
 [assets]
 directory = "./public"
 not_found_handling = "404-page"
+binding = "ASSETS"
+run_worker_first = ["/item/*", "/og/*", "/og-debug/*", "/r/*", "/routes", "/sitemap.xml"]
 
-# База объявлений. database_name = имя, которое вы задали при создании.
+# База объявлений.
 [[d1_databases]]
 binding = "DB"
 database_name = "poputchka-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "b97e5a3b-19bd-4a6c-84be-749782f2e90c"
 migrations_dir = "migrations"
 
-# KV: сессии бота, rate limit, счётчики.
+# KV: сессии мастера /post и rate limit.
 [[kv_namespaces]]
 binding = "KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "b882671513e645e5a01a282569f08dee"
+
+# Cron: раз в сутки в 00:00 МСК — просроченные заявки уходят в архив,
+# архив старше 30 дней удаляется (см. archiveExpired в src/store.ts).
+# Ручной запуск: POST /api/admin/archive с ключом ADMIN_API_TOKEN.
+[triggers]
+crons = ["0 21 * * *"]
 
 [observability]
 enabled = true
