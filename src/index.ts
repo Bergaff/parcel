@@ -1,9 +1,10 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, deleteMatchRun, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
+import { formatMatchDigest, listingSnapshot, pairListings } from './match';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
 import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml } from './seo-routes';
 
@@ -388,13 +389,14 @@ app.put('/api/admin/listings/:id', async (c) => {
   // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
   // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
   const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
-  if (!telegram && !phone) return c.json({ error: 'Нужен хотя бы один контакт: telegram или телефон' }, 400);
 
   const item = await updateListing(c.env, c.req.param('id'), {
     type, fromCity, toCity, departureDate, weightKg, price, description, telegram, phone,
   });
   if (!item) return c.json({ error: 'not_found' }, 404);
-  return c.json({ ok: true, item });
+  // Без контакта сохранить можно (у пересылок от людей со скрытым профилем контакта
+  // и не было) — но предупреждаем: заявку с пустым контактом публиковать смысла нет.
+  return c.json({ ok: true, item, warning: telegram || phone ? null : 'no_contact' });
 });
 
 /* Полное удаление заявки (вместе с жалобами) — админ-панель сайта. */
@@ -457,6 +459,91 @@ app.get('/api/admin/listings/:id/related', async (c) => {
 app.post('/api/admin/archive', async (c) => {
   const res = await archiveExpired(c.env);
   return c.json({ ok: true, archived: res.archived, deleted: res.deleted });
+});
+
+/* ------------------------------------------------------------------ */
+/* Подбор пар «водитель везёт» ↔ «нужно передать» + история прогонов     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * POST /api/admin/match — та самая кнопка в админке: сравнить все заявки
+ * (или заявки выбранных городов) и найти пары «водитель ↔ нужно передать».
+ * Каждый прогон сохраняется в историю (match_runs / match_pairs).
+ *
+ * body: { fromCity?, toCity?, days?, includeArchive?, partial?, notify?, note? }
+ */
+app.post('/api/admin/match', async (c) => {
+  const env = c.env;
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const truthy = (v: unknown): boolean => v === true || v === 1 || v === '1' || v === 'true';
+  const fromCity = sanitizeCity(String(body.fromCity ?? ''));
+  const toCity = sanitizeCity(String(body.toCity ?? ''));
+  const days = Math.min(30, Math.max(1, Number(body.days ?? 3) || 3));
+  const includeArchive = truthy(body.includeArchive);
+  const partial = truthy(body.partial);
+  const notify = truthy(body.notify);
+  const note = sanitizeText(String(body.note ?? ''), 300) || null;
+
+  const listings = await listForMatching(env, { includeArchive });
+  const { pairs, stats } = pairListings(listings, {
+    fromCity: fromCity || null,
+    toCity: toCity || null,
+    days,
+    includeArchive,
+    partial,
+    limit: 50,
+  });
+
+  if (notify) {
+    const digest = formatMatchDigest({
+      fromCity: fromCity || null, toCity: toCity || null, days, pairs, stats, siteUrl: env.SITE_URL,
+    });
+    await notifyAdminsDigest(env, digest).catch(() => undefined);
+  }
+
+  const run = await saveMatchRun(env, {
+    fromCity: fromCity || null,
+    toCity: toCity || null,
+    daysWindow: days,
+    includeArchive,
+    partial,
+    offersTotal: stats.offers,
+    requestsTotal: stats.requests,
+    notified: notify,
+    note,
+  }, pairs);
+
+  return c.json({
+    run,
+    stats,
+    pairs: pairs.map((p) => ({
+      score: p.score,
+      reasons: p.reasons,
+      offer: listingSnapshot(p.offer),
+      request: listingSnapshot(p.request),
+    })),
+  });
+});
+
+/** GET /api/admin/match — история прогонов подбора. */
+app.get('/api/admin/match', async (c) => {
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit')) || 30));
+  return c.json({ runs: await listMatchRuns(c.env, limit) });
+});
+
+/** GET /api/admin/match/:id — прогон с парами. Пары хранятся снимками заявок,
+ *  поэтому история читается даже после того, как крон почистит архив. */
+app.get('/api/admin/match/:id', async (c) => {
+  const found = await getMatchRun(c.env, c.req.param('id'));
+  if (!found) return c.json({ error: 'not_found' }, 404);
+  return c.json(found);
+});
+
+/** DELETE /api/admin/match/:id — удалить прогон из истории. */
+app.delete('/api/admin/match/:id', async (c) => {
+  const ok = await deleteMatchRun(c.env, c.req.param('id'));
+  if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
 });
 
 /* Cron: раз в сутки архивируем просроченные заявки и подчищаем старый архив.

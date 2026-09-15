@@ -1,4 +1,6 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingStatus } from './types';
+import type { MatchPair, ListingSnapshot } from './match';
+import { listingSnapshot, parseSnapshot } from './match';
 import { normalizeContacts } from './util';
 
 function mapRow(row: Record<string, unknown>): Listing {
@@ -283,7 +285,12 @@ export async function deleteListing(env: Env, id: string): Promise<boolean> {
 
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
-  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };
+  // Жаловаться можно и на архивную заявку: она месяц висит по ссылке, автору
+  // всё ещё пишут. Раньше принимались только 'published' — кнопка на странице
+  // архивной заявки отвечала «не получилось отправить жалобу».
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
+    return { ok: false, autoRejected: false, count: 0 };
+  }
 
   await env.DB.prepare(
     'INSERT INTO reports (id, listing_id, reason, reporter_ip, created_at) VALUES (?, ?, ?, ?, ?)'
@@ -380,4 +387,210 @@ export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: numb
     if (row.type === 'request') request = Number(row.n ?? 0);
   }
   return { offer, request };
+}
+
+/* ------------------------------------------------------------------ */
+/* Подбор пар «водитель ↔ нужно передать» и история прогонов           */
+/* ------------------------------------------------------------------ */
+
+export interface MatchRun {
+  id: string;
+  createdAt: string;
+  fromCity: string | null;
+  toCity: string | null;
+  daysWindow: number;
+  includeArchive: boolean;
+  partial: boolean;
+  offersTotal: number;
+  requestsTotal: number;
+  pairsFound: number;
+  notified: boolean;
+  note: string | null;
+}
+
+export interface StoredMatchPair {
+  id: string;
+  runId: string;
+  offerId: string;
+  requestId: string;
+  score: number;
+  reason: string | null;
+  offer: ListingSnapshot | null;
+  request: ListingSnapshot | null;
+  createdAt: string;
+}
+
+function mapRun(row: Record<string, unknown>): MatchRun {
+  return {
+    id: String(row.id),
+    createdAt: String(row.created_at),
+    fromCity: row.from_city ? String(row.from_city) : null,
+    toCity: row.to_city ? String(row.to_city) : null,
+    daysWindow: Number(row.days_window ?? 3),
+    includeArchive: Number(row.include_archive ?? 0) === 1,
+    partial: Number(row.partial ?? 0) === 1,
+    offersTotal: Number(row.offers_total ?? 0),
+    requestsTotal: Number(row.requests_total ?? 0),
+    pairsFound: Number(row.pairs_found ?? 0),
+    notified: Number(row.notified ?? 0) === 1,
+    note: row.note ? String(row.note) : null,
+  };
+}
+
+function mapPair(row: Record<string, unknown>): StoredMatchPair {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    offerId: String(row.offer_id),
+    requestId: String(row.request_id),
+    score: Number(row.score ?? 0),
+    reason: row.reason ? String(row.reason) : null,
+    offer: parseSnapshot(row.offer_json ? String(row.offer_json) : null),
+    request: parseSnapshot(row.request_json ? String(row.request_json) : null),
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+/** Разово создать таблицы подбора, если их нет (тот же DDL, что в миграции 0005).
+ *  Идемпотентно — можно звать перед каждым прогоном. */
+export async function ensureMatchTables(env: Env): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS match_runs (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      from_city TEXT,
+      to_city TEXT,
+      days_window INTEGER NOT NULL DEFAULT 3,
+      include_archive INTEGER NOT NULL DEFAULT 0,
+      partial INTEGER NOT NULL DEFAULT 0,
+      offers_total INTEGER NOT NULL DEFAULT 0,
+      requests_total INTEGER NOT NULL DEFAULT 0,
+      pairs_found INTEGER NOT NULL DEFAULT 0,
+      notified INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    )`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_runs_created ON match_runs (created_at DESC)'),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS match_pairs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES match_runs(id) ON DELETE CASCADE,
+      offer_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      score INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      offer_json TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_pairs_run ON match_pairs (run_id)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_pairs_offer ON match_pairs (offer_id)'),
+  ]);
+}
+
+/** Заявки для подбора: опубликованные (и, если попросят, архив). Города и даты
+ *  дальше фильтрует src/match.ts — тут только статус и актуальность. */
+export async function listForMatching(
+  env: Env,
+  opts: { includeArchive?: boolean; limit?: number } = {}
+): Promise<Listing[]> {
+  const limit = Math.min(500, Math.max(1, opts.limit ?? 400));
+  const statuses = opts.includeArchive ? "('published', 'expired')" : "('published')";
+  // Без архива берём только будущие даты: заявка со вчерашним выездом уже не полезна
+  const fresh = opts.includeArchive
+    ? ''
+    : "AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ${statuses} ${fresh}
+     ORDER BY (departure_date IS NULL), departure_date ASC, COALESCE(published_at, created_at) DESC
+     LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Сохранить прогон подбора вместе с парами (история). */
+export async function saveMatchRun(
+  env: Env,
+  input: {
+    fromCity: string | null;
+    toCity: string | null;
+    daysWindow: number;
+    includeArchive: boolean;
+    partial: boolean;
+    offersTotal: number;
+    requestsTotal: number;
+    notified: boolean;
+    note?: string | null;
+  },
+  pairs: MatchPair[]
+): Promise<MatchRun> {
+  await ensureMatchTables(env);
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const statements = [
+    env.DB.prepare(
+      `INSERT INTO match_runs
+        (id, created_at, from_city, to_city, days_window, include_archive, partial,
+         offers_total, requests_total, pairs_found, notified, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id, createdAt, input.fromCity, input.toCity, input.daysWindow,
+      input.includeArchive ? 1 : 0, input.partial ? 1 : 0,
+      input.offersTotal, input.requestsTotal, pairs.length,
+      input.notified ? 1 : 0, input.note ?? null
+    ),
+  ];
+  for (const p of pairs) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO match_pairs
+          (id, run_id, offer_id, request_id, score, reason, offer_json, request_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        crypto.randomUUID(), id, p.offer.id, p.request.id, p.score,
+        p.reasons.join('; ').slice(0, 400),
+        JSON.stringify(listingSnapshot(p.offer)), JSON.stringify(listingSnapshot(p.request)), createdAt
+      )
+    );
+  }
+  // D1 batch ограничен по числу запросов — режем на порции
+  for (let i = 0; i < statements.length; i += 50) {
+    await env.DB.batch(statements.slice(i, i + 50));
+  }
+  return {
+    id, createdAt,
+    fromCity: input.fromCity, toCity: input.toCity, daysWindow: input.daysWindow,
+    includeArchive: input.includeArchive, partial: input.partial,
+    offersTotal: input.offersTotal, requestsTotal: input.requestsTotal,
+    pairsFound: pairs.length, notified: input.notified, note: input.note ?? null,
+  };
+}
+
+export async function listMatchRuns(env: Env, limit = 30): Promise<MatchRun[]> {
+  await ensureMatchTables(env);
+  const res = await env.DB.prepare(
+    'SELECT * FROM match_runs ORDER BY created_at DESC LIMIT ?'
+  ).bind(Math.min(100, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRun);
+}
+
+export async function getMatchRun(
+  env: Env,
+  id: string
+): Promise<{ run: MatchRun; pairs: StoredMatchPair[] } | null> {
+  await ensureMatchTables(env);
+  const row = (await env.DB.prepare('SELECT * FROM match_runs WHERE id = ?').bind(id).first()) as
+    | Record<string, unknown> | null;
+  if (!row) return null;
+  const pairsRes = await env.DB.prepare(
+    'SELECT * FROM match_pairs WHERE run_id = ? ORDER BY score DESC, created_at ASC LIMIT 200'
+  ).bind(id).all();
+  const pairs = ((pairsRes.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapPair);
+  return { run: mapRun(row), pairs };
+}
+
+export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
+  const res = await env.DB.batch([
+    env.DB.prepare('DELETE FROM match_pairs WHERE run_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM match_runs WHERE id = ?').bind(id),
+  ]);
+  return Number(res[1]?.meta.changes ?? 0) > 0;
 }

@@ -969,8 +969,12 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
+  // У пересылок от людей со скрытым профилем контакта не бывает: модератор
+  // дописывает его вручную в админке — даём ссылку прямо в карточке.
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const editLink = site ? `, дописать в <a href="${site}/#/admin">админке</a>` : ' — допишите вручную в админке';
   const noContact = uniqueContacts(listing.telegram, listing.phone).length === 0
-    ? '\n<i>⚠ Контакта нет — сверьтесь с исходным сообщением или чатом</i>'
+    ? `\n<i>⚠ Контакта нет (автор пересылки мог скрыть профиль)${editLink}</i>`
     : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
@@ -1000,6 +1004,42 @@ export async function notifyAdminsReport(env: Env, listing: Listing, reason: str
       }
     ).catch(() => undefined);
   }
+}
+
+/**
+ * Отправить готовую HTML-сводку всем админам (например, результат подбора пар
+ * «водитель ↔ нужно передать»). Режем на части: лимит сообщения Telegram — 4096 символов.
+ */
+export async function notifyAdminsDigest(env: Env, html: string): Promise<void> {
+  const text = (html ?? '').trim();
+  if (!text) return;
+  const parts = splitDigest(text, 3800);
+  for (const adminId of admins(env)) {
+    for (const part of parts) {
+      await sendText(env, Number(adminId), part).catch(() => undefined);
+    }
+  }
+}
+
+/** Разбить длинный текст на сообщения по пустым строкам (блоки не рвём). */
+export function splitDigest(text: string, max = 3800): string[] {
+  if (text.length <= max) return [text];
+  const out: string[] = [];
+  let cur = '';
+  for (const block of text.split('\n\n')) {
+    const piece = cur ? `${cur}\n\n${block}` : block;
+    if (piece.length <= max) { cur = piece; continue; }
+    if (cur) out.push(cur);
+    // Один блок длиннее лимита — режем жёстко
+    if (block.length > max) {
+      for (let i = 0; i < block.length; i += max) out.push(block.slice(i, i + max));
+      cur = '';
+    } else {
+      cur = block;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 }
 
 /* ------------------------------------------------------------------ */

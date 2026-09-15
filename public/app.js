@@ -250,6 +250,12 @@ function buildRow(l) {
    ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: contact.kind === 'phone' ? 'позвонить' : 'написать' })
    : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
    el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
+   el('a', {
+     class: 'write-link report-link',
+     href: `#/item/${l.id}`,
+     text: 'пожаловаться',
+     onclick: (e) => { e.preventDefault(); e.stopPropagation(); openReport(l.id); },
+   }),
    el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
  ].filter(Boolean)),
   ]);
@@ -490,11 +496,16 @@ async function submitReport(id) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason: reportReason }),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'fail');
     toast(data.message || 'Жалоба принята.');
-  } catch {
-    toast('Не получилось отправить жалобу. Попробуйте позже.');
+  } catch (ex) {
+    const msg = ex && ex.message === 'not_found'
+      ? 'Такое объявление уже снято с доски — жаловаться не на что.'
+      : ex && ex.message === 'too_many_requests'
+        ? 'Слишком много жалоб подряд. Подождите немного и попробуйте ещё раз.'
+        : 'Не получилось отправить жалобу. Попробуйте позже.';
+    toast(msg);
   }
 }
 
@@ -554,7 +565,7 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board' | 'chats'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match'
 let adminEditId = null; // id заявки, открытой на редактирование
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
@@ -677,9 +688,13 @@ function adminEditForm(l) {
       field('Цена', input('price', l.price ?? '')),
     ]),
     el('div', { class: 'row2' }, [
-      field('Telegram', input('telegram', l.telegram ?? '')),
-      field('Телефон', input('phone', l.phone ?? '')),
+      field('Telegram', input('telegram', l.telegram ?? '', { placeholder: '@username' })),
+      field('Телефон', input('phone', l.phone ?? '', { placeholder: '+48 …' })),
     ]),
+    el('p', {
+      class: 'form-note',
+      text: 'Автор пересылки скрыл профиль и контакта нет? Впишите номер или @username вручную — можно из исходного сообщения (ссылка «источник» выше). Одно и то же в оба поля писать не нужно.',
+    }),
     field('Описание', el('textarea', { class: 'q', name: 'description', rows: '3' }, [l.description])),
     el('div', { class: 'admin-card-actions' }, [
       el('button', { class: 'btn btn-ink btn-sm', type: 'submit', text: 'сохранить' }),
@@ -710,7 +725,7 @@ function adminEditForm(l) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Ошибка');
       adminEditId = null;
-      toast('Сохранено.');
+      toast(data.warning === 'no_contact' ? 'Сохранено. Но контакта у заявки нет — писать человеку некуда.' : 'Сохранено.');
       await loadAdmin();
     } catch (ex) {
       toast(`Не сохранилось: ${ex.message}`);
@@ -730,6 +745,10 @@ async function loadAdmin() {
   $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
   if (adminTab === 'chats') {
     await renderAdminChats();
+    return;
+  }
+  if (adminTab === 'match') {
+    await renderAdminMatch();
     return;
   }
   try {
@@ -841,6 +860,308 @@ async function renderAdminChats() {
   }
 }
 
+/* ---------- вкладка «подбор»: пары «водитель везёт» ↔ «нужно передать» ---------- */
+
+let matchRuns = [];        // история прогонов
+let matchView = null;      // показанный сейчас результат: { title, pairs, stats?, run? }
+let matchOpenRunId = null; // какой прогон истории раскрыт
+let matchFormEl = null;    // форма одна на вкладку, чтобы не терять введённые города
+
+function fmtDateTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso || '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}.${p(d.getMonth() + 1)} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function matchWhere(run) {
+  const where = [run?.fromCity, run?.toCity].filter(Boolean).join(' → ').trim();
+  return where || 'все города';
+}
+
+/* Одна сторона пары: снимок заявки (те же поля приходят и из истории прогонов). */
+function matchSide(s, icon) {
+  if (!s) return el('p', { class: 'match-desc', text: 'заявка удалена — снимок не сохранился' });
+  const bits = [
+    el('span', { class: 'match-route', text: `${s.fromCity} → ${s.toCity}` }),
+    el('span', { text: s.departureDate ? `выезд ${fmtDate(s.departureDate)}` : 'дата не указана' }),
+    s.weightKg != null ? el('span', { class: 'mono', text: `${String(s.weightKg).replace('.', ',')} кг` }) : null,
+    s.price ? el('span', { class: 'mono', text: s.price }) : null,
+    s.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
+    el('span', { class: 'mono', text: `№ ${String(s.id).slice(0, 8)}` }),
+  ].filter(Boolean);
+  const contacts = Array.isArray(s.contacts) ? s.contacts : [];
+  return el('div', { class: 'match-side' }, [
+    el('p', { class: 'match-side-head' }, [el('span', { class: 'match-icon', text: icon }), ...bits]),
+    s.description ? el('p', { class: 'match-desc', text: s.description }) : null,
+    contacts.length
+      ? el('p', { class: 'match-contact' }, ['контакт: ', el('b', { text: contacts.join(', ') })])
+      : el('p', { class: 'match-contact match-nocontact', text: 'контакта нет — допишите его в карточке заявки («править»)' }),
+  ].filter(Boolean));
+}
+
+/* Текст, который админ копирует и отправляет людям — знакомим их напрямую. */
+function matchMessage(p) {
+  const site = `${location.origin}${location.pathname}`.replace(/\/$/, '');
+  const side = (s) => `${s.fromCity} → ${s.toCity}` +
+    (s.departureDate ? `, выезд ${s.departureDate}` : '') +
+    (s.weightKg != null ? `, ${String(s.weightKg).replace('.', ',')} кг` : '') +
+    `, контакт: ${s.contacts?.[0] ?? 'не указан'}`;
+  return [
+    'Здравствуйте! На доске «Попутка» нашлась пара по вашему маршруту:',
+    `🚗 водитель везёт: ${side(p.offer)}`,
+    `📦 нужно передать: ${side(p.request)}`,
+    '',
+    `${site}#/item/${p.offer.id}`,
+    `${site}#/item/${p.request.id}`,
+    '',
+    'Напишите друг другу и договоритесь о деталях — доска только знакомит.',
+  ].join('\n');
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = el('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.append(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    toast('Сообщение скопировано — можно вставлять в Telegram.');
+  } catch {
+    toast('Скопировать не получилось. Откройте карточки и напишите вручную.');
+  }
+}
+
+function matchPairCard(p, i) {
+  const reasons = Array.isArray(p.reasons) ? p.reasons : String(p.reason ?? '').split('; ').filter(Boolean);
+  return el('article', { class: 'admin-card match-pair' }, [
+    el('p', { class: 'match-pair-head' }, [
+      el('span', { class: 'match-score', text: `пара ${i} · оценка ${p.score}` }),
+      ...reasons.map((r) => el('span', { class: 'match-reason', text: r })),
+    ]),
+    matchSide(p.offer, '🚗'),
+    matchSide(p.request, '📦'),
+    el('div', { class: 'admin-card-actions' }, [
+      el('a', { class: 'btn btn-line btn-sm', href: `#/item/${p.offer.id}`, text: 'водитель' }),
+      el('a', { class: 'btn btn-line btn-sm', href: `#/item/${p.request.id}`, text: 'заявка' }),
+      el('button', {
+        class: 'btn btn-line btn-sm', type: 'button', text: 'скопировать сообщение',
+        onclick: () => copyText(matchMessage(p)),
+      }),
+    ]),
+  ]);
+}
+
+function matchForm() {
+  const field = (labelText, control) =>
+    el('label', { class: 'field' }, [el('span', { class: 'label', text: labelText }), control]);
+  const check = (name, labelText, checked) => el('label', { class: 'match-check' }, [
+    el('input', { type: 'checkbox', name, ...(checked ? { checked: true } : {}) }),
+    el('span', { text: labelText }),
+  ]);
+
+  const form = el('form', { class: 'admin-card match-form' }, [
+    el('p', {
+      class: 'admin-contact',
+      text: 'Одна кнопка — сравнить всех водителей со всеми заявками «нужно передать» и показать, кому написать. Города можно оставить пустыми (тогда берём все) или задать, например «водители Варшава — заявки на передачу в Минск».',
+    }),
+    el('div', { class: 'row2' }, [
+      field('Город отправления', el('input', { class: 'q', name: 'fromCity', placeholder: 'например, Варшава', autocomplete: 'off' })),
+      field('Город назначения', el('input', { class: 'q', name: 'toCity', placeholder: 'например, Минск', autocomplete: 'off' })),
+    ]),
+    el('div', { class: 'row2' }, [
+      field('Окно по датам, дней', el('input', { class: 'q', name: 'days', type: 'number', min: '1', max: '30', value: '3' })),
+      field('Заметка к прогону', el('input', { class: 'q', name: 'note', placeholder: 'необязательно', autocomplete: 'off' })),
+    ]),
+    el('div', { class: 'match-checks' }, [
+      check('includeArchive', 'брать и архив', false),
+      check('partial', 'пары с одним общим городом', false),
+      check('notify', 'прислать сводку в Telegram', true),
+    ]),
+    el('div', { class: 'admin-card-actions' }, [
+      el('button', { class: 'btn btn-ink btn-sm', type: 'submit', text: 'подобрать пары' }),
+    ]),
+    el('p', {
+      class: 'form-note',
+      text: 'Прогон сохранится в истории ниже и останется читаемым, даже когда сами заявки уйдут в архив и удалятся.',
+    }),
+  ]);
+  form.addEventListener('submit', (e) => { e.preventDefault(); runMatch(form); });
+  return form;
+}
+
+function matchStatsText(stats) {
+  if (!stats) return '';
+  const r = stats.rejected ?? {};
+  return `В подборе: водителей ${stats.offers}, заявок ${stats.requests}. ` +
+    `Отклонено: маршрут ${r.route ?? 0}, даты ${r.date_gap ?? 0}, вес ${r.weight ?? 0}, ` +
+    `один контакт ${r.same_contact ?? 0}, архив ${r.archived ?? 0}.`;
+}
+
+function matchResultsBox() {
+  if (!matchView) return el('div');
+  const nodes = [
+    el('div', { class: 'match-result-head' }, [
+      el('p', { class: 'admin-contact', text: matchView.title }),
+      matchView.stats ? el('p', { class: 'match-stats', text: matchStatsText(matchView.stats) }) : null,
+      el('button', {
+        class: 'link-btn', type: 'button', text: 'скрыть результат',
+        onclick: () => { matchView = null; matchOpenRunId = null; renderMatchTab(); },
+      }),
+    ].filter(Boolean)),
+  ];
+  const pairs = matchView.pairs ?? [];
+  if (!pairs.length) {
+    nodes.push(el('p', {
+      class: 'empty-note',
+      text: 'Пар не нашлось. Попробуйте расширить окно по датам, включить архив или убрать города из фильтра.',
+    }));
+  }
+  pairs.forEach((p, i) => nodes.push(matchPairCard(p, i + 1)));
+  return el('section', { class: 'match-result' }, nodes);
+}
+
+function matchHistoryBox() {
+  const head = el('h3', { class: 'match-history-head', text: `История подборов: ${matchRuns.length}` });
+  if (!matchRuns.length) {
+    return el('section', { class: 'match-history' }, [
+      head,
+      el('p', { class: 'empty-note', text: 'Прогонов пока нет. Нажмите «подобрать пары» — прогон сохранится здесь.' }),
+    ]);
+  }
+  return el('section', { class: 'match-history' }, [
+    head,
+    ...matchRuns.map((r) => el('article', {
+      class: `admin-card match-run${matchOpenRunId === r.id ? ' match-run-open' : ''}`,
+    }, [
+      el('p', { class: 'match-run-line' }, [
+        el('b', { text: fmtDateTime(r.createdAt) }),
+        ` · ${matchWhere(r)} · окно ${r.daysWindow} дн. · водителей ${r.offersTotal}, заявок ${r.requestsTotal} · пар ${r.pairsFound}`,
+        r.notified ? el('span', { class: 'match-flag', text: 'сводка отправлена' }) : null,
+        r.includeArchive ? el('span', { class: 'match-flag', text: 'с архивом' }) : null,
+        r.partial ? el('span', { class: 'match-flag', text: 'один город тоже' }) : null,
+        r.note ? el('span', { class: 'match-note', text: `заметка: ${r.note}` }) : null,
+      ].filter(Boolean)),
+      el('div', { class: 'admin-card-actions' }, [
+        el('button', {
+          class: 'btn btn-line btn-sm', type: 'button', text: 'открыть',
+          onclick: () => openMatchRun(r.id),
+        }),
+        el('button', {
+          class: 'link-btn', type: 'button', text: 'удалить',
+          onclick: () => removeMatchRun(r.id),
+        }),
+      ]),
+    ])),
+  ]);
+}
+
+/* Перерисовать вкладку, не трогая форму (чтобы введённые города не пропадали). */
+function renderMatchTab() {
+  if (!matchFormEl) matchFormEl = matchForm();
+  $('#admin-list').replaceChildren(matchFormEl, matchResultsBox(), matchHistoryBox());
+}
+
+async function refreshMatchRuns() {
+  try {
+    const res = await adminApi('/api/admin/match?limit=20');
+    if (!res.ok) throw new Error();
+    const { runs } = await res.json();
+    matchRuns = Array.isArray(runs) ? runs : [];
+  } catch {
+    matchRuns = [];
+  }
+}
+
+async function runMatch(form) {
+  const btn = form.querySelector('button[type="submit"]');
+  const fd = new FormData(form);
+  const body = {
+    fromCity: String(fd.get('fromCity') ?? '').trim(),
+    toCity: String(fd.get('toCity') ?? '').trim(),
+    days: Number(fd.get('days') ?? 3) || 3,
+    note: String(fd.get('note') ?? '').trim(),
+    includeArchive: fd.get('includeArchive') === 'on',
+    partial: fd.get('partial') === 'on',
+    notify: fd.get('notify') === 'on',
+  };
+  if (btn) { btn.disabled = true; btn.textContent = 'подбираю…'; }
+  try {
+    const res = await adminApi('/api/admin/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) throw new Error('ключ администратора не подошёл');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'ошибка сервера');
+    const pairs = Array.isArray(data.pairs) ? data.pairs : [];
+    matchView = {
+      title: `Прогон только что · ${matchWhere(data.run)} · пар: ${pairs.length}` +
+        (body.notify ? ' · сводка ушла в Telegram' : ''),
+      pairs,
+      stats: data.stats,
+      run: data.run,
+    };
+    matchOpenRunId = data.run?.id ?? null;
+    await refreshMatchRuns();
+    renderMatchTab();
+    toast(pairs.length
+      ? `Готово: найдено пар ${pairs.length}.`
+      : 'Готово: пар не нашлось — попробуйте другие города или окно по датам.');
+  } catch (ex) {
+    toast(`Подбор не получился: ${ex.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'подобрать пары'; }
+  }
+}
+
+async function openMatchRun(id) {
+  try {
+    const res = await adminApi(`/api/admin/match/${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error();
+    const { run, pairs } = await res.json();
+    matchOpenRunId = id;
+    matchView = {
+      title: `Прогон от ${fmtDateTime(run.createdAt)} · ${matchWhere(run)} · окно ${run.daysWindow} дн. · пар: ${(pairs ?? []).length}`,
+      pairs: pairs ?? [],
+      run,
+    };
+    renderMatchTab();
+    window.scrollTo({ top: $('#admin-list').offsetTop - 12, behavior: 'smooth' });
+  } catch {
+    toast('Не получилось открыть прогон.');
+  }
+}
+
+async function removeMatchRun(id) {
+  if (!window.confirm('Удалить этот прогон из истории?')) return;
+  try {
+    const res = await adminApi(`/api/admin/match/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error();
+    if (matchOpenRunId === id) { matchOpenRunId = null; matchView = null; }
+    toast('Прогон удалён.');
+    await refreshMatchRuns();
+    renderMatchTab();
+  } catch {
+    toast('Не получилось удалить прогон.');
+  }
+}
+
+async function renderAdminMatch() {
+  $('#admin-count').textContent = 'Подбор пар: одна кнопка сравнивает водителей с заявками на передачу и сохраняет прогон в историю.';
+  $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
+  await refreshMatchRuns();
+  renderMatchTab();
+}
+
 async function adminDelete(id) {
   if (!window.confirm('Удалить объявление навсегда? Вместе с жалобами.')) return;
   try {
@@ -858,6 +1179,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
   $('#admin-tab-board').classList.toggle('on', tab === 'board');
   $('#admin-tab-chats').classList.toggle('on', tab === 'chats');
+  $('#admin-tab-match').classList.toggle('on', tab === 'match');
   loadAdmin();
 }
 
@@ -881,6 +1203,7 @@ function bindAdmin() {
   $('#admin-tab-pending').addEventListener('click', () => switchAdminTab('pending'));
   $('#admin-tab-board').addEventListener('click', () => switchAdminTab('board'));
   $('#admin-tab-chats').addEventListener('click', () => switchAdminTab('chats'));
+  $('#admin-tab-match').addEventListener('click', () => switchAdminTab('match'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();
