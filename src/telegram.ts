@@ -1,7 +1,7 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
+import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
 import {
-  addReport, createListing, findByIdPrefix, getListingById, listPending, markSeen,
+  addReport, createListing, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
@@ -100,15 +100,28 @@ function formatListing(l: Listing, sourceNote = ''): string {
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
   if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
   if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
-  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${l.sourceChat ? `, чат «${escapeHtml(l.sourceChat)}»` : ''}`);
-  else if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
+  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
+  const srcRef = l.sourceChat
+    ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
+    : '';
+  const srcLinkTag = srcLink ? ` — <a href="${srcLink}">исходное сообщение</a>` : '';
+  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${srcRef ? `, ${srcRef}` : ''}${srcLinkTag}`);
+  else if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
 
-/** Ссылка на исходное сообщение в чате. Для публичных чатов работает как t.me/c/... */
-function chatMessageLink(chatId: number, messageId: number): string | null {
-  return `https://t.me/c/${chatId.toString().replace(/^-100/, '')}/${messageId}`;
+/** Ссылка на исходное сообщение в чате (t.me/c/…, открывается у участников).
+ *  Есть только у супергрупп и каналов — их id начинается с -100;
+ *  пересылки от людей и обычные группы честно остаются без ссылки. */
+export function listingSourceLink(
+  sourceChatId: string | null | undefined,
+  sourceMessageId: number | null | undefined
+): string | null {
+  if (!sourceChatId) return null;
+  const m = /^-100(\d+)$/.exec(sourceChatId);
+  if (!m) return null;
+  return `https://t.me/c/${m[1]}${sourceMessageId != null ? `/${sourceMessageId}` : ''}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -393,6 +406,73 @@ async function cmdReport(env: Env, msg: TgMessage, query: string): Promise<void>
   await sendText(env, chatId, 'Передал администраторам, спасибо.');
 }
 
+/* ------------------------------------------------------------------ */
+/* Связи заявки: /связи, /матч, /match                                  */
+/* ------------------------------------------------------------------ */
+
+function relatedDay(iso: string | null | undefined): string {
+  if (!iso) return 'без даты';
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return iso;
+  return `${parseInt(m[3]!, 10)} ${SEARCH_MONTHS[parseInt(m[2]!, 10) - 1]}`;
+}
+
+function relatedLine(l: Listing): string {
+  const bits = [
+    relatedDay(l.departureDate),
+    l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
+    l.price,
+    l.telegram ?? l.phone ?? null,
+    l.status === 'expired' ? 'архив' : null,
+    l.status === 'pending' ? 'на модерации' : null,
+    `№ ${l.id.slice(0, 8)}`,
+  ].filter(Boolean).join(' · ');
+  return `• ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${escapeHtml(bits)}`;
+}
+
+/** Связи заявки: встречные рейсы, тот же маршрут, другие заявки автора. */
+async function cmdRelated(env: Env, chatId: number, query: string): Promise<void> {
+  const arg = query.trim();
+  if (!arg) {
+    await sendText(env, chatId,
+      'Напишите номер заявки:\n<code>/связи a1b2c3d4</code> — покажу встречные рейсы, тот же маршрут и другие заявки автора.');
+    return;
+  }
+  const target = extractListingId(arg);
+  if (!target) {
+    await sendText(env, chatId, 'Не понял номер. Пример: <code>/связи a1b2c3d4</code> — номер из сообщения бота или «№» на сайте.');
+    return;
+  }
+  const matches = await findByIdPrefix(env, target.id);
+  if (matches.length === 0) {
+    await sendText(env, chatId, `Заявку с номером «${escapeHtml(target.id)}» не нашёл.`);
+    return;
+  }
+  if (matches.length > 1) {
+    await sendText(env, chatId, `Под номером «${escapeHtml(target.id)}» несколько заявок — пришлите более длинный кусок номера.`);
+    return;
+  }
+  const l = matches[0]!;
+  const rel = await findRelated(env, l);
+  const chunks: string[] = [`🔗 <b>Заявка:</b> ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${relatedDay(l.departureDate)} · ${escapeHtml(l.telegram ?? l.phone ?? 'без контакта')} · № ${l.id.slice(0, 8)}`];
+  if (rel.reverse.length) {
+    chunks.push(`\n↔ <b>Встречные рейсы (${rel.reverse.length}):</b>`);
+    for (const x of rel.reverse) chunks.push(relatedLine(x));
+  }
+  if (rel.same.length) {
+    chunks.push(`\n→ <b>Тот же маршрут, близкие даты (${rel.same.length}):</b>`);
+    for (const x of rel.same) chunks.push(relatedLine(x));
+  }
+  if (rel.sameContact.length) {
+    chunks.push(`\n👤 <b>Ещё от этого контакта (${rel.sameContact.length}):</b>`);
+    for (const x of rel.sameContact) chunks.push(relatedLine(x));
+  }
+  if (chunks.length === 1) {
+    chunks.push('\nСвязей не нашёл: ни встречных, ни похожих, ни других заявок от этого контакта.');
+  }
+  await sendText(env, chatId, chunks.join('\n'));
+}
+
 /** Разбор сообщения парсером и ответ с результатом (для /parse и пересланных сообщений). */
 async function sendParseReport(env: Env, chatId: number, text: string): Promise<void> {
   const p = parseTelegramMessage(text);
@@ -414,18 +494,135 @@ async function sendParseReport(env: Env, chatId: number, text: string): Promise<
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Каскад разбора: правила → при неуверенности ИИ                      */
+/* ------------------------------------------------------------------ */
+
+/** Поля заявки из правил парсера. */
+function rulesFields(
+  parsed: ReturnType<typeof parseTelegramMessage>,
+  text: string
+): AiFields {
+  return {
+    type: parsed.intent ?? 'offer',
+    fromCity: parsed.fromCity ?? 'не указано',
+    toCity: parsed.toCity ?? 'не указано',
+    departureDate: parsed.departureDate,
+    weightKg: parsed.weightKg,
+    price: parsed.price,
+    telegram: parsed.telegram,
+    phone: parsed.phone,
+    description: text.slice(0, 2000),
+  };
+}
+
+/** Разобрать текст объявления: уверенно правилами, иначе ИИ (DeepSeek).
+ *  Одно сообщение может дать НЕСКОЛЬКО заявок (туда-обратно, два рейса) —
+ *  такие сообщения всегда уходят ИИ. Пустой список — не объявление. */
+async function cascade(
+  env: Env,
+  text: string
+): Promise<{ list: AiFields[]; source: ListingInput['source'] }> {
+  const parsed = parseTelegramMessage(text);
+  const multi = isMultiRoute(text);
+  if (parsed.confidence >= 0.7 && !multi) {
+    return { list: [rulesFields(parsed, text)], source: 'telegram' };
+  }
+  if (env.AI_API_KEY && worthAiCheck(text)) {
+    const list = await aiExtractListing(env, text);
+    if (list.length > 0) return { list, source: 'parser' };
+  }
+  // ИИ не задан или не справился — хотя бы одно объявление правилами
+  if (parsed.confidence >= 0.7) return { list: [rulesFields(parsed, text)], source: 'telegram' };
+  return { list: [], source: 'telegram' };
+}
+
+/** Из forward_origin достаём исходный чат/сообщение (для дедупликации),
+ *  название источника и @username автора пересланного сообщения. */
+function extractForwardOrigin(msg: TgMessage): {
+  chatId?: number; messageId?: number; title?: string; authorUsername?: string;
+} {
+  const o = (msg.forward_origin ?? {}) as Record<string, unknown>;
+  const chat = (o.chat ?? null) as Record<string, unknown> | null;
+  // автор-человек: обычная пересылка (sender_user) или старое поле forward_from
+  const senderUser = (o.sender_user ?? msg.forward_from ?? null) as Record<string, unknown> | null;
+  const hiddenName = typeof o.sender_user_name === 'string' ? o.sender_user_name : undefined;
+  const chatId = chat && typeof chat.id === 'number' ? chat.id : undefined;
+  const messageId = typeof o.message_id === 'number' ? o.message_id : undefined;
+  const authorUsername =
+    senderUser && typeof senderUser.username === 'string' && senderUser.username
+      ? `@${senderUser.username}`
+      : undefined;
+  const authorName =
+    senderUser && typeof senderUser.first_name === 'string' && senderUser.first_name
+      ? senderUser.first_name
+      : hiddenName;
+  const title =
+    chat && typeof chat.title === 'string' ? chat.title
+    : authorName ? `Переслано от ${authorName}`
+    : undefined;
+  return { chatId, messageId, title, authorUsername };
+}
+
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   const chatId = msg.chat.id;
 
-  // Пересланное из чата сообщение: показываем, как его понимает парсер.
-  // Удобно для настройки: переслали реальное объявление — бот ответил разбором.
+  // Пересланное сообщение → заявка на модерацию. Так объявления попадают
+  // на доску даже из чатов, куда бота не добавили: пересылайте их боту.
   if (msg.forward_origin != null || msg.forward_from != null) {
     if (!text) {
       await sendText(env, chatId, 'Переслано без текста — парсер работает только с текстовыми сообщениями.');
       return;
     }
-    await sendParseReport(env, chatId, text);
+    if (isPassengerOnly(text)) {
+      await sendText(env, chatId,
+        'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.');
+      return;
+    }
+    const rl = await rateLimit(env, `fwd:${msg.from?.id ?? chatId}`, 30, 3600);
+    if (!rl.allowed) {
+      await sendText(env, chatId, 'Много пересылок подряд — подождите пару минут и продолжайте.');
+      return;
+    }
+    // Дедупликация: у пересылки поста из канала помним исходный чат+сообщение
+    // (тот же ключ, что у обработки в самих чатах — дубль не создастся).
+    const origin = extractForwardOrigin(msg);
+    const seenChat = origin.chatId != null && origin.messageId != null
+      ? String(origin.chatId)
+      : `fwd:${chatId}`;
+    const seenMsg = origin.messageId ?? msg.message_id;
+    if (!(await markSeen(env, seenChat, seenMsg))) {
+      await sendText(env, chatId, 'Это сообщение я уже обрабатывал — заявка в очереди модерации или уже на доске.');
+      return;
+    }
+    const { list, source } = await cascade(env, text);
+    if (list.length === 0) {
+      // Не распозналось — покажем диагностику разбора, как раньше
+      await sendParseReport(env, chatId, text);
+      return;
+    }
+    const created: Listing[] = [];
+    for (const fields of list) {
+      const input: ListingInput = {
+        ...fields,
+        // контакт — автор сообщения (из forward-данных), а не тот, кто переслал
+        telegram: fields.telegram ?? origin.authorUsername ?? null,
+        status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+        source,
+        sourceChat: origin.title ?? 'Пересланное сообщение',
+        sourceChatId: seenChat,
+        sourceMessageId: origin.messageId ?? null,
+      };
+      const listing = await createListing(env, input);
+      created.push(listing);
+      await notifyAdmins(env, listing);
+    }
+    const statusNote = env.AUTO_APPROVE === '1'
+      ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+      : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
+    await sendText(env, chatId,
+      created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
     return;
   }
 
@@ -441,6 +638,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/post</b>: разместить объявление\n` +
           `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
           `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
+          `• <b>/связи номер</b>: встречные рейсы и похожие заявки — полезно владельцам чатов\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
@@ -511,6 +709,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
         break;
       }
+      case '/связи':
+      case '/матч':
+      case '/match':
+      case '/links': {
+        await cmdRelated(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
       default:
         await sendText(env, chatId, 'Не знаю такую команду. Список команд: /help.');
     }
@@ -529,55 +734,34 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     // Текст без активного мастера: пробуем оформить сразу —
     // сначала правилами, затем ИИ (если задан AI_API_KEY).
     if (looksLikeListing(text) || worthAiCheck(text)) {
-      const chatKey = String(chatId);
       const parsed = parseTelegramMessage(text);
-      let fields: AiFields | null = null;
-      let source: ListingInput['source'] = 'telegram';
-      if (parsed.confidence >= 0.7) {
-        if (await markSeen(env, chatKey, msg.message_id)) {
-          fields = {
-            type: parsed.intent ?? 'offer',
-            fromCity: parsed.fromCity ?? 'не указано',
-            toCity: parsed.toCity ?? 'не указано',
-            departureDate: parsed.departureDate,
-            weightKg: parsed.weightKg,
-            price: parsed.price,
-            telegram: parsed.telegram,
-            phone: parsed.phone,
-            description: text.slice(0, 2000),
-          };
+      let created: Listing[] = [];
+      if (parsed.confidence >= 0.7 || (env.AI_API_KEY && worthAiCheck(text))) {
+        if (await markSeen(env, String(chatId), msg.message_id)) {
+          const { list, source } = await cascade(env, text);
+          for (const fields of list) {
+            const input: ListingInput = {
+              ...fields,
+              telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+              status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+              source,
+              sourceChat: 'Личное сообщение боту',
+              sourceChatId: String(chatId),
+              sourceMessageId: msg.message_id,
+            };
+            const listing = await createListing(env, input);
+            created.push(listing);
+            await notifyAdmins(env, listing);
+          }
+          if (created.length > 0) {
+            const statusNote = env.AUTO_APPROVE === '1'
+              ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+              : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
+            await sendText(env, chatId,
+              created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+            return;
+          }
         }
-      } else if (env.AI_API_KEY) {
-        if (await markSeen(env, chatKey, msg.message_id)) {
-          const ai = await aiExtractListing(env, text);
-          if (ai) { fields = ai; source = 'parser'; }
-        }
-      }
-      if (fields) {
-        const input: ListingInput = {
-          type: fields.type,
-          fromCity: fields.fromCity,
-          toCity: fields.toCity,
-          departureDate: fields.departureDate,
-          weightKg: fields.weightKg,
-          price: fields.price,
-          description: fields.description,
-          phone: fields.phone,
-          telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
-          status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-          source,
-          sourceChat: 'Личное сообщение боту',
-          sourceChatId: String(chatId),
-          sourceMessageId: msg.message_id,
-        };
-        const listing = await createListing(env, input);
-        await notifyAdmins(env, listing);
-        const statusNote = input.status === 'published'
-          ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
-          : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
-        await sendText(env, chatId,
-          formatListing(listing, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '') + statusNote);
-        return;
       }
       if (looksLikeListing(text)) {
         await sendText(env, chatId,
@@ -722,70 +906,46 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // «кто подвезёт до…») пропускаем молча. Водители остаются.
   if (isPassengerOnly(text)) return;
 
-  const parsed = parseTelegramMessage(text);
   const chatKey = String(msg.chat.id);
   const sourceChatId = String(msg.chat.id);
 
-  // Каскад: сначала правила. Уверенно (маршрут + тип) — как раньше, бесплатно.
-  // Неуверенно — ИИ-оформление через DeepSeek (если задан AI_API_KEY),
-  // с жёсткой валидацией ответа и пометкой для модератора.
-  let fields: AiFields | null = null;
-  let source: ListingInput['source'] = 'telegram';
+  // Каскад: уверенно правилами (бесплатно), иначе ИИ. Болтовню — нет
+  // уверенности правил и нечего послать ИИ — пропускаем молча.
+  const parsed = parseTelegramMessage(text);
+  if (parsed.confidence < 0.7 && !(env.AI_API_KEY && worthAiCheck(text))) return;
+  if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
 
-  if (parsed.confidence >= 0.7) {
-    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
-    fields = {
-      type: parsed.intent ?? 'offer',
-      fromCity: parsed.fromCity ?? 'не указано',
-      toCity: parsed.toCity ?? 'не указано',
-      departureDate: parsed.departureDate,
-      weightKg: parsed.weightKg,
-      price: parsed.price,
-      telegram: parsed.telegram,
-      phone: parsed.phone,
-      description: text.slice(0, 2000),
+  const { list, source } = await cascade(env, text);
+  if (list.length === 0) return; // ИИ не признал объявлением — мимо
+
+  const created: Listing[] = [];
+  for (const fields of list) {
+    const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
+    const input: ListingInput = {
+      ...fields,
+      telegram,
+      status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+      source,
+      sourceChat: msg.chat.title ?? null,
+      sourceChatId,
+      sourceMessageId: msg.message_id,
     };
-  } else if (env.AI_API_KEY && worthAiCheck(text)) {
-    // дешёвый фильтр прошёл (есть слова-признаки) — можно звать ИИ
-    if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
-    const ai = await aiExtractListing(env, text);
-    if (!ai) return; // не объявление, пассажирская попутка или ошибка — мимо
-    fields = ai;
-    source = 'parser'; // разбирали ИИ — модератор посмотрит внимательнее
-  } else {
-    return; // слишком похоже на обычный разговор
+    try {
+      const listing = await createListing(env, input);
+      created.push(listing);
+      await setSeenListing(env, chatKey, msg.message_id, listing.id);
+    } catch (e) {
+      // Вернём возможность обработать сообщение при повторной доставке вебхука
+      // (если не создано ни одной заявки — иначе повтор даст дубль)
+      if (created.length === 0) {
+        await env.DB.prepare('DELETE FROM tg_seen WHERE chat_id = ? AND message_id = ?')
+          .bind(chatKey, msg.message_id).run().catch(() => undefined);
+      }
+      console.error('create listing from group failed', e);
+      break;
+    }
   }
-
-  const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
-
-  const input: ListingInput = {
-    type: fields.type,
-    fromCity: fields.fromCity,
-    toCity: fields.toCity,
-    departureDate: fields.departureDate,
-    weightKg: fields.weightKg,
-    price: fields.price,
-    description: fields.description,
-    phone: fields.phone,
-    telegram,
-    status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-    source,
-    sourceChat: msg.chat.title ?? null,
-    sourceChatId,
-    sourceMessageId: msg.message_id,
-  };
-
-  let listing: Listing;
-  try {
-    listing = await createListing(env, input);
-    await setSeenListing(env, chatKey, msg.message_id, listing.id);
-  } catch (e) {
-    // Вернём возможность обработать сообщение при повторной доставке вебхука
-    await env.DB.prepare('DELETE FROM tg_seen WHERE chat_id = ? AND message_id = ?')
-      .bind(chatKey, msg.message_id).run().catch(() => undefined);
-    console.error('create listing from group failed', e);
-    return;
-  }
+  if (created.length === 0) return;
 
   if (env.REPLY_IN_GROUPS === '1') {
     const site = env.SITE_URL?.replace(/\/+$/, '');
@@ -793,17 +953,18 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
-  await notifyAdmins(env, listing);
+  for (const listing of created) await notifyAdmins(env, listing);
 }
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
-  const link = listing.sourceMessageId
-    ? chatMessageLink(Number(listing.sourceChatId), listing.sourceMessageId)
-    : null;
+  const noContact = !listing.telegram && !listing.phone
+    ? '\n<i>⚠ Контакта нет — сверьтесь с исходным сообщением или чатом</i>'
+    : '';
   for (const adminId of admins(env)) {
+    // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing, link ? `Ссылка: <a href="${link}">исходное сообщение</a>` : ''),
+      formatListing(listing, noContact),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }

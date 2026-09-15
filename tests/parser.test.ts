@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly, worthAiCheck } from '../src/parser';
+import { isMultiRoute, looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly, worthAiCheck } from '../src/parser';
 import { isRussianCity } from '../src/util';
 
 const NOW = new Date('2026-09-06T12:00:00Z');
@@ -140,5 +140,21 @@ describe('parseTelegramMessage', () => {
     expect(p.toCity).toBe('Киев');
     expect(p.departureDate).toBe('2026-09-06');
     expect(p.telegram).toBe('@driver88');
+  });
+});
+
+describe('isMultiRoute — несколько направлений в одном сообщении', () => {
+  it('структурированная заявка — одно направление', () => {
+    expect(isMultiRoute('ПОСЫЛКА #посылка Откуда: Минск Куда: Стамбул Когда: до 22.09.2026 Цена: 15 -20$ Комментарий: маленький конвертик с кусочком ткани')).toBe(false);
+  });
+  it('два рейса с диапазонами дат — несколько', () => {
+    expect(isMultiRoute('🚗#водитель подстроюсь передачи попутчики посылки 18-19.9 Белосток Гр Минск 20-21.9 Мог Минск Белосток Vb+375256663703 TG+48459568684:KgRBPL')).toBe(true);
+  });
+  it('слово «обратно» — несколько', () => {
+    expect(isMultiRoute('18.09, пятница, в 15.00-16.00 еду Белосток Кузница Гродно. Есть места, посылки пачкоматы. 20.09, воскресенье, в 11.00-12.00 обратно. Вайбер +375297872212.')).toBe(true);
+    expect(isMultiRoute('28 сентября еду из РБ в Киев. Возьму попутчиков, посылки, передачи. Обратно из Киева в РБ в период с 29.09-1.10')).toBe(true);
+  });
+  it('одна дата и диапазон веса — одно направление', () => {
+    expect(isMultiRoute('20.09 повезу посылки Варшава — Минск, возьму 5-10 кг')).toBe(false);
   });
 });

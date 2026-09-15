@@ -94,9 +94,29 @@ function contactInfo(l) {
 }
 
 function sourceLabel(l) {
+  if (l.sourceChat && l.sourceChat.startsWith('Переслано от ')) {
+    return l.source === 'parser' ? `${l.sourceChat} · ИИ-разбор` : l.sourceChat;
+  }
   if (l.source === 'parser') return l.sourceChat ? `ИИ-разбор из чата «${l.sourceChat}»` : 'ИИ-разбор';
   if (l.source === 'telegram') return l.sourceChat ? `из чата «${l.sourceChat}»` : 'из Telegram';
   return 'с сайта';
+}
+
+/* Ссылка на исходное сообщение: t.me/c/… — для супергрупп и каналов (id -100…),
+ * открывается у участников чата. Пересылки от людей и обычные группы — без ссылки. */
+function sourceLinkUrl(l) {
+  if (!l.sourceChatId) return null;
+  if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId]; // ссылка, заданная админом
+  const m = /^-100(\d+)$/.exec(l.sourceChatId);
+  if (!m) return null;
+  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+}
+
+/* Подпись источника — кликабельная, когда есть ссылка на оригинал */
+function sourceContent(l) {
+  const url = sourceLinkUrl(l);
+  if (!url) return sourceLabel(l);
+  return el('a', { href: url, target: '_blank', rel: 'noopener', text: sourceLabel(l) });
 }
 
 /* ---------- скопировать ссылку на объявление ---------- */
@@ -206,7 +226,7 @@ function buildRow(l) {
         l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : el('span', { text: 'дата не указана' }),
         l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
         l.price ? el('span', { class: 'mono', text: l.price }) : null,
-        el('span', { class: 'src', text: sourceLabel(l) }),
+        el('span', { class: 'src' }, [sourceContent(l)]),
       ].filter(Boolean)),
     ]),
  el('div', { class: 'row-side' }, [
@@ -404,7 +424,7 @@ async function loadDetail(id) {
     }
     cells.push(el('div', { class: 'cell' }, [
       el('span', { class: 'label', text: 'источник' }),
-      el('span', { class: 'value', text: sourceLabel(l) }),
+      el('span', { class: 'value' }, [sourceContent(l)]),
     ]));
     cells.push(el('div', { class: 'cell' }, [
       el('span', { class: 'label', text: 'добавлено' }),
@@ -522,7 +542,7 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats'
 let adminEditId = null; // id заявки, открытой на редактирование
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
@@ -541,21 +561,52 @@ function adminCard(l, mode = 'pending') {
     l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
     l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
     l.price ? el('span', { class: 'mono', text: l.price }) : null,
-    el('span', { class: 'src', text: sourceLabel(l) }),
+    el('span', { class: 'src' }, [sourceContent(l)]),
   ];
   const editBtn = el('button', {
     class: 'btn btn-line btn-sm',
     text: adminEditId === l.id ? 'закрыть' : 'редактировать',
     onclick: () => { adminEditId = adminEditId === l.id ? null : l.id; loadAdmin(); },
   });
+
+  // Связи: встречные рейсы, тот же маршрут, другие заявки контакта
+  const relatedBox = el('div', { class: 'admin-edit' });
+  relatedBox.hidden = true;
+  const relBtn = el('button', {
+    class: 'btn btn-line btn-sm',
+    text: 'связи',
+    onclick: async () => {
+      if (!relatedBox.hidden) { relatedBox.hidden = true; return; }
+      relatedBox.hidden = false;
+      relatedBox.replaceChildren(el('p', { class: 'admin-contact', text: 'ищу связи…' }));
+      try {
+        const res = await adminApi(`/api/admin/listings/${encodeURIComponent(l.id)}/related`);
+        if (!res.ok) throw new Error();
+        const rel = await res.json();
+        const line = (x) => el('p', {
+          class: 'admin-contact',
+          text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${x.telegram || x.phone ? ` · ${x.telegram || x.phone}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
+        });
+        const parts = [];
+        if (rel.reverse?.length) parts.push(el('p', { class: 'label', text: `↔ встречные (${rel.reverse.length})` }), ...rel.reverse.map(line));
+        if (rel.same?.length) parts.push(el('p', { class: 'label', text: `тот же маршрут (${rel.same.length})` }), ...rel.same.map(line));
+        if (rel.sameContact?.length) parts.push(el('p', { class: 'label', text: `тот же контакт (${rel.sameContact.length})` }), ...rel.sameContact.map(line));
+        relatedBox.replaceChildren(...(parts.length ? parts : [el('p', { class: 'admin-contact', text: 'Связей нет: ни встречных, ни похожих.' })]));
+      } catch {
+        relatedBox.replaceChildren(el('p', { class: 'admin-contact', text: 'Не получилось загрузить связи.' }));
+      }
+    },
+  });
   const actions = mode === 'pending'
     ? [
         el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
         el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
         editBtn,
+        relBtn,
       ]
     : [
         editBtn,
+        relBtn,
         l.status === 'expired'
           ? el('button', { class: 'btn btn-ink btn-sm', text: 'на доску', onclick: () => adminSetStatus(l.id, 'published') })
           : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
@@ -582,6 +633,7 @@ function adminCard(l, mode = 'pending') {
         ])
       : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
     ...(adminEditId === l.id ? [adminEditForm(l)] : []),
+    relatedBox,
     el('div', { class: 'admin-card-actions' }, actions),
   ]);
 }
@@ -661,6 +713,10 @@ async function loadAdmin() {
   $('#admin-login').hidden = true;
   $('#admin-panel').hidden = false;
   $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
+  if (adminTab === 'chats') {
+    await renderAdminChats();
+    return;
+  }
   try {
     const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
     if (res.status === 401) {
@@ -696,6 +752,80 @@ async function loadAdmin() {
   }
 }
 
+async function renderAdminChats() {
+  const listEl = $('#admin-list');
+  try {
+    const res = await adminApi('/api/admin/source-chats');
+    if (!res.ok) throw new Error();
+    const { chats, needsSetup } = await res.json();
+    if (needsSetup) {
+      // таблицы ссылок ещё нет в базе — предложим создать одним кликом
+      $('#admin-count').textContent = 'Один шаг до готовности: нужна таблица ссылок.';
+      listEl.replaceChildren(
+        el('p', {
+          class: 'empty-note',
+          text: 'В базе ещё нет таблицы chat_links. Она только хранит ссылки на чаты — существующие объявления и настройки не трогаются. Создать можно прямо здесь.',
+        }),
+        el('div', { class: 'admin-card-actions' }, [
+          el('button', {
+            class: 'btn btn-ink', type: 'button', text: 'создать таблицу',
+            onclick: async () => {
+              try {
+                const r = await adminApi('/api/admin/ensure-chat-links', { method: 'POST' });
+                if (!r.ok) throw new Error();
+                toast('Таблица создана.');
+                await renderAdminChats();
+              } catch {
+                toast('Не получилось создать. Попробуйте ещё раз.');
+              }
+            },
+          }),
+        ])
+      );
+      return;
+    }
+    $('#admin-count').textContent = chats.length
+      ? `Чатов-источников: ${chats.length}. Ссылка t.me/… делает подпись «из чата …» на доске кликабельной для всех.`
+      : 'Чатов пока нет: добавьте бота в чат или перешлите ему сообщение — источники появятся здесь.';
+    listEl.replaceChildren();
+    for (const ch of chats) {
+      const input = el('input', {
+        class: 'q', type: 'url', placeholder: 'https://t.me/…',
+        value: ch.url || '', autocomplete: 'off',
+      });
+      const save = el('button', {
+        class: 'btn btn-ink btn-sm', type: 'button', text: 'сохранить',
+        onclick: async () => {
+          const url = input.value.trim();
+          if (url && !/^https:\/\/t\.me\//.test(url)) {
+            toast('Нужна ссылка вида https://t.me/…');
+            return;
+          }
+          try {
+            const r = await adminApi('/api/admin/chat-links', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chatId: ch.chatId, url }),
+            });
+            if (!r.ok) throw new Error();
+            toast(url ? 'Ссылка сохранена.' : 'Ссылка убрана.');
+            chatLinks = {}; // перезагрузим на следующем открытии сайта
+            await renderAdminChats();
+          } catch {
+            toast('Не получилось сохранить. Попробуйте ещё раз.');
+          }
+        },
+      });
+      listEl.append(el('article', { class: 'admin-card' }, [
+        el('p', { class: 'admin-contact', text: `${ch.title || 'без названия'} · заявок: ${ch.count} · id ${ch.chatId}` }),
+        el('div', { class: 'admin-card-actions' }, [input, save]),
+      ]));
+    }
+  } catch {
+    listEl.replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить чаты. Нажмите «обновить».' }));
+  }
+}
+
 async function adminDelete(id) {
   if (!window.confirm('Удалить объявление навсегда? Вместе с жалобами.')) return;
   try {
@@ -712,6 +842,7 @@ function switchAdminTab(tab) {
   adminTab = tab;
   $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
   $('#admin-tab-board').classList.toggle('on', tab === 'board');
+  $('#admin-tab-chats').classList.toggle('on', tab === 'chats');
   loadAdmin();
 }
 
@@ -734,6 +865,7 @@ async function adminSetStatus(id, status) {
 function bindAdmin() {
   $('#admin-tab-pending').addEventListener('click', () => switchAdminTab('pending'));
   $('#admin-tab-board').addEventListener('click', () => switchAdminTab('board'));
+  $('#admin-tab-chats').addEventListener('click', () => switchAdminTab('chats'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();
@@ -756,6 +888,8 @@ function setToday() {
   $('#today').textContent = `${WEEKDAYS[now.getDay()]}, ${now.getDate()} ${MONTHS_SHORT[now.getMonth()]}`;
 }
 
+let chatLinks = {}; // публичные ссылки на чаты-источники (id чата → t.me/…)
+
 async function init() {
   setToday();
   bindBoard();
@@ -775,6 +909,12 @@ async function init() {
     const res = await api('/api/config');
     config = await res.json();
   } catch { /* оставляем дефолт */ }
+
+  try {
+    const res = await api('/api/chat-links');
+    const data = await res.json();
+    chatLinks = data.links || {};
+  } catch { /* без ссылок — подписи просто не кликабельны */ }
 
   if (config.botLink) {
     $('#nav-bot').hidden = false;

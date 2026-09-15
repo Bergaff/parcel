@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, getCounts, getListingById, listAdminBoard, listListings, updateListing, updateListingStatus } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -408,6 +408,54 @@ app.post('/api/admin/listings/:id/delete', async (c) => {
   const ok = await deleteListing(c.env, c.req.param('id'));
   if (!ok) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
+});
+
+/* Публичные ссылки на чаты-источники: для кликабельных подписей на доске. */
+app.get('/api/chat-links', async (c) => {
+  try {
+    return c.json({ links: await getChatLinks(c.env) });
+  } catch {
+    return c.json({ links: {} }); // таблицы ещё нет — работаем без ссылок
+  }
+});
+
+/* Чаты-источники: названия, счётчики заявок, заданные вручную ссылки.
+ *  Если таблицы chat_links ещё нет (миграцию не applied) — флаг needsSetup,
+ *  и админка предложит создать её одним кликом. */
+app.get('/api/admin/source-chats', async (c) => {
+  try {
+    return c.json({ chats: await listSourceChats(c.env) });
+  } catch (e) {
+    if (String(e).includes('no such table')) return c.json({ chats: [], needsSetup: true });
+    throw e;
+  }
+});
+
+/* Разово создать таблицу chat_links (идемпотентно; данные объявлений не трогает). */
+app.post('/api/admin/ensure-chat-links', async (c) => {
+  await ensureChatLinksTable(c.env);
+  return c.json({ ok: true });
+});
+
+/* Задать/убрать публичную ссылку на чат (пустой url — убрать). */
+app.put('/api/admin/chat-links', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { chatId?: unknown; url?: unknown } | null;
+  const chatId = typeof body?.chatId === 'string' ? body.chatId.trim() : '';
+  const url = typeof body?.url === 'string' ? body.url.trim() : '';
+  if (!chatId) return c.json({ error: 'chat_id required' }, 400);
+  if (url && !/^https:\/\/t\.me\//.test(url)) {
+    return c.json({ error: 'only https://t.me/... links are allowed' }, 400);
+  }
+  await upsertChatLink(c.env, chatId, url);
+  return c.json({ ok: true });
+});
+
+/* Связи заявки (встречные, тот же маршрут, тот же контакт) — админ-панель. */
+app.get('/api/admin/listings/:id/related', async (c) => {
+  const listing = await getListingById(c.env, c.req.param('id'));
+  if (!listing) return c.json({ error: 'not_found' }, 404);
+  const rel = await findRelated(c.env, listing, { includePending: true });
+  return c.json(rel);
 });
 
 /* Ручной запуск архивации — то же самое cron делает раз в сутки:
