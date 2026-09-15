@@ -36,19 +36,20 @@ export interface AiFields {
 const SYSTEM_PROMPT = `Ты — строгий извлекатель данных из сообщений телеграм-чатов.
 Доска объявлений «попутка.» — ТОЛЬКО про передачу посылок и вещей попутными машинами.
 Верни ТОЛЬКО валидный JSON без пояснений и без markdown, по схеме:
-{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "departure_date": "YYYY-MM-DD", "weight_kg": 5, "price": "50 zł", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}
+{"listings": [{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "departure_date": "YYYY-MM-DD", "weight_kg": 5, "price": "50 zl", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}]}
 
 Правила:
+- В одном сообщении может быть НЕСКОЛЬКО рейсов/направлений (туда и обратно, два маршрута, «18-19.9 туда, 20-21.9 обратно») — верни ОТДЕЛЬНЫЙ элемент listings на каждое направление (до 3), со своими городами и датой.
 - type: "offer" — автор едет и может взять/передать посылку; "request" — автор просит передать посылку.
-- is_passenger: true — если это поиск или предложение ПОЕЗДКИ пассажиром без посылок (пассажир, подвезти до, довезти, места в машине). Такие сообщения доске не нужны.
-- Города — по-русски, кириллицей: Warsaw → Варшава. Однозначно не знаешь перевода — напиши как в сообщении.
-- departure_date — ближайшая будущая дата относительно СЕГОДНЯ, формат YYYY-MM-DD. Даты нет — null.
-- Даты «плавают» или альтернатив несколько («18/19.09», «прибытие 20 или 21.09», «около 20 числа», «на выходных») — возьми САМУЮ РАННЮЮ конкретную дату, а точную формулировку с альтернативами обязательно сохрани в description.
-- Несколько городов назначения («в Мадрид или Париж») — to_city = первый упомянутый город, альтернативу обязательно упомяни в description.
+- is_passenger: true — если это поиск или предложение ПОЕЗДКИ пассажиром БЕЗ посылок (пассажир, подвезти до, места в машине). «Попутчики + посылки/передачи» — НЕ пассажирское.
+- Города — по-русски, кириллицей: Warsaw → Варшава. Сокращения раскрывай по смыслу: «Гр» → Гродно, «Мог» → Могилёв.
+- from_city/to_city — крупные города начала и конца маршрута. Промежуточные города и пункты пропуска (Кузница, Брузги, Брест) — упомяни в description («через Кузницу»).
+- departure_date — ближайшая будущая дата относительно СЕГОДНЯ, формат YYYY-MM-DD. Даты нет — null. Даты «плавают» или альтернатив несколько («18/19.09», «20 или 21.09», «на выходных») — возьми САМУЮ РАННЮЮ конкретную дату, точную формулировку сохрани в description.
+- Несколько городов назначения («в Мадрид или Париж») — to_city = первый упомянутый, альтернативу обязательно в description.
 - Не выдумывай: чего нет в сообщении — null. weight_kg — число (кг) или null.
-- telegram/phone — только если явно указаны в сообщении.
+- telegram/phone — только явно указанные в сообщении (юзернейм без @ тоже годится, префиксы Vb/TG/Вайбер означают мессенджер).
 - description: суть одним-двумя предложениями, до 300 символов, по-русски.
-- Сообщение не про поездку/передачу — верни {"is_listing": false}.`;
+- Сообщение не про поездку/передачу — верни {"listings": []}.`;
 
 /** Валидация ответа ИИ: чему не доверяем — то отбрасываем. Чистая, тестируется юнит-тестами. */
 export function validateAiListing(
@@ -89,8 +90,15 @@ export function validateAiListing(
 
   const price = (typeof b.price === 'string' && b.price.trim()) ? b.price.trim().slice(0, 40) : null;
 
-  const telegram = typeof b.telegram === 'string' && b.telegram.trim() ? sanitizeContact(b.telegram.trim()) : null;
-  const phone = typeof b.phone === 'string' && b.phone.trim() ? sanitizeContact(b.phone.trim()) : null;
+  // ИИ часто возвращает юзернейм без @ ("KgRBPL") и телефон с префиксом
+  // мессенджера ("TG+48459568684", "Vb+375256663703") — приводим к виду.
+  let tgRaw = typeof b.telegram === 'string' ? b.telegram.trim() : '';
+  if (tgRaw && /^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(tgRaw)) tgRaw = `@${tgRaw}`;
+  const telegram = tgRaw ? sanitizeContact(tgRaw) : null;
+  let phRaw = typeof b.phone === 'string' ? b.phone.trim() : '';
+  const phMatch = phRaw.match(/\+?\d[\d\s\-()]{7,16}\d/);
+  if (phMatch) phRaw = phMatch[0];
+  const phone = phRaw ? sanitizeContact(phRaw) : null;
 
   // Описание: если ИИ не дал осмысленного — берём исходный текст
   let description = typeof b.description === 'string' ? b.description.trim() : '';
@@ -98,6 +106,24 @@ export function validateAiListing(
   if (description.length < 5) return null;
 
   return { type, fromCity, toCity, departureDate, weightKg, price, telegram, phone, description };
+}
+
+/** Разобрать ответ ИИ (массив listings или старый одиночный объект)
+ *  в список полей заявок: 0–3 штуки, каждый провалидирован. Чистая функция. */
+export function parseAiListings(
+  raw: unknown,
+  opts: { now: Date; originalText: string }
+): AiFields[] {
+  const out: AiFields[] = [];
+  const items = typeof raw === 'object' && raw !== null && Array.isArray((raw as Record<string, unknown>).listings)
+    ? ((raw as Record<string, unknown>).listings as unknown[])
+    : [raw];
+  for (const item of items) {
+    const f = validateAiListing(item, opts);
+    if (f) out.push(f);
+    if (out.length >= 3) break; // защита от разогнавшегося ИИ
+  }
+  return out;
 }
 
 /** Дневная квота ИИ-вызовов (KV-счётчик) — чтобы счёт не удивил. */
@@ -112,12 +138,13 @@ async function aiQuotaOk(env: Env): Promise<boolean> {
 }
 
 /**
- * Оформить сообщение заявкой через DeepSeek. null — не вышло
- * (не объявление, пассажирская попутка, ошибка сети или квота).
+ * Оформить сообщение через DeepSeek: 0–3 заявки (одно сообщение может
+ * содержать несколько направлений). Пустой массив — не объявление,
+ * пассажирская попутка, ошибка сети или исчерпана квота.
  */
-export async function aiExtractListing(env: Env, text: string): Promise<AiFields | null> {
-  if (!env.AI_API_KEY) return null;
-  if (!(await aiQuotaOk(env))) return null;
+export async function aiExtractListing(env: Env, text: string): Promise<AiFields[]> {
+  if (!env.AI_API_KEY) return [];
+  if (!(await aiQuotaOk(env))) return [];
 
   const now = new Date();
   const today = new Date(now.getTime() + 3 * 3600 * 1000).toISOString().slice(0, 10);
@@ -133,7 +160,7 @@ export async function aiExtractListing(env: Env, text: string): Promise<AiFields
       body: JSON.stringify({
         model: env.AI_MODEL ?? 'deepseek-chat',
         temperature: 0,
-        max_tokens: 300,
+        max_tokens: 450,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
@@ -144,16 +171,16 @@ export async function aiExtractListing(env: Env, text: string): Promise<AiFields
     });
     if (!res.ok) {
       console.error('deepseek http error', res.status);
-      return null;
+      return [];
     }
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
     };
     const content = json.choices?.[0]?.message?.content ?? '';
     const parsed = JSON.parse(content) as unknown;
-    return validateAiListing(parsed, { now, originalText: text });
+    return parseAiListings(parsed, { now, originalText: text });
   } catch (e) {
     console.error('deepseek call failed', e);
-    return null;
+    return [];
   }
 }

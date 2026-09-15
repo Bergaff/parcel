@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateAiListing } from '../src/ai';
+import { parseAiListings, validateAiListing } from '../src/ai';
 
 const NOW = new Date('2026-09-14T12:00:00+03:00');
 const TEXT = 'Завтра везу посылку Крокодилово — Бегемотово, 5 кг, 100 zł, @driver77';
@@ -68,5 +68,42 @@ describe('validateAiListing — валидация ответа DeepSeek', () =>
   it('короткое описание заменяет исходным текстом', () => {
     const f = validateAiListing(ok({ description: 'ок' }), { now: NOW, originalText: TEXT });
     expect(f!.description).toBe(TEXT);
+  });
+});
+
+describe('parseAiListings — несколько направлений из одного сообщения', () => {
+  const opts = { now: NOW, originalText: 'водитель: два рейса Белосток — Минск и обратно' };
+
+  it('массив listings → две заявки (туда и обратно), контакты чинятся', () => {
+    const raw = {
+      listings: [
+        ok({ from_city: 'Белосток', to_city: 'Минск', departure_date: '2026-09-18', telegram: null, phone: 'Vb+375256663703', description: '18-19.9 Белосток Гродно Минск, передачи, попутчики' }),
+        ok({ from_city: 'Минск', to_city: 'Белосток', departure_date: '2026-09-20', telegram: 'KgRBPL', phone: 'TG+48459568684', description: '20-21.9 Могилёв Минск Белосток, обратно' }),
+      ],
+    };
+    const list = parseAiListings(raw, opts);
+    expect(list).toHaveLength(2);
+    expect(list[0]!.fromCity).toBe('Белосток');
+    expect(list[0]!.toCity).toBe('Минск');
+    expect(list[0]!.phone).toBe('+375256663703'); // «Vb+…» → номер
+    expect(list[1]!.fromCity).toBe('Минск');
+    expect(list[1]!.departureDate).toBe('2026-09-20');
+    expect(list[1]!.telegram).toBe('@KgRBPL'); // юзернейм без @ → с @
+    expect(list[1]!.phone).toBe('+48459568684'); // «TG+…» → номер
+  });
+
+  it('старый формат (один объект) — одна заявка', () => {
+    expect(parseAiListings(ok(), opts)).toHaveLength(1);
+  });
+
+  it('пусто и мусор — пусто', () => {
+    expect(parseAiListings({ listings: [] }, opts)).toEqual([]);
+    expect(parseAiListings({ listings: [{ is_listing: false }] }, opts)).toEqual([]);
+    expect(parseAiListings('мусор', opts)).toEqual([]);
+  });
+
+  it('больше трёх направлений — обрезаем до трёх', () => {
+    const raw = { listings: [1, 2, 3, 4, 5].map(() => ok()) };
+    expect(parseAiListings(raw, opts)).toHaveLength(3);
   });
 });

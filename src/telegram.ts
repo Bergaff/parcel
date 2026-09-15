@@ -1,5 +1,5 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
+import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
 import {
   addReport, createListing, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
@@ -498,34 +498,43 @@ async function sendParseReport(env: Env, chatId: number, text: string): Promise<
 /* Каскад разбора: правила → при неуверенности ИИ                      */
 /* ------------------------------------------------------------------ */
 
+/** Поля заявки из правил парсера. */
+function rulesFields(
+  parsed: ReturnType<typeof parseTelegramMessage>,
+  text: string
+): AiFields {
+  return {
+    type: parsed.intent ?? 'offer',
+    fromCity: parsed.fromCity ?? 'не указано',
+    toCity: parsed.toCity ?? 'не указано',
+    departureDate: parsed.departureDate,
+    weightKg: parsed.weightKg,
+    price: parsed.price,
+    telegram: parsed.telegram,
+    phone: parsed.phone,
+    description: text.slice(0, 2000),
+  };
+}
+
 /** Разобрать текст объявления: уверенно правилами, иначе ИИ (DeepSeek).
- *  fields === null — не объявление (или ИИ не справился): пропустить. */
+ *  Одно сообщение может дать НЕСКОЛЬКО заявок (туда-обратно, два рейса) —
+ *  такие сообщения всегда уходят ИИ. Пустой список — не объявление. */
 async function cascade(
   env: Env,
   text: string
-): Promise<{ fields: AiFields | null; source: ListingInput['source'] }> {
+): Promise<{ list: AiFields[]; source: ListingInput['source'] }> {
   const parsed = parseTelegramMessage(text);
-  if (parsed.confidence >= 0.7) {
-    return {
-      fields: {
-        type: parsed.intent ?? 'offer',
-        fromCity: parsed.fromCity ?? 'не указано',
-        toCity: parsed.toCity ?? 'не указано',
-        departureDate: parsed.departureDate,
-        weightKg: parsed.weightKg,
-        price: parsed.price,
-        telegram: parsed.telegram,
-        phone: parsed.phone,
-        description: text.slice(0, 2000),
-      },
-      source: 'telegram',
-    };
+  const multi = isMultiRoute(text);
+  if (parsed.confidence >= 0.7 && !multi) {
+    return { list: [rulesFields(parsed, text)], source: 'telegram' };
   }
   if (env.AI_API_KEY && worthAiCheck(text)) {
-    const ai = await aiExtractListing(env, text);
-    if (ai) return { fields: ai, source: 'parser' };
+    const list = await aiExtractListing(env, text);
+    if (list.length > 0) return { list, source: 'parser' };
   }
-  return { fields: null, source: 'telegram' };
+  // ИИ не задан или не справился — хотя бы одно объявление правилами
+  if (parsed.confidence >= 0.7) return { list: [rulesFields(parsed, text)], source: 'telegram' };
+  return { list: [], source: 'telegram' };
 }
 
 /** Из forward_origin достаём исходный чат/сообщение (для дедупликации),
@@ -587,29 +596,33 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       await sendText(env, chatId, 'Это сообщение я уже обрабатывал — заявка в очереди модерации или уже на доске.');
       return;
     }
-    const { fields, source } = await cascade(env, text);
-    if (!fields) {
+    const { list, source } = await cascade(env, text);
+    if (list.length === 0) {
       // Не распозналось — покажем диагностику разбора, как раньше
       await sendParseReport(env, chatId, text);
       return;
     }
-    const input: ListingInput = {
-      ...fields,
-      // контакт — автор сообщения (из forward-данных), а не тот, кто переслал
-      telegram: fields.telegram ?? origin.authorUsername ?? null,
-      status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-      source,
-      sourceChat: origin.title ?? 'Пересланное сообщение',
-      sourceChatId: seenChat,
-      sourceMessageId: origin.messageId ?? null,
-    };
-    const listing = await createListing(env, input);
-    await notifyAdmins(env, listing);
-    const statusNote = input.status === 'published'
+    const created: Listing[] = [];
+    for (const fields of list) {
+      const input: ListingInput = {
+        ...fields,
+        // контакт — автор сообщения (из forward-данных), а не тот, кто переслал
+        telegram: fields.telegram ?? origin.authorUsername ?? null,
+        status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+        source,
+        sourceChat: origin.title ?? 'Пересланное сообщение',
+        sourceChatId: seenChat,
+        sourceMessageId: origin.messageId ?? null,
+      };
+      const listing = await createListing(env, input);
+      created.push(listing);
+      await notifyAdmins(env, listing);
+    }
+    const statusNote = env.AUTO_APPROVE === '1'
       ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
       : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
     await sendText(env, chatId,
-      formatListing(listing, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '') + statusNote);
+      created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
     return;
   }
 
@@ -722,11 +735,11 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     // сначала правилами, затем ИИ (если задан AI_API_KEY).
     if (looksLikeListing(text) || worthAiCheck(text)) {
       const parsed = parseTelegramMessage(text);
-      let created = false;
+      let created: Listing[] = [];
       if (parsed.confidence >= 0.7 || (env.AI_API_KEY && worthAiCheck(text))) {
         if (await markSeen(env, String(chatId), msg.message_id)) {
-          const { fields, source } = await cascade(env, text);
-          if (fields) {
+          const { list, source } = await cascade(env, text);
+          for (const fields of list) {
             const input: ListingInput = {
               ...fields,
               telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
@@ -737,17 +750,19 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               sourceMessageId: msg.message_id,
             };
             const listing = await createListing(env, input);
+            created.push(listing);
             await notifyAdmins(env, listing);
-            const statusNote = input.status === 'published'
+          }
+          if (created.length > 0) {
+            const statusNote = env.AUTO_APPROVE === '1'
               ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
               : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
             await sendText(env, chatId,
-              formatListing(listing, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '') + statusNote);
-            created = true;
+              created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+            return;
           }
         }
       }
-      if (created) return;
       if (looksLikeListing(text)) {
         await sendText(env, chatId,
           'Похоже, это объявление, но целиком я его не разобрал. Нажмите /post — проведу по шагам.');
@@ -900,32 +915,37 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if (parsed.confidence < 0.7 && !(env.AI_API_KEY && worthAiCheck(text))) return;
   if (!(await markSeen(env, chatKey, msg.message_id))) return; // уже обработано
 
-  const { fields, source } = await cascade(env, text);
-  if (!fields) return; // ИИ не признал объявлением — мимо
+  const { list, source } = await cascade(env, text);
+  if (list.length === 0) return; // ИИ не признал объявлением — мимо
 
-  const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
-
-  const input: ListingInput = {
-    ...fields,
-    telegram,
-    status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
-    source,
-    sourceChat: msg.chat.title ?? null,
-    sourceChatId,
-    sourceMessageId: msg.message_id,
-  };
-
-  let listing: Listing;
-  try {
-    listing = await createListing(env, input);
-    await setSeenListing(env, chatKey, msg.message_id, listing.id);
-  } catch (e) {
-    // Вернём возможность обработать сообщение при повторной доставке вебхука
-    await env.DB.prepare('DELETE FROM tg_seen WHERE chat_id = ? AND message_id = ?')
-      .bind(chatKey, msg.message_id).run().catch(() => undefined);
-    console.error('create listing from group failed', e);
-    return;
+  const created: Listing[] = [];
+  for (const fields of list) {
+    const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
+    const input: ListingInput = {
+      ...fields,
+      telegram,
+      status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
+      source,
+      sourceChat: msg.chat.title ?? null,
+      sourceChatId,
+      sourceMessageId: msg.message_id,
+    };
+    try {
+      const listing = await createListing(env, input);
+      created.push(listing);
+      await setSeenListing(env, chatKey, msg.message_id, listing.id);
+    } catch (e) {
+      // Вернём возможность обработать сообщение при повторной доставке вебхука
+      // (если не создано ни одной заявки — иначе повтор даст дубль)
+      if (created.length === 0) {
+        await env.DB.prepare('DELETE FROM tg_seen WHERE chat_id = ? AND message_id = ?')
+          .bind(chatKey, msg.message_id).run().catch(() => undefined);
+      }
+      console.error('create listing from group failed', e);
+      break;
+    }
   }
+  if (created.length === 0) return;
 
   if (env.REPLY_IN_GROUPS === '1') {
     const site = env.SITE_URL?.replace(/\/+$/, '');
@@ -933,7 +953,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
-  await notifyAdmins(env, listing);
+  for (const listing of created) await notifyAdmins(env, listing);
 }
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
