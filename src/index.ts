@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, findRelated, getCounts, getListingById, listAdminBoard, listListings, updateListing, updateListingStatus } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -407,6 +407,31 @@ app.put('/api/admin/listings/:id', async (c) => {
 app.post('/api/admin/listings/:id/delete', async (c) => {
   const ok = await deleteListing(c.env, c.req.param('id'));
   if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
+/* Публичные ссылки на чаты-источники: для кликабельных подписей на доске. */
+app.get('/api/chat-links', async (c) => {
+  try {
+    return c.json({ links: await getChatLinks(c.env) });
+  } catch {
+    return c.json({ links: {} }); // таблицы ещё нет — работаем без ссылок
+  }
+});
+
+/* Чаты-источники: названия, счётчики заявок, заданные вручную ссылки. */
+app.get('/api/admin/source-chats', async (c) => c.json({ chats: await listSourceChats(c.env) }));
+
+/* Задать/убрать публичную ссылку на чат (пустой url — убрать). */
+app.put('/api/admin/chat-links', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { chatId?: unknown; url?: unknown } | null;
+  const chatId = typeof body?.chatId === 'string' ? body.chatId.trim() : '';
+  const url = typeof body?.url === 'string' ? body.url.trim() : '';
+  if (!chatId) return c.json({ error: 'chat_id required' }, 400);
+  if (url && !/^https:\/\/t\.me\//.test(url)) {
+    return c.json({ error: 'only https://t.me/... links are allowed' }, 400);
+  }
+  await upsertChatLink(c.env, chatId, url);
   return c.json({ ok: true });
 });
 

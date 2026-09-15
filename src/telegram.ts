@@ -938,10 +938,13 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
+  const noContact = !listing.telegram && !listing.phone
+    ? '\n<i>⚠ Контакта нет — сверьтесь с исходным сообщением или чатом</i>'
+    : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing),
+      formatListing(listing, noContact),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }

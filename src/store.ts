@@ -175,6 +175,46 @@ export async function updateListing(
   return row ? mapRow(row) : null;
 }
 
+/** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
+export async function getChatLinks(env: Env): Promise<Record<string, string>> {
+  const res = await env.DB.prepare('SELECT chat_id, url FROM chat_links').all();
+  const out: Record<string, string> = {};
+  for (const row of (res.results ?? []) as Array<Record<string, unknown>>) {
+    if (typeof row.chat_id === 'string' && typeof row.url === 'string' && row.url) out[row.chat_id] = row.url;
+  }
+  return out;
+}
+
+/** Сохранить публичную ссылку на чат (пустая строка — убрать ссылку). */
+export async function upsertChatLink(env: Env, chatId: string, url: string): Promise<void> {
+  if (!url) {
+    await env.DB.prepare('DELETE FROM chat_links WHERE chat_id = ?').bind(chatId).run();
+    return;
+  }
+  await env.DB.prepare(
+    `INSERT INTO chat_links (chat_id, url, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET url = excluded.url, updated_at = excluded.updated_at`
+  ).bind(chatId, url, new Date().toISOString()).run();
+}
+
+/** Чаты-источники для админки: сколько из них заявок и какая ссылка задана. */
+export async function listSourceChats(
+  env: Env
+): Promise<Array<{ chatId: string; title: string | null; count: number; url: string | null }>> {
+  const res = await env.DB.prepare(
+    `SELECT l.source_chat_id AS chatId, MAX(l.source_chat) AS title, COUNT(*) AS cnt, cl.url AS url
+     FROM listings l LEFT JOIN chat_links cl ON cl.chat_id = l.source_chat_id
+     WHERE l.source_chat_id IS NOT NULL AND l.source_chat_id LIKE '-%'
+     GROUP BY l.source_chat_id ORDER BY cnt DESC LIMIT 100`
+  ).all();
+  return ((res.results ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    chatId: typeof r.chatId === 'string' ? r.chatId : '',
+    title: typeof r.title === 'string' ? r.title : null,
+    count: Number(r.cnt ?? 0),
+    url: typeof r.url === 'string' ? r.url : null,
+  }));
+}
+
 /** Связи заявки: встречные рейсы, тот же маршрут (±3 дня), другие заявки того же контакта. */
 export async function findRelated(
   env: Env,
