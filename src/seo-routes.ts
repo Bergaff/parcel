@@ -11,7 +11,7 @@
  * Польша↔Беларусь, Беларусь↔Украина, Европа, внутри стран.
  */
 import type { Env, Listing } from './types';
-import { escapeHtml } from './util';
+import { escapeHtml, normalizeContacts } from './util';
 import { listListings } from './store';
 
 export interface SeoRoute {
@@ -208,9 +208,12 @@ function listingCard(l: Listing, origin: string): string {
     l.price,
     l.source === 'telegram' && l.sourceChat ? `из чата «${l.sourceChat}»` : 'с сайта',
   ].filter(Boolean).join(' · ');
-  const contact = l.telegram
-    ? `<a href="https://t.me/${escapeHtml(l.telegram.replace(/^@/, ''))}" target="_blank" rel="noopener">${escapeHtml(l.telegram)}</a>`
-    : l.phone ? escapeHtml(l.phone) : 'контакт в карточке';
+  // Номер мог попасть в поле telegram — тогда ссылка t.me/+48… была бы битой,
+  // а один и тот же контакт в обоих полях печатался бы дважды
+  const { telegram, phone } = normalizeContacts(l.telegram, l.phone);
+  const contact = telegram
+    ? `<a href="https://t.me/${escapeHtml(telegram.replace(/^@/, ''))}" target="_blank" rel="noopener">${escapeHtml(telegram)}</a>`
+    : phone ? escapeHtml(phone) : 'контакт в карточке';
   return `<article class="row">
   <div class="row-main">
     <h3 class="route-line"><a href="/item/${encodeURIComponent(l.id)}">${escapeHtml(l.fromCity)} <span class="r-arrow">→</span> <span class="r-to">${escapeHtml(l.toCity)}</span></a></h3>

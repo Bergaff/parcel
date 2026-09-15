@@ -84,12 +84,24 @@ function plural(n, one, few, many) {
   return many;
 }
 
+/* Контакт заявки: kind — 'telegram' или 'phone'.
+ * Значения проверяем по содержимому, а не по имени поля: номер, который попал
+ * в поле telegram, не должен превращаться в несуществующую ссылку t.me/+48579264254,
+ * а один и тот же контакт — показываться дважды. */
 function contactInfo(l) {
-  if (l.telegram) {
-    const u = l.telegram.replace(/^@/, '').trim();
-    return { href: `https://t.me/${u}`, label: `@${u}` };
+  const values = [l.telegram, l.phone].filter((v) => typeof v === 'string' && v.trim());
+  for (const v of values) {
+    const t = v.trim();
+    const m = /(?:t\.me\/|@)([a-zA-Z0-9_]{4,32})/i.exec(t)
+      || (/^[a-zA-Z][a-zA-Z0-9_]{3,31}$/.test(t) ? [t, t] : null);
+    if (m) return { kind: 'telegram', href: `https://t.me/${m[1]}`, label: `@${m[1]}` };
   }
-  if (l.phone) return { href: `tel:${l.phone.replace(/[^\d+]/g, '')}`, label: l.phone };
+  for (const v of values) {
+    const m = /\+?\d[\d\s\-()]{7,16}\d/.exec(v);
+    if (m && m[0].replace(/\D/g, '').length >= 9) {
+      return { kind: 'phone', href: `tel:${m[0].replace(/[^\d+]/g, '')}`, label: m[0].trim() };
+    }
+  }
   return null;
 }
 
@@ -235,7 +247,7 @@ function buildRow(l) {
      ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
      : null,
    contact
-   ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: 'написать' })
+   ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: contact.kind === 'phone' ? 'позвонить' : 'написать' })
    : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
    el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
    el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
@@ -378,7 +390,7 @@ async function loadDetail(id) {
           href: contact.href,
           target: '_blank',
           rel: 'noopener',
-          text: l.telegram ? `написать ${contact.label}` : `позвонить ${contact.label}`,
+          text: `${contact.kind === 'phone' ? 'позвонить' : 'написать'} ${contact.label}`,
         })
       );
     }
@@ -583,10 +595,13 @@ function adminCard(l, mode = 'pending') {
         const res = await adminApi(`/api/admin/listings/${encodeURIComponent(l.id)}/related`);
         if (!res.ok) throw new Error();
         const rel = await res.json();
-        const line = (x) => el('p', {
-          class: 'admin-contact',
-          text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${x.telegram || x.phone ? ` · ${x.telegram || x.phone}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
-        });
+        const line = (x) => {
+          const c = contactInfo(x); // контакт без дублей: номер из поля telegram тоже покажется номером
+          return el('p', {
+            class: 'admin-contact',
+            text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${c ? ` · ${c.label}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
+          });
+        };
         const parts = [];
         if (rel.reverse?.length) parts.push(el('p', { class: 'label', text: `↔ встречные (${rel.reverse.length})` }), ...rel.reverse.map(line));
         if (rel.same?.length) parts.push(el('p', { class: 'label', text: `тот же маршрут (${rel.same.length})` }), ...rel.same.map(line));

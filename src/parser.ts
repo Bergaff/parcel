@@ -166,25 +166,64 @@ const CITY_FORMS: Record<string, string> = {
 
 const CITY_KEYS = Object.keys(CITY_FORMS).sort((a, b) => b.length - a.length);
 
-const OFFER_HINTS = [
-  /возьму/i, /могу взять/i, /взять посылк/i, /могу передать/i, /везу/i,
-  /везём/i, /везем/i, /везёт/i, /везет/i, /перевезу/i, /доставлю/i, /заберу/i,
-  /попутк/i, /попутно/i, /есть место/i, /место есть/i, /мест\w*\s+свободн/i, /свободн\w* мест\w*/i, /доставк/i,
-  /перевозк/i, /перевоз/i, /груз/i, /погрузк/i, /загруж\w+\s*(?:сам|машину)/i,
-  /выезжаю/i, /выезд\w*/i, /рейс/i, /маршрут/i, /бронь/i, /бронир/i,
-  /могу забрать/i, /отвожу/i, /заряд/i,
-  /еду/i, /поеду/i, /беру/i, /отвез/i,
+/**
+ * Признаки намерения — двумя уровнями.
+ *
+ * Сильные (вес 2) говорят, КТО действует: автор едет и берёт посылку
+ * («возьму», «везу», «есть место») либо автор ищет, кто передаст
+ * («нужно передать», «кто-то занимается», «подскажите»).
+ *
+ * Слабые (вес 1) — просто тема перевозки: «перевоз», «доставка», «груз», «рейс»,
+ * «попутка». Они встречаются и у водителей, и в просьбах, поэтому решение
+ * по ним одним не принимается. Раньше «перевоз» перевешивал и просьба
+ * «кто-то занимается перевозом посылок до 20 кг? варшава-брест?» получала
+ * штамп «водитель везёт» — теперь такие сообщения уходят в «нужно передать».
+ */
+const OFFER_STRONG = [
+  /возьму/i, /могу взять/i, /взять посылк/i, /могу передать/i, /могу забрать/i,
+  /везу/i, /везём/i, /везем/i, /перевезу/i, /доставлю/i, /заберу/i, /отвезу/i, /повезу/i, /отвожу/i,
+  /попутчик/i, /есть\s+мест\w*/i, /место есть/i, /мест\w*\s+свободн/i, /свободн\w* мест\w*/i,
+  /погрузк/i, /загруж\w+\s*(?:сам|машину)/i, /выезжаю/i, /отправляю(?:сь|ю)\s+рейс/i,
+  /еду/i, /поеду/i, /беру/i,
 ];
 
-const REQUEST_HINTS = [
-  /нужно передать/i, /надо передать/i, /нужн\w* (?:передать|отправить|забрать)/i,
-  /ищу/i, /кто (?:может|возьм[её]т|перевез[её]т|привез[её]т|едет|поедет|летит|везет|везёт)/i,
-  /может кто/i, /кто-нибудь/i, /помогите/i, /помож[её]т/i, /переслать/i,
-  /передать посылк/i, /посылк\w* (?:передать|доставить)/i, /привезти/i,
-  /подвезти/i, /нужн\w* (?:водитель|курьер)/i, /ищ[уе] (?:водителя|курьера|попутку)/i,
-  /кто передаёт/i, /кто передает/i, /осталось передать/i, /помощь с передачей/i,
-  /передайте/i, /прошу/i, /необходим\w*\s*(?:передать|отправить|забрать)/i,
+const OFFER_WEAK = [
+  /везёт/i, /везет/i, /отвез/i, /попутк/i, /попутно/i, /доставк/i,
+  /перевозк/i, /перевоз/i, /перевезти/i, /груз/i, /рейс/i, /маршрут/i,
+  /бронь/i, /бронир/i, /выезд\w*/i, /заряд/i, /отвоз/i,
 ];
+
+const REQUEST_STRONG = [
+  /нужно передать/i, /надо передать/i, /нужн\w* (?:передать|отправить|забрать)/i,
+  /необходим\w*\s*(?:передать|отправить|забрать)/i, /осталось передать/i,
+  /ищу/i, /ищ[уе] (?:водителя|курьера|попутку)/i, /нужн\w* (?:водитель|курьер)/i,
+  /кто[\s-]*(?:то|нибудь|либо)/i, /есть\s+кто/i, /может\s+кто/i, /кто-нибудь/i,
+  /кто\s+(?:может|сможет|возьм[её]т|перевез[её]т|привез[её]т|едет|поедет|летит|вез[её]т|возит|занимает|помож[её]т|помогает|переда[её]т|отвез|подвез|довез|забер|доставит|отправит|приедет)/i,
+  /(?:занимает|возит|возмёт|берет|берёт|доставляет|помогает)\s+(?:ли\s+)?кто/i,
+  // «занимаетесь доставкой?» — вопрос чату (1-е лицо «занимаюсь перевозкой» — водитель)
+  /занимает(?:есь|ся)\s+(?:ли\s+)?(?:перевоз\w*|доставк\w*|посылк\w*|передач\w*|груз\w*)/i,
+  /(?:кто|куда|где)\s+(?:обратиться|писать|кидать)/i,
+  /помогите/i, /помощь с передачей/i, /подскаж/i, /не\s+подскаж/i, /посоветуй/i,
+  /передайте/i, /прошу/i, /хочу (?:передать|отправить|переслать)/i,
+  /нужно (?:доставить|отправить|переслать)/i, /надо (?:доставить|отправить|переслать)/i,
+];
+
+const REQUEST_WEAK = [
+  /передать посылк/i, /посылк\w* (?:передать|доставить)/i, /привезти/i,
+  /подвезти/i, /переслать/i, /помож[её]т/i, /кто передаёт/i, /кто передает/i,
+  /перевоз\w*\s+посылок/i, /доставк\w*\s+посылок/i,
+];
+
+/** Вес признака: сильный — 2, слабый (тематический) — 1. */
+const STRONG_WEIGHT = 2;
+const WEAK_WEIGHT = 1;
+
+function scoreHints(text: string, strong: RegExp[], weak: RegExp[]): number {
+  let score = 0;
+  for (const re of strong) if (re.test(text)) score += STRONG_WEIGHT;
+  for (const re of weak) if (re.test(text)) score += WEAK_WEIGHT;
+  return score;
+}
 
 const WEEKDAYS: Record<string, number> = {
   'понедельник': 1, 'вторник': 2, 'среда': 3, 'среду': 3, 'четверг': 4,
@@ -220,7 +259,9 @@ function findCities(text: string): Array<{ city: string; index: number; end: num
     const re = new RegExp(`(?<![${CYRILLIC}0-9])${escaped}[${CYRILLIC}]?(?![${CYRILLIC}0-9])`, 'g');
     let m: RegExpExecArray | null;
     while ((m = re.exec(lower)) !== null) {
-      found.push({ city: CITY_FORMS[key]!, index: m.index, end: m.index + key.length });
+      // end — конец найденного слова вместе с окончанием («Бреста», «Варшавы»):
+      // тогда между городами остаётся только разделитель («из Бреста в Варшаву»)
+      found.push({ city: CITY_FORMS[key]!, index: m.index, end: m.index + m[0].length });
     }
   }
   return found.sort((a, b) => a.index - b.index);
@@ -388,16 +429,56 @@ function extractTelegram(text: string): string | null {
   return m ? `@${m[1]!}` : null;
 }
 
-function detectIntent(text: string): 'offer' | 'request' | null {
-  let offerScore = 0;
-  let requestScore = 0;
-  for (const re of OFFER_HINTS) if (re.test(text)) offerScore++;
-  for (const re of REQUEST_HINTS) if (re.test(text)) requestScore++;
-  if (offerScore === requestScore) {
-    if (offerScore === 0) return null;
+export interface IntentScore {
+  offer: number;
+  request: number;
+  /** Сколько баллов дали сильные признаки (первое лицо / явная просьба). */
+  offerStrong: number;
+  requestStrong: number;
+}
+
+/** Баллы намерения: сильные признаки весят вдвое больше тематических слов. */
+export function scoreIntent(text: string): IntentScore {
+  const offerStrong = scoreHints(text, OFFER_STRONG, []);
+  const requestStrong = scoreHints(text, REQUEST_STRONG, []);
+  return {
+    offerStrong,
+    requestStrong,
+    offer: offerStrong + scoreHints(text, [], OFFER_WEAK),
+    request: requestStrong + scoreHints(text, [], REQUEST_WEAK),
+  };
+}
+
+function pickIntent(scores: IntentScore, text: string): 'offer' | 'request' | null {
+  const { offer, request } = scores;
+  if (offer === request) {
+    if (offer === 0) return null;
+    // Ничья: вопрос («кто везёт в Минск?», «занимаетесь перевозом?») — скорее просьба
+    if (/\?/.test(text)) return 'request';
     return /передать/i.test(text) ? 'request' : 'offer';
   }
-  return offerScore > requestScore ? 'offer' : 'request';
+  return offer > request ? 'offer' : 'request';
+}
+
+export function detectIntent(text: string): 'offer' | 'request' | null {
+  return pickIntent(scoreIntent(text), text);
+}
+
+/**
+ * Правила уверены в типе заявки? Неуверенность — когда признаки обеих сторон
+ * набрали баллы и разница меньше одного сильного признака: такие сообщения
+ * (confidence < 0.7) каскад отдаёт ИИ, а не штампует наугад.
+ */
+export function isIntentConfident(textOrScores: string | IntentScore): boolean {
+  const s = typeof textOrScores === 'string' ? scoreIntent(textOrScores) : textOrScores;
+  if (s.offer === 0 && s.request === 0) return true; // признаков нет — спорить нечему
+  if (s.offer === s.request) return false;
+  // Победитель назван сильным признаком, а у второй стороны сильных нет вовсе:
+  // «занимаетесь доставкой посылок?» — просьба, хотя «доставка» тема нейтральная.
+  const winner = s.offer > s.request ? 'offer' : 'request';
+  if (winner === 'offer' && s.offerStrong > 0 && s.requestStrong === 0) return true;
+  if (winner === 'request' && s.requestStrong > 0 && s.offerStrong === 0) return true;
+  return Math.abs(s.offer - s.request) >= STRONG_WEIGHT;
 }
 
 /** Главная точка входа: разбор текста сообщения из чата. now передаётся в тестах. */
@@ -413,7 +494,11 @@ export function isMultiRoute(text: string): boolean {
 
 export function parseTelegramMessage(text: string, now: Date = new Date()): ParsedMessage {
   const route = extractRoute(text);
-  const intent = detectIntent(text) ?? (route ? 'offer' : null);
+  const scores = scoreIntent(text);
+  const intent = pickIntent(scores, text) ?? (route ? 'offer' : null);
+  // Признаки есть, но спорят («перевоз» + «кто-то занимается») — правила не уверены,
+  // такое сообщение каскад отправит ИИ вместо угадывания типа заявки.
+  const disputed = !isIntentConfident(scores);
   return {
     intent,
     fromCity: route?.from ?? null,
@@ -423,7 +508,7 @@ export function parseTelegramMessage(text: string, now: Date = new Date()): Pars
     price: extractPrice(text),
     telegram: extractTelegram(text),
     phone: extractPhone(text),
-    confidence: route && intent ? 0.9 : route ? 0.7 : intent ? 0.5 : 0,
+    confidence: route && intent ? (disputed ? 0.6 : 0.9) : route ? 0.7 : intent ? 0.5 : 0,
   };
 }
 

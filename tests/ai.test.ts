@@ -65,9 +65,57 @@ describe('validateAiListing — валидация ответа DeepSeek', () =>
     expect(validateAiListing(ok({ telegram: 'не-юзернейм!!!' }), { now: NOW, originalText: TEXT })!.telegram).toBeNull();
   });
 
-  it('короткое описание заменяет исходным текстом', () => {
+  it('короткое описание заменяет исходным текстом (без дубля контакта)', () => {
     const f = validateAiListing(ok({ description: 'ок' }), { now: NOW, originalText: TEXT });
-    expect(f!.description).toBe(TEXT);
+    // исходный текст не калечим — убираем только контакт, он показан отдельной строкой
+    expect(f!.description).toBe('Завтра везу посылку Крокодилово — Бегемотово, 5 кг, 100 zł');
+    expect(f!.description).not.toContain('@driver77');
+  });
+});
+
+describe('validateAiListing — контакты без дублей (заявка №63367269)', () => {
+  it('один и тот же номер в telegram и phone остаётся одним контактом', () => {
+    const f = validateAiListing(ok({ telegram: '+48579264254', phone: '+48579264254' }), { now: NOW, originalText: TEXT });
+    expect(f!.phone).toBe('+48579264254');
+    expect(f!.telegram).toBeNull();
+  });
+
+  it('номер, который ИИ положил в telegram, переезжает в phone', () => {
+    const f = validateAiListing(ok({ telegram: '+48579264254', phone: null }), { now: NOW, originalText: TEXT });
+    expect(f!.telegram).toBeNull();
+    expect(f!.phone).toBe('+48579264254');
+  });
+
+  it('юзернейм, который ИИ положил в phone, переезжает в telegram', () => {
+    const f = validateAiListing(ok({ telegram: null, phone: 'driver77' }), { now: NOW, originalText: TEXT });
+    expect(f!.telegram).toBe('@driver77');
+    expect(f!.phone).toBeNull();
+  });
+
+  it('разные контакты остаются оба', () => {
+    const f = validateAiListing(ok({ telegram: '@driver77', phone: 'Vb+375256663703' }), { now: NOW, originalText: TEXT });
+    expect(f!.telegram).toBe('@driver77');
+    expect(f!.phone).toBe('+375256663703');
+  });
+});
+
+describe('validateAiListing — описание не повторяет поля карточки', () => {
+  it('убирает «шапку» с маршрутом, датой и типом', () => {
+    const f = validateAiListing(ok({
+      from_city: 'Варшава', to_city: 'Минск', departure_date: '2026-09-25',
+      telegram: null, phone: '+48579264254',
+      description: 'Водитель, 25.09.2026 Варшава-Минск. Возьму посылки, домашние переезды. Telegram, Whatsapp.',
+    }), { now: NOW, originalText: TEXT });
+    expect(f!.description).toBe('Возьму посылки, домашние переезды. Telegram, Whatsapp.');
+  });
+
+  it('убирает из описания номер, который показан в контактах', () => {
+    const f = validateAiListing(ok({
+      telegram: null, phone: '+48579264254',
+      description: 'Возьму посылки и домашние переезды, звоните +48 579 264 254',
+    }), { now: NOW, originalText: TEXT });
+    expect(f!.description).toBe('Возьму посылки и домашние переезды, звоните');
+    expect(f!.phone).toBe('+48579264254');
   });
 });
 

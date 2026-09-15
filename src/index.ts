@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
 import { addReport, archiveExpired, createListing, deleteListing, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
-import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
+import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
 import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml } from './seo-routes';
@@ -101,12 +101,9 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
     ? b.price.trim().slice(0, 40)
     : null;
 
-  const telegram = typeof b.telegram === 'string' && b.telegram.trim()
-    ? sanitizeContact(b.telegram.trim())
-    : null;
-  const phone = typeof b.phone === 'string' && b.phone.trim()
-    ? sanitizeContact(b.phone.trim())
-    : null;
+  // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
+  // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
+  const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
 
   return {
     input: {
@@ -388,12 +385,9 @@ app.put('/api/admin/listings/:id', async (c) => {
   const description = sanitizeText(b.description, 2000, 'description');
   if (!description || description.length < 5) return c.json({ error: 'description обязательна (от 5 символов)' }, 400);
 
-  const telegram = typeof b.telegram === 'string' && b.telegram.trim()
-    ? sanitizeContact(b.telegram.trim())
-    : null;
-  const phone = typeof b.phone === 'string' && b.phone.trim()
-    ? sanitizeContact(b.phone.trim())
-    : null;
+  // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
+  // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
+  const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
   if (!telegram && !phone) return c.json({ error: 'Нужен хотя бы один контакт: telegram или телефон' }, 400);
 
   const item = await updateListing(c.env, c.req.param('id'), {

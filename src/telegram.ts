@@ -4,7 +4,10 @@ import {
   addReport, createListing, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
 } from './store';
-import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
+import {
+  admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
+  normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
+} from './util';
 import { aiExtractListing, type AiFields } from './ai';
 
 /* ------------------------------------------------------------------ */
@@ -86,7 +89,8 @@ function approveKeyboard(listingId: string): Record<string, unknown> {
 /* Форматирование                                                       */
 /* ------------------------------------------------------------------ */
 
-function formatListing(l: Listing, sourceNote = ''): string {
+/** Карточка заявки для модератора (и ответ бота в личке). Экспортирована для тестов. */
+export function formatListing(l: Listing, sourceNote = ''): string {
   const typeLabel = l.type === 'offer' ? 'Водитель везёт' : 'Нужно передать';
   const parts = [
     `#${l.id.slice(0, 8)} ${typeLabel}`,
@@ -98,8 +102,9 @@ function formatListing(l: Listing, sourceNote = ''): string {
   if (l.price) extras.push(`цена ${escapeHtml(l.price)}`);
   if (extras.length) parts.push(`Детали: ${extras.join(' · ')}`);
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
-  if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
-  if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
+  // Контакты без дублей: раньше один и тот же номер печатался двумя строками
+  const contacts = uniqueContacts(l.telegram, l.phone);
+  if (contacts.length) parts.push(`Контакты: ${escapeHtml(contacts.join(', '))}`);
   const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
   const srcRef = l.sourceChat
     ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
@@ -244,7 +249,8 @@ function searchLine(env: Env, l: Listing, today: string): string {
   }
   if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
   if (l.price) bits.push(escapeHtml(l.price));
-  if (l.telegram || l.phone) bits.push(escapeHtml(l.telegram ?? l.phone!));
+  const contacts = uniqueContacts(l.telegram, l.phone);
+  if (contacts.length) bits.push(escapeHtml(contacts.join(', ')));
   // Поездка уже прошла — заявка из архива (ещё месяц доступна, потом удаляется)
   if (l.status === 'expired' || (l.departureDate != null && l.departureDate < today)) bits.push('🗄️ архив');
   return `• ${route}${bits.length ? ' · ' + bits.join(' · ') : ''}`;
@@ -422,7 +428,7 @@ function relatedLine(l: Listing): string {
     relatedDay(l.departureDate),
     l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
     l.price,
-    l.telegram ?? l.phone ?? null,
+    uniqueContacts(l.telegram, l.phone)[0] ?? null,
     l.status === 'expired' ? 'архив' : null,
     l.status === 'pending' ? 'на модерации' : null,
     `№ ${l.id.slice(0, 8)}`,
@@ -454,7 +460,7 @@ async function cmdRelated(env: Env, chatId: number, query: string): Promise<void
   }
   const l = matches[0]!;
   const rel = await findRelated(env, l);
-  const chunks: string[] = [`🔗 <b>Заявка:</b> ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${relatedDay(l.departureDate)} · ${escapeHtml(l.telegram ?? l.phone ?? 'без контакта')} · № ${l.id.slice(0, 8)}`];
+  const chunks: string[] = [`🔗 <b>Заявка:</b> ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${relatedDay(l.departureDate)} · ${escapeHtml(uniqueContacts(l.telegram, l.phone)[0] ?? 'без контакта')} · № ${l.id.slice(0, 8)}`];
   if (rel.reverse.length) {
     chunks.push(`\n↔ <b>Встречные рейсы (${rel.reverse.length}):</b>`);
     for (const x of rel.reverse) chunks.push(relatedLine(x));
@@ -488,7 +494,7 @@ async function sendParseReport(env: Env, chatId: number, text: string): Promise<
     `Дата: ${p.departureDate ?? '—'}\n` +
     `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
     `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
-    `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
+    `Контакт: ${escapeHtml(uniqueContacts(p.telegram, p.phone)[0] ?? '—')}\n` +
     `Уверенность: ${p.confidence}\n\n` +
     verdict
   );
@@ -503,6 +509,8 @@ function rulesFields(
   parsed: ReturnType<typeof parseTelegramMessage>,
   text: string
 ): AiFields {
+  // Один и тот же контакт не должен лежать в двух полях (дубль строки «Контакты:»)
+  const { telegram, phone } = normalizeContacts(parsed.telegram, parsed.phone);
   return {
     type: parsed.intent ?? 'offer',
     fromCity: parsed.fromCity ?? 'не указано',
@@ -510,9 +518,11 @@ function rulesFields(
     departureDate: parsed.departureDate,
     weightKg: parsed.weightKg,
     price: parsed.price,
-    telegram: parsed.telegram,
-    phone: parsed.phone,
-    description: text.slice(0, 2000),
+    telegram,
+    phone,
+    // Исходный текст модератору нужен дословно — убираем из него только контакты,
+    // которые карточка и так показывает отдельной строкой
+    description: dedupeDescription(text.slice(0, 2000), { telegram, phone, stripFields: false }),
   };
 }
 
@@ -553,10 +563,11 @@ function extractForwardOrigin(msg: TgMessage): {
     senderUser && typeof senderUser.username === 'string' && senderUser.username
       ? `@${senderUser.username}`
       : undefined;
-  const authorName =
+  const rawAuthorName =
     senderUser && typeof senderUser.first_name === 'string' && senderUser.first_name
       ? senderUser.first_name
       : hiddenName;
+  const authorName = rawAuthorName?.replace(/\s+/g, ' ').trim() || undefined;
   const title =
     chat && typeof chat.title === 'string' ? chat.title
     : authorName ? `Переслано от ${authorName}`
@@ -958,7 +969,7 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
-  const noContact = !listing.telegram && !listing.phone
+  const noContact = uniqueContacts(listing.telegram, listing.phone).length === 0
     ? '\n<i>⚠ Контакта нет — сверьтесь с исходным сообщением или чатом</i>'
     : '';
   for (const adminId of admins(env)) {

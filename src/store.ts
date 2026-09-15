@@ -1,4 +1,5 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingStatus } from './types';
+import { normalizeContacts } from './util';
 
 function mapRow(row: Record<string, unknown>): Listing {
   return {
@@ -27,6 +28,10 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
+  // Единая точка нормализации контактов: номер не должен лежать в поле telegram,
+  // а один и тот же контакт — в обоих полях (иначе дубли в карточке и битая
+  // ссылка t.me/+48… на сайте). Через createListing проходят все источники.
+  const { telegram, phone } = normalizeContacts(input.telegram, input.phone);
   await env.DB.prepare(
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, weight_kg, price, description,
@@ -37,7 +42,7 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.weightKg ?? null, input.price ?? null,
-      input.description, input.phone ?? null, input.telegram ?? null,
+      input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
       input.sourceMessageId ?? null, now, publishedAt
     )
@@ -158,6 +163,8 @@ export async function updateListing(
   patch: Partial<Pick<ListingInput,
     'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
 ): Promise<Listing | null> {
+  // Те же правила, что при создании: контакты без дублей и каждый в своём поле
+  const { telegram, phone } = normalizeContacts(patch.telegram, patch.phone);
   const res = await env.DB.prepare(
     `UPDATE listings SET
        type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
@@ -166,7 +173,7 @@ export async function updateListing(
   ).bind(
     patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
     patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
-    patch.description ?? '', patch.telegram ?? null, patch.phone ?? null, id
+    patch.description ?? '', telegram, phone, id
   ).run();
   if ((res.meta.changes ?? 0) === 0) return null;
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
