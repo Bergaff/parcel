@@ -175,6 +175,43 @@ export async function updateListing(
   return row ? mapRow(row) : null;
 }
 
+/** Связи заявки: встречные рейсы, тот же маршрут (±3 дня), другие заявки того же контакта. */
+export async function findRelated(
+  env: Env,
+  l: Listing,
+  opts: { includePending?: boolean } = {}
+): Promise<{ reverse: Listing[]; same: Listing[]; sameContact: Listing[] }> {
+  const statuses = opts.includePending
+    ? "('published', 'expired', 'pending')"
+    : "('published', 'expired')";
+  const run = async (sql: string, ...params: (string | number | null)[]): Promise<Listing[]> => {
+    const res = await env.DB.prepare(sql).bind(...params).all();
+    return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+  };
+  const reverse = await run(
+    `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ? AND from_city = ? AND to_city = ?
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+    l.id, l.toCity, l.fromCity
+  );
+  const same = l.departureDate
+    ? await run(
+        `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ? AND from_city = ? AND to_city = ?
+         AND departure_date IS NOT NULL AND ABS(julianday(departure_date) - julianday(?)) <= 3
+         ORDER BY departure_date LIMIT 5`,
+        l.id, l.fromCity, l.toCity, l.departureDate)
+    : await run(
+        `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ? AND from_city = ? AND to_city = ?
+         ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+        l.id, l.fromCity, l.toCity);
+  const sameContact = await run(
+    `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ?
+     AND ((telegram IS NOT NULL AND telegram = ?) OR (phone IS NOT NULL AND phone = ?))
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+    l.id, l.telegram ?? '', l.phone ?? ''
+  );
+  return { reverse, same, sameContact };
+}
+
 /** Полное удаление заявки (админ-панель): вместе с жалобами и отметками обработанных сообщений. */
 export async function deleteListing(env: Env, id: string): Promise<boolean> {
   const res = await env.DB.batch([

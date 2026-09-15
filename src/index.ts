@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, getCounts, getListingById, listAdminBoard, listListings, updateListing, updateListingStatus } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, findRelated, getCounts, getListingById, listAdminBoard, listListings, updateListing, updateListingStatus } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -408,6 +408,14 @@ app.post('/api/admin/listings/:id/delete', async (c) => {
   const ok = await deleteListing(c.env, c.req.param('id'));
   if (!ok) return c.json({ error: 'not_found' }, 404);
   return c.json({ ok: true });
+});
+
+/* Связи заявки (встречные, тот же маршрут, тот же контакт) — админ-панель. */
+app.get('/api/admin/listings/:id/related', async (c) => {
+  const listing = await getListingById(c.env, c.req.param('id'));
+  if (!listing) return c.json({ error: 'not_found' }, 404);
+  const rel = await findRelated(c.env, listing, { includePending: true });
+  return c.json(rel);
 });
 
 /* Ручной запуск архивации — то же самое cron делает раз в сутки:

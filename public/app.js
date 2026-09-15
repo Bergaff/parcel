@@ -548,14 +548,45 @@ function adminCard(l, mode = 'pending') {
     text: adminEditId === l.id ? 'закрыть' : 'редактировать',
     onclick: () => { adminEditId = adminEditId === l.id ? null : l.id; loadAdmin(); },
   });
+
+  // Связи: встречные рейсы, тот же маршрут, другие заявки контакта
+  const relatedBox = el('div', { class: 'admin-edit' });
+  relatedBox.hidden = true;
+  const relBtn = el('button', {
+    class: 'btn btn-line btn-sm',
+    text: 'связи',
+    onclick: async () => {
+      if (!relatedBox.hidden) { relatedBox.hidden = true; return; }
+      relatedBox.hidden = false;
+      relatedBox.replaceChildren(el('p', { class: 'admin-contact', text: 'ищу связи…' }));
+      try {
+        const res = await adminApi(`/api/admin/listings/${encodeURIComponent(l.id)}/related`);
+        if (!res.ok) throw new Error();
+        const rel = await res.json();
+        const line = (x) => el('p', {
+          class: 'admin-contact',
+          text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${x.telegram || x.phone ? ` · ${x.telegram || x.phone}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
+        });
+        const parts = [];
+        if (rel.reverse?.length) parts.push(el('p', { class: 'label', text: `↔ встречные (${rel.reverse.length})` }), ...rel.reverse.map(line));
+        if (rel.same?.length) parts.push(el('p', { class: 'label', text: `тот же маршрут (${rel.same.length})` }), ...rel.same.map(line));
+        if (rel.sameContact?.length) parts.push(el('p', { class: 'label', text: `тот же контакт (${rel.sameContact.length})` }), ...rel.sameContact.map(line));
+        relatedBox.replaceChildren(...(parts.length ? parts : [el('p', { class: 'admin-contact', text: 'Связей нет: ни встречных, ни похожих.' })]));
+      } catch {
+        relatedBox.replaceChildren(el('p', { class: 'admin-contact', text: 'Не получилось загрузить связи.' }));
+      }
+    },
+  });
   const actions = mode === 'pending'
     ? [
         el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
         el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
         editBtn,
+        relBtn,
       ]
     : [
         editBtn,
+        relBtn,
         l.status === 'expired'
           ? el('button', { class: 'btn btn-ink btn-sm', text: 'на доску', onclick: () => adminSetStatus(l.id, 'published') })
           : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
@@ -582,6 +613,7 @@ function adminCard(l, mode = 'pending') {
         ])
       : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
     ...(adminEditId === l.id ? [adminEditForm(l)] : []),
+    relatedBox,
     el('div', { class: 'admin-card-actions' }, actions),
   ]);
 }
