@@ -175,6 +175,18 @@ export async function updateListing(
   return row ? mapRow(row) : null;
 }
 
+/** Разово создать таблицу chat_links, если её нет (тот же DDL, что в миграции 0002).
+ *  Идемпотентно: IF NOT EXISTS, существующие данные не затрагиваются. */
+export async function ensureChatLinksTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS chat_links (
+       chat_id TEXT PRIMARY KEY,
+       url TEXT NOT NULL,
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run();
+}
+
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
 export async function getChatLinks(env: Env): Promise<Record<string, string>> {
   const res = await env.DB.prepare('SELECT chat_id, url FROM chat_links').all();

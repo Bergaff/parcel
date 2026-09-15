@@ -757,7 +757,33 @@ async function renderAdminChats() {
   try {
     const res = await adminApi('/api/admin/source-chats');
     if (!res.ok) throw new Error();
-    const { chats } = await res.json();
+    const { chats, needsSetup } = await res.json();
+    if (needsSetup) {
+      // таблицы ссылок ещё нет в базе — предложим создать одним кликом
+      $('#admin-count').textContent = 'Один шаг до готовности: нужна таблица ссылок.';
+      listEl.replaceChildren(
+        el('p', {
+          class: 'empty-note',
+          text: 'В базе ещё нет таблицы chat_links. Она только хранит ссылки на чаты — существующие объявления и настройки не трогаются. Создать можно прямо здесь.',
+        }),
+        el('div', { class: 'admin-card-actions' }, [
+          el('button', {
+            class: 'btn btn-ink', type: 'button', text: 'создать таблицу',
+            onclick: async () => {
+              try {
+                const r = await adminApi('/api/admin/ensure-chat-links', { method: 'POST' });
+                if (!r.ok) throw new Error();
+                toast('Таблица создана.');
+                await renderAdminChats();
+              } catch {
+                toast('Не получилось создать. Попробуйте ещё раз.');
+              }
+            },
+          }),
+        ])
+      );
+      return;
+    }
     $('#admin-count').textContent = chats.length
       ? `Чатов-источников: ${chats.length}. Ссылка t.me/… делает подпись «из чата …» на доске кликабельной для всех.`
       : 'Чатов пока нет: добавьте бота в чат или перешлите ему сообщение — источники появятся здесь.';

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, deleteListing, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -419,8 +419,23 @@ app.get('/api/chat-links', async (c) => {
   }
 });
 
-/* Чаты-источники: названия, счётчики заявок, заданные вручную ссылки. */
-app.get('/api/admin/source-chats', async (c) => c.json({ chats: await listSourceChats(c.env) }));
+/* Чаты-источники: названия, счётчики заявок, заданные вручную ссылки.
+ *  Если таблицы chat_links ещё нет (миграцию не applied) — флаг needsSetup,
+ *  и админка предложит создать её одним кликом. */
+app.get('/api/admin/source-chats', async (c) => {
+  try {
+    return c.json({ chats: await listSourceChats(c.env) });
+  } catch (e) {
+    if (String(e).includes('no such table')) return c.json({ chats: [], needsSetup: true });
+    throw e;
+  }
+});
+
+/* Разово создать таблицу chat_links (идемпотентно; данные объявлений не трогает). */
+app.post('/api/admin/ensure-chat-links', async (c) => {
+  await ensureChatLinksTable(c.env);
+  return c.json({ ok: true });
+});
 
 /* Задать/убрать публичную ссылку на чат (пустой url — убрать). */
 app.put('/api/admin/chat-links', async (c) => {
