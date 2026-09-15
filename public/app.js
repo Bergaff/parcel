@@ -94,9 +94,28 @@ function contactInfo(l) {
 }
 
 function sourceLabel(l) {
+  if (l.sourceChat && l.sourceChat.startsWith('Переслано от ')) {
+    return l.source === 'parser' ? `${l.sourceChat} · ИИ-разбор` : l.sourceChat;
+  }
   if (l.source === 'parser') return l.sourceChat ? `ИИ-разбор из чата «${l.sourceChat}»` : 'ИИ-разбор';
   if (l.source === 'telegram') return l.sourceChat ? `из чата «${l.sourceChat}»` : 'из Telegram';
   return 'с сайта';
+}
+
+/* Ссылка на исходное сообщение: t.me/c/… — для супергрупп и каналов (id -100…),
+ * открывается у участников чата. Пересылки от людей и обычные группы — без ссылки. */
+function sourceLinkUrl(l) {
+  if (!l.sourceChatId) return null;
+  const m = /^-100(\d+)$/.exec(l.sourceChatId);
+  if (!m) return null;
+  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+}
+
+/* Подпись источника — кликабельная, когда есть ссылка на оригинал */
+function sourceContent(l) {
+  const url = sourceLinkUrl(l);
+  if (!url) return sourceLabel(l);
+  return el('a', { href: url, target: '_blank', rel: 'noopener', text: sourceLabel(l) });
 }
 
 /* ---------- скопировать ссылку на объявление ---------- */
@@ -206,7 +225,7 @@ function buildRow(l) {
         l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : el('span', { text: 'дата не указана' }),
         l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
         l.price ? el('span', { class: 'mono', text: l.price }) : null,
-        el('span', { class: 'src', text: sourceLabel(l) }),
+        el('span', { class: 'src' }, [sourceContent(l)]),
       ].filter(Boolean)),
     ]),
  el('div', { class: 'row-side' }, [
@@ -404,7 +423,7 @@ async function loadDetail(id) {
     }
     cells.push(el('div', { class: 'cell' }, [
       el('span', { class: 'label', text: 'источник' }),
-      el('span', { class: 'value', text: sourceLabel(l) }),
+      el('span', { class: 'value' }, [sourceContent(l)]),
     ]));
     cells.push(el('div', { class: 'cell' }, [
       el('span', { class: 'label', text: 'добавлено' }),
@@ -541,7 +560,7 @@ function adminCard(l, mode = 'pending') {
     l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
     l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
     l.price ? el('span', { class: 'mono', text: l.price }) : null,
-    el('span', { class: 'src', text: sourceLabel(l) }),
+    el('span', { class: 'src' }, [sourceContent(l)]),
   ];
   const editBtn = el('button', {
     class: 'btn btn-line btn-sm',

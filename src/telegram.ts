@@ -100,15 +100,28 @@ function formatListing(l: Listing, sourceNote = ''): string {
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
   if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
   if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
-  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${l.sourceChat ? `, чат «${escapeHtml(l.sourceChat)}»` : ''}`);
-  else if (l.sourceChat) parts.push(`Источник: ${escapeHtml(l.sourceChat)}`);
+  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
+  const srcRef = l.sourceChat
+    ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
+    : '';
+  const srcLinkTag = srcLink ? ` — <a href="${srcLink}">исходное сообщение</a>` : '';
+  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${srcRef ? `, ${srcRef}` : ''}${srcLinkTag}`);
+  else if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
 
-/** Ссылка на исходное сообщение в чате. Для публичных чатов работает как t.me/c/... */
-function chatMessageLink(chatId: number, messageId: number): string | null {
-  return `https://t.me/c/${chatId.toString().replace(/^-100/, '')}/${messageId}`;
+/** Ссылка на исходное сообщение в чате (t.me/c/…, открывается у участников).
+ *  Есть только у супергрупп и каналов — их id начинается с -100;
+ *  пересылки от людей и обычные группы честно остаются без ссылки. */
+export function listingSourceLink(
+  sourceChatId: string | null | undefined,
+  sourceMessageId: number | null | undefined
+): string | null {
+  if (!sourceChatId) return null;
+  const m = /^-100(\d+)$/.exec(sourceChatId);
+  if (!m) return null;
+  return `https://t.me/c/${m[1]}${sourceMessageId != null ? `/${sourceMessageId}` : ''}`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -515,18 +528,31 @@ async function cascade(
   return { fields: null, source: 'telegram' };
 }
 
-/** Из forward_origin достаём исходный чат/сообщение (для дедупликации
- *  и пометки «откуда») и название источника. */
-function extractForwardOrigin(msg: TgMessage): { chatId?: number; messageId?: number; title?: string } {
+/** Из forward_origin достаём исходный чат/сообщение (для дедупликации),
+ *  название источника и @username автора пересланного сообщения. */
+function extractForwardOrigin(msg: TgMessage): {
+  chatId?: number; messageId?: number; title?: string; authorUsername?: string;
+} {
   const o = (msg.forward_origin ?? {}) as Record<string, unknown>;
   const chat = (o.chat ?? null) as Record<string, unknown> | null;
+  // автор-человек: обычная пересылка (sender_user) или старое поле forward_from
+  const senderUser = (o.sender_user ?? msg.forward_from ?? null) as Record<string, unknown> | null;
+  const hiddenName = typeof o.sender_user_name === 'string' ? o.sender_user_name : undefined;
   const chatId = chat && typeof chat.id === 'number' ? chat.id : undefined;
   const messageId = typeof o.message_id === 'number' ? o.message_id : undefined;
+  const authorUsername =
+    senderUser && typeof senderUser.username === 'string' && senderUser.username
+      ? `@${senderUser.username}`
+      : undefined;
+  const authorName =
+    senderUser && typeof senderUser.first_name === 'string' && senderUser.first_name
+      ? senderUser.first_name
+      : hiddenName;
   const title =
-    typeof o.sender_user_name === 'string' ? o.sender_user_name
-    : chat && typeof chat.title === 'string' ? chat.title
+    chat && typeof chat.title === 'string' ? chat.title
+    : authorName ? `Переслано от ${authorName}`
     : undefined;
-  return { chatId, messageId, title };
+  return { chatId, messageId, title, authorUsername };
 }
 
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
@@ -569,7 +595,8 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     }
     const input: ListingInput = {
       ...fields,
-      telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+      // контакт — автор сообщения (из forward-данных), а не тот, кто переслал
+      telegram: fields.telegram ?? origin.authorUsername ?? null,
       status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
       source,
       sourceChat: origin.title ?? 'Пересланное сообщение',
@@ -911,12 +938,10 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
 export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
-  const link = listing.sourceMessageId
-    ? chatMessageLink(Number(listing.sourceChatId), listing.sourceMessageId)
-    : null;
   for (const adminId of admins(env)) {
+    // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing, link ? `Ссылка: <a href="${link}">исходное сообщение</a>` : ''),
+      formatListing(listing),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }
