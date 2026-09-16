@@ -492,6 +492,24 @@ button { font-family: inherit; }
 .admin-edit .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .admin-edit textarea { width: 100%; resize: vertical; }
 @media (max-width: 640px) { .admin-edit .row2 { grid-template-columns: 1fr; } }
+/* --- вкладка «повторы»: группы одинаковых заявок --- */
+.dupe-toolbar { align-items: center; margin-bottom: 16px; }
+.dupe-toolbar .form-note { flex: 1 1 260px; }
+.dupe-group .admin-contact { margin-bottom: 8px; }
+.dupe-line {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  font-size: 13.5px; padding: 6px 10px; margin-bottom: 4px; border-left: 3px solid var(--line);
+}
+.dupe-keep { border-left-color: var(--accent); background: rgba(164, 58, 16, .06); }
+.dupe-tag {
+  font-size: 11.5px; text-transform: lowercase; letter-spacing: .03em;
+  border: 1px solid var(--line-strong); padding: 1px 7px; color: var(--muted);
+}
+.dupe-keep .dupe-tag { border-color: var(--accent); color: var(--accent-deep); font-weight: 700; }
+.dupe-route { font-weight: 700; }
+.dupe-ago { color: var(--muted); }
+.dupe-line .link-btn { margin-left: auto; }
+
 /* --- вкладка «подбор»: пары «водитель везёт» ↔ «нужно передать» --- */
 .match-form { display: grid; gap: 12px; }
 .match-form .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

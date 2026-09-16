@@ -1,8 +1,9 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
+import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck, findCities } from './parser';
+import { formatMatchDigest, pairListings } from './match';
 import {
-  addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
-  searchByCity, setSeenListing, updateListingStatus,
+  addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
+  listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -438,6 +439,100 @@ function relatedLine(l: Listing): string {
 }
 
 /** Связи заявки: встречные рейсы, тот же маршрут, другие заявки автора. */
+/**
+ * Служебные слова команды /подбор: их нужно вычеркнуть, прежде чем принимать
+ * оставшиеся слова за города («с архивом и одним общим городом» — это флаги,
+ * а не два города).
+ */
+const MATCH_ARG_NOISE =
+  /(с\s+|и\s+|без\s+)?архив[а-яё]*|(од(ин|ним|ного|ной)\s+(общ[а-яё]*\s+)?город[а-яё]*)|частичн[а-яё]*|неполн[а-яё]*|по\s+городам|окн[а-яё]*|(?<!\d)\d{1,3}\s*(дн|день|дня|дней|days?)[а-яё.]*/gi;
+
+/** Города из аргументов команды: «Варшава Минск», «из Варшавы в Минск», «Варшава». */
+export function matchArgCities(args: string): { fromCity: string | null; toCity: string | null } {
+  const clean = (args ?? '').trim();
+  if (!clean) return { fromCity: null, toCity: null };
+  // знакомые города находим в любом падеже — остальное в аргументах игнорируем
+  const found = findCities(clean).map((c) => c.city);
+  const words = found.length
+    ? found
+    // незнакомые города: вычеркиваем флаги, дни и предлоги, нормализуем остаток
+    : clean
+        .replace(MATCH_ARG_NOISE, ' ')
+        .split(/[\s,;]+/)
+        .filter((w) => w.length > 1 && !/^(из|в|во|до|на|с|со|от|по|и|или|только|без|не|-|—|→)$/i.test(w))
+        .map((w) => normalizeCity(w));
+  const uniq: string[] = [];
+  for (const city of words) {
+    if (!city) continue;
+    if (!uniq.some((u) => u.toLowerCase() === city.toLowerCase())) uniq.push(city);
+  }
+  return { fromCity: uniq[0] ?? null, toCity: uniq[1] ?? null };
+}
+
+/** Окно по датам из аргументов: «7 дней», «窗口» не поддерживаем — только дни. */
+export function matchArgDays(args: string): number {
+  const m = /(?<!\d)(\d{1,3})\s*(?:дн|день|дня|дней|days?)/i.exec(args ?? '');
+  if (!m) return 3;
+  const n = Number(m[1]);
+  // «0 дней» — бессмыслица, берём окно по умолчанию; больше месяца не нужно
+  if (!Number.isFinite(n) || n <= 0) return 3;
+  return Math.min(30, Math.round(n));
+}
+
+/** Флаги из аргументов: «с архивом», «и с одним общим городом».
+ *  \b с кириллицей не работает (для JS это не «слово»), поэтому границы не ставим. */
+export function matchArgFlags(args: string): { includeArchive: boolean; partial: boolean } {
+  const text = args ?? '';
+  return {
+    includeArchive: /архив/i.test(text),
+    // «один город», «с одним общим городом», «частично» — в любых падежах
+    // \w и \b кириллицу не понимают — только явные классы букв
+    partial: /(од(ин|ним|ного|ной)\s+(общ[а-яё]*\s+)?город|частичн|неполн|по городам)/i.test(text),
+  };
+}
+
+/**
+ * /подбор — то же, что кнопка в админке, только из Telegram: сравнить водителей
+ * с заявками «нужно передать», прислать сводку и сохранить прогон в историю.
+ */
+async function cmdMatch(env: Env, msg: TgMessage, args: string): Promise<void> {
+  const chatId = msg.chat.id;
+  if (!admins(env).includes(String(msg.from?.id))) {
+    await sendText(env, chatId, 'Подбор пар — команда администратора.');
+    return;
+  }
+  const { fromCity, toCity } = matchArgCities(args);
+  const days = matchArgDays(args);
+  const { includeArchive, partial } = matchArgFlags(args);
+
+  const where = fromCity || toCity ? [fromCity, toCity].filter(Boolean).join(' → ') : 'все города';
+  await sendText(env, chatId, `🧩 Подбор пар: ${escapeHtml(where)}, окно ${days} дн. Считаю…`).catch(() => undefined);
+
+  const listings = await listForMatching(env, { includeArchive });
+  const { pairs, stats } = pairListings(listings, { fromCity, toCity, days, includeArchive, partial, limit: 50 });
+  // Прогон сохраняем: история подборов общая и для кнопки в админке, и для команды
+  const run = await saveMatchRun(env, {
+    fromCity, toCity, daysWindow: days, includeArchive, partial,
+    offersTotal: stats.offers, requestsTotal: stats.requests,
+    notified: true, note: 'из Telegram: /подбор',
+  }, pairs).catch((e) => {
+    console.error('saveMatchRun failed', e);
+    return null;
+  });
+
+  const digest = formatMatchDigest({ fromCity, toCity, days, pairs, stats, siteUrl: env.SITE_URL, maxPairs: 15 });
+  for (const part of splitDigest(digest)) {
+    await sendText(env, chatId, part).catch(() => undefined);
+  }
+  if (run) {
+    const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+    await sendText(env, chatId,
+      `Прогон № ${run.id.slice(0, 8)} сохранён в истории` +
+      (site ? ` — открыть в <a href="${site}/#/admin">админке</a>, вкладка «подбор».` : ' — вкладка «подбор» в админке.')
+    ).catch(() => undefined);
+  }
+}
+
 async function cmdRelated(env: Env, chatId: number, query: string): Promise<void> {
   const arg = query.trim();
   if (!arg) {
@@ -664,6 +759,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
           `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
           `• <b>/связи номер</b>: встречные рейсы и похожие заявки — полезно владельцам чатов\n` +
+          `• <b>/подбор</b> (для администратора): найти пары «водитель везёт» ↔ «нужно передать»; можно сузить городами и окном по датам: <code>/подбор Варшава Минск 7 дней</code>\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
@@ -739,6 +835,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/match':
       case '/links': {
         await cmdRelated(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
+      case '/подбор':
+      case '/подборы':
+      case '/пары':
+      case '/podbor': {
+        await cmdMatch(env, msg, text.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:

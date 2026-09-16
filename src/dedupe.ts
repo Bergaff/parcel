@@ -32,6 +32,8 @@ export interface DedupeSubject {
   status?: string;
   sourceChat?: string | null;
   sourceChatId?: string | null;
+  createdAt?: string;
+  publishedAt?: string | null;
 }
 
 export type DuplicateKind = 'duplicate' | 'similar';
@@ -285,4 +287,92 @@ export function pickDuplicate<T extends DedupeSubject>(
   // sort() устойчив: кандидаты приходят из базы уже отсортированными от новых к старым
   hits.sort((a, b) => (rank(a) - rank(b)) || (statusRank(a) - statusRank(b)));
   return hits[0]!;
+}
+
+/* ------------------------------------------------------------------ */
+/* Разбор уже накопившихся дублей                                       */
+/* ------------------------------------------------------------------ */
+
+/** Группа одинаковых заявок: какую оставить и какие удалить. */
+export interface DuplicateGroup<T extends DedupeSubject> {
+  keep: T;
+  duplicates: T[];
+  why: string;
+}
+
+/**
+ * Какую заявку оставить: сначала та, что на доске (не в очереди и не в архиве),
+ * затем та, у которой есть контакт (по ней людям писать), затем самая свежая.
+ */
+export function keepRank(l: DedupeSubject): number[] {
+  const status = l.status === 'published' ? 0 : l.status === 'pending' ? 1 : 2;
+  const contact = uniqueContacts(l.telegram ?? null, l.phone ?? null).length > 0 ? 0 : 1;
+  const when = new Date(l.publishedAt || l.createdAt || 0).getTime() || 0;
+  return [status, contact, -when];
+}
+
+function betterToKeep<T extends DedupeSubject>(a: T, b: T): T {
+  const ra = keepRank(a);
+  const rb = keepRank(b);
+  for (let i = 0; i < ra.length; i++) {
+    if (ra[i]! !== rb[i]!) return ra[i]! < rb[i]! ? a : b;
+  }
+  return a;
+}
+
+/**
+ * Разложить список заявок на группы дублей — чтобы разобрать завалы, которые
+ * накопились до появления защиты (одно и то же объявление одобряли каждый день).
+ *
+ * В группу попадают только уверенные совпадения ('duplicate'): тот же человек
+ * и тот же рейс. «Похожие» (kind === 'similar') не группируем — там люди разные,
+ * решать должен модератор.
+ */
+export function groupDuplicates<T extends DedupeSubject>(listings: T[]): Array<DuplicateGroup<T>> {
+  const parent = listings.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
+  const union = (i: number, j: number): void => {
+    const a = find(i);
+    const b = find(j);
+    if (a !== b) parent[b] = a;
+  };
+
+  const whyByRoot = new Map<number, string>();
+  for (let i = 0; i < listings.length; i++) {
+    for (let j = i + 1; j < listings.length; j++) {
+      const v = compareForDuplicate(listings[i]!, listings[j]!);
+      if (!v || v.kind !== 'duplicate') continue;
+      union(i, j);
+      const root = find(i);
+      if (!whyByRoot.has(root)) whyByRoot.set(root, v.why);
+    }
+  }
+
+  const buckets = new Map<number, T[]>();
+  listings.forEach((l, i) => {
+    const root = find(i);
+    const bucket = buckets.get(root);
+    if (bucket) bucket.push(l);
+    else buckets.set(root, [l]);
+  });
+
+  const groups: Array<DuplicateGroup<T>> = [];
+  for (const [root, bucket] of buckets) {
+    if (bucket.length < 2) continue;
+    let keep = bucket[0]!;
+    for (const item of bucket.slice(1)) keep = betterToKeep(keep, item);
+    const duplicates = bucket.filter((l) => l !== keep);
+    // удалить сначала самые старые копии — свежая остаётся на доске
+    duplicates.sort((a, b) => keepRank(a)[2]! - keepRank(b)[2]!);
+    const other = duplicates[0]!;
+    groups.push({
+      keep,
+      duplicates,
+      why: whyByRoot.get(root)
+        ?? compareForDuplicate(keep, other)?.why
+        ?? 'тот же человек и тот же рейс',
+    });
+  }
+  groups.sort((a, b) => b.duplicates.length - a.duplicates.length);
+  return groups;
 }

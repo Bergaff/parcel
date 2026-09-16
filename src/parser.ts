@@ -251,7 +251,9 @@ const CYRILLIC = 'а-яёa-z';
  * Ищет города с учётом русских окончаний («в Варшаве», «до Кракова»).
  * После ключа допускается ровно одна буква-окончание.
  */
-function findCities(text: string): Array<{ city: string; index: number; end: number }> {
+/** Найти в тексте знакомые города (в любом падеже), по порядку появления.
+ *  Наружу нужна, например, команде /подбор: «Варшава Минск» → два города. */
+export function findCities(text: string): Array<{ city: string; index: number; end: number }> {
   const found: Array<{ city: string; index: number; end: number }> = [];
   const lower = text.toLowerCase().replace(/ё/g, 'е');
   for (const key of CITY_KEYS) {

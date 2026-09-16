@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteMatchRun, findDuplicate, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
+import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
@@ -521,6 +522,37 @@ app.get('/api/admin/listings/:id/related', async (c) => {
 app.post('/api/admin/archive', async (c) => {
   const res = await archiveExpired(c.env);
   return c.json({ ok: true, archived: res.archived, deleted: res.deleted });
+});
+
+/* ------------------------------------------------------------------ */
+/* Повторы: дубликаты, которые уже накопились на доске                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * GET /api/admin/duplicates — группы одинаковых заявок: какую оставить
+ * и какие копии удалить. Защита от дублей не создаёт новые, но до неё
+ * одно и то же объявление успевали одобрить по несколько раз.
+ */
+app.get('/api/admin/duplicates', async (c) => {
+  const includeArchive = c.req.query('archive') === '1';
+  const listings = await listForDuplicateSweep(c.env, { includeArchive });
+  const groups = groupDuplicates(listings).slice(0, 40);
+  return c.json({
+    total: listings.length,
+    extraCount: groups.reduce((n, g) => n + g.duplicates.length, 0),
+    groups: groups.map((g) => ({ why: g.why, keep: g.keep, duplicates: g.duplicates })),
+  });
+});
+
+/** POST /api/admin/duplicates/clean — удалить перечисленные копии ({ ids: [...] }). */
+app.post('/api/admin/duplicates/clean', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { ids?: unknown };
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((v): v is string => typeof v === 'string').slice(0, 50)
+    : [];
+  if (ids.length === 0) return c.json({ error: 'нужен список id' }, 400);
+  const deleted = await deleteListings(c.env, ids);
+  return c.json({ ok: true, deleted });
 });
 
 /* ------------------------------------------------------------------ */

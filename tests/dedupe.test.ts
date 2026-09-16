@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   compareForDuplicate,
+  groupDuplicates,
+  keepRank,
   dateDiffDays,
   differentContacts,
   pickDuplicate,
@@ -255,5 +257,96 @@ describe('pickDuplicate: кого выбрать из нескольких ка�
   it('нет кандидатов — нет и дубля', () => {
     expect(pickDuplicate([], input())).toBeNull();
     expect(pickDuplicate([existing({ toCity: 'Брест' })], input())).toBeNull();
+  });
+});
+
+describe('groupDuplicates: разбор завалов, которые уже на доске', () => {
+  const day = (n: number): string => `2026-09-${String(20 + n).padStart(2, '0')}`;
+
+  it('пять одинаковых заявок одного человека — одна группа, четыре копии', () => {
+    const listings = [0, 1, 2, 3, 4].map((n) => existing({
+      id: `copy-${n}`,
+      departureDate: '2026-09-20',
+      telegram: '@driver',
+      description: `Еду 20 сентября из Варшавы в Минск, возьму посылки (писал ${day(n)})`,
+      createdAt: `2026-09-1${n}T10:00:00.000Z`,
+      publishedAt: `2026-09-1${n}T10:00:00.000Z`,
+    }));
+    const groups = groupDuplicates(listings);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.duplicates).toHaveLength(4);
+    expect(groups[0]!.keep.id).toMatch(/^copy-/);
+    expect(new Set([groups[0]!.keep.id, ...groups[0]!.duplicates.map((d) => d.id)]).size).toBe(5);
+  });
+
+  it('оставляет ту, что на доске, а не в очереди модерации', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'pending-one', status: 'pending', telegram: '@driver', publishedAt: null, createdAt: '2026-09-17T10:00:00.000Z' }),
+      existing({ id: 'published-one', status: 'published', telegram: '@driver', createdAt: '2026-09-16T10:00:00.000Z' }),
+    ]);
+    expect(groups[0]!.keep.id).toBe('published-one');
+    expect(groups[0]!.duplicates.map((d) => d.id)).toEqual(['pending-one']);
+  });
+
+  it('оставляет заявку с контактом, даже если копия свежее', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'fresh-no-contact', telegram: null, phone: null, status: 'published', createdAt: '2026-09-18T10:00:00.000Z', publishedAt: '2026-09-18T10:00:00.000Z' }),
+      existing({ id: 'old-with-contact', telegram: '@driver', status: 'published', createdAt: '2026-09-16T10:00:00.000Z', publishedAt: '2026-09-16T10:00:00.000Z' }),
+    ]);
+    expect(groups[0]!.keep.id).toBe('old-with-contact');
+  });
+
+  it('разных людей в одну группу не сваливает', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'one', telegram: '@driver_one', description: 'Еду, возьму посылку, выезд утром' }),
+      existing({ id: 'two', telegram: '@driver_two', description: 'Еду, возьму посылку, выезд утром' }),
+      existing({ id: 'three', telegram: '@driver_three', description: 'Другой текст про документы и ключи' }),
+    ]);
+    expect(groups).toHaveLength(0);
+  });
+
+  it('«похожие» заявки не группируются — решает модератор', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'a', telegram: null, phone: null, description: 'Ищу кто передаст посылку Варшава Минск, документы и ключи' }),
+      existing({ id: 'b', telegram: null, phone: null, description: 'Еду Варшава Минск, возьму посылку, есть место в багажнике, могу забрать из центра' }),
+    ]);
+    expect(groups).toHaveLength(0);
+  });
+
+  it('другие даты — разные рейсы, группы нет', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'a', telegram: '@driver', departureDate: '2026-09-20' }),
+      existing({ id: 'b', telegram: '@driver', departureDate: '2026-09-27' }),
+    ]);
+    expect(groups).toHaveLength(0);
+  });
+
+  it('несколько групп сортируются по числу копий', () => {
+    const groups = groupDuplicates([
+      existing({ id: 'big-1', telegram: '@big', fromCity: 'Варшава', toCity: 'Минск' }),
+      existing({ id: 'big-2', telegram: '@big', fromCity: 'Варшава', toCity: 'Минск' }),
+      existing({ id: 'big-3', telegram: '@big', fromCity: 'Варшава', toCity: 'Минск' }),
+      existing({ id: 'small-1', telegram: '@small', fromCity: 'Краков', toCity: 'Киев' }),
+      existing({ id: 'small-2', telegram: '@small', fromCity: 'Краков', toCity: 'Киев' }),
+      existing({ id: 'alone', telegram: '@lonely', fromCity: 'Берлин', toCity: 'Минск' }),
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]!.duplicates).toHaveLength(2);
+    expect(groups[0]!.keep.telegram).toBe('@big');
+    expect(groups[1]!.duplicates).toHaveLength(1);
+    expect(groups[1]!.keep.telegram).toBe('@small');
+  });
+
+  it('пусто или одна заявка — групп нет', () => {
+    expect(groupDuplicates([])).toHaveLength(0);
+    expect(groupDuplicates([existing()])).toHaveLength(0);
+  });
+
+  it('keepRank: на доске лучше очереди, с контактом лучше без', () => {
+    expect(keepRank(existing({ status: 'published', telegram: '@driver' }))[0]).toBe(0);
+    expect(keepRank(existing({ status: 'pending', telegram: '@driver' }))[0]).toBe(1);
+    expect(keepRank(existing({ status: 'expired', telegram: '@driver' }))[0]).toBe(2);
+    expect(keepRank(existing({ telegram: null, phone: null }))[1]).toBe(1);
+    expect(keepRank(existing({ telegram: '@driver' }))[1]).toBe(0);
   });
 });

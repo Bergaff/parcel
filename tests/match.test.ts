@@ -8,7 +8,7 @@ import {
   parseSnapshot,
   scorePair,
 } from '../src/match';
-import { splitDigest } from '../src/telegram';
+import { matchArgCities, matchArgDays, splitDigest } from '../src/telegram';
 import type { Listing } from '../src/types';
 
 const TODAY = '2026-09-20';
@@ -249,5 +249,64 @@ describe('formatMatchDigest: сводка в Telegram', () => {
     for (const p of parts) expect(p.length).toBeLessThanOrEqual(200);
     expect(parts.join('\n\n')).toBe(long);
     expect(splitDigest('коротко')).toEqual(['коротко']);
+  });
+});
+
+describe('/подбор: разбор аргументов команды', () => {
+  it('без аргументов — все города, окно 3 дня', () => {
+    expect(matchArgCities('')).toEqual({ fromCity: null, toCity: null });
+    expect(matchArgDays('')).toBe(3);
+  });
+
+  it('два города: откуда и куда', () => {
+    expect(matchArgCities('Варшава Минск')).toEqual({ fromCity: 'Варшава', toCity: 'Минск' });
+  });
+
+  it('один город — фильтр по нему', () => {
+    expect(matchArgCities('Краков')).toEqual({ fromCity: 'Краков', toCity: null });
+  });
+
+  it('города в падежах и с предлогами', () => {
+    expect(matchArgCities('из Варшавы в Минск')).toEqual({ fromCity: 'Варшава', toCity: 'Минск' });
+  });
+
+  it('повтор города не даёт двух одинаковых фильтров', () => {
+    expect(matchArgCities('Варшава Варшава')).toEqual({ fromCity: 'Варшава', toCity: null });
+  });
+
+  it('незнакомый город тоже нормализуется', () => {
+    expect(matchArgCities('Гродно')).toEqual({ fromCity: 'Гродно', toCity: null });
+    expect(matchArgCities('Солигорск Жодино')).toEqual({ fromCity: 'Солигорск', toCity: 'Жодино' });
+  });
+
+  it('знакомый город внутри составного названия находится', () => {
+    // «Брест-Литовск» — историческое название Бреста: парсер знает «Брест»
+    expect(matchArgCities('Гродно Брест-Литовск')).toEqual({ fromCity: 'Гродно', toCity: 'Брест' });
+  });
+
+  it('флаги и дни за города не принимаются', () => {
+    expect(matchArgCities('с архивом и одним общим городом')).toEqual({ fromCity: null, toCity: null });
+    expect(matchArgCities('архив один город 14 дней')).toEqual({ fromCity: null, toCity: null });
+    expect(matchArgCities('Варшава Минск 7 дней архив')).toEqual({ fromCity: 'Варшава', toCity: 'Минск' });
+  });
+
+  it('флаги «архив» и «один город» находятся в русском тексте (\\b с кириллицей не работает)', async () => {
+    const { matchArgFlags } = await import('../src/telegram');
+    expect(matchArgFlags('с архивом')).toEqual({ includeArchive: true, partial: false });
+    expect(matchArgFlags('Варшава Минск архив')).toEqual({ includeArchive: true, partial: false });
+    expect(matchArgFlags('и с одним общим городом')).toEqual({ includeArchive: false, partial: true });
+    expect(matchArgFlags('один город')).toEqual({ includeArchive: false, partial: true });
+    expect(matchArgFlags('пары с одним городом')).toEqual({ includeArchive: false, partial: true });
+    expect(matchArgFlags('частичное совпадение')).toEqual({ includeArchive: false, partial: true });
+    expect(matchArgFlags('Варшава Минск')).toEqual({ includeArchive: false, partial: false });
+    expect(matchArgFlags('Варшава Минск 7 дней архив один город')).toEqual({ includeArchive: true, partial: true });
+  });
+
+  it('число дней — из аргументов, в пределах 1…30', () => {
+    expect(matchArgDays('Варшава Минск 7 дней')).toBe(7);
+    expect(matchArgDays('окно 14 дн.')).toBe(14);
+    expect(matchArgDays('100 дней')).toBe(30);
+    expect(matchArgDays('0 дней')).toBe(3); // ноль — бессмыслица, окно по умолчанию
+    expect(matchArgDays('Варшава Минск')).toBe(3);
   });
 });

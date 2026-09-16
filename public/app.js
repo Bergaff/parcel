@@ -571,7 +571,7 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes'
 let adminEditId = null; // id заявки, открытой на редактирование
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
@@ -773,6 +773,10 @@ async function loadAdmin() {
   }
   if (adminTab === 'match') {
     await renderAdminMatch();
+    return;
+  }
+  if (adminTab === 'dupes') {
+    await renderAdminDupes();
     return;
   }
   try {
@@ -1186,6 +1190,118 @@ async function renderAdminMatch() {
   renderMatchTab();
 }
 
+/* ---------- вкладка «повторы»: дубли, которые уже накопились ---------- */
+
+let dupeGroups = [];
+
+function dupeLine(l, isKeep) {
+  const contact = contactInfo(l);
+  return el('div', { class: `dupe-line${isKeep ? ' dupe-keep' : ''}` }, [
+    el('span', { class: 'dupe-tag', text: isKeep ? 'оставить' : 'копия' }),
+    el('a', { class: 'dupe-route', href: `#/item/${l.id}`, text: `${l.fromCity} → ${l.toCity}` }),
+    el('span', { text: l.departureDate ? fmtDate(l.departureDate) : 'без даты' }),
+    l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
+    el('span', { text: contact ? contact.label : 'нет контакта' }),
+    el('span', { class: 'mono', text: `№ ${l.id.slice(0, 8)}` }),
+    el('span', { class: 'dupe-ago', text: ago(l.publishedAt || l.createdAt) }),
+    isKeep ? null : el('button', {
+      class: 'link-btn', type: 'button', text: 'удалить',
+      onclick: () => cleanDupes([l.id]),
+    }),
+  ].filter(Boolean));
+}
+
+function dupeGroup(g, i) {
+  return el('article', { class: 'admin-card dupe-group' }, [
+    el('p', { class: 'admin-contact' }, [
+      `группа ${i + 1}: `,
+      el('b', { text: `${g.duplicates.length} ${plural(g.duplicates.length, 'копия', 'копии', 'копий')}` }),
+      ` — ${g.why}`,
+    ]),
+    dupeLine(g.keep, true),
+    ...g.duplicates.map((d) => dupeLine(d, false)),
+    el('div', { class: 'admin-card-actions' }, [
+      el('button', {
+        class: 'btn btn-line btn-sm', type: 'button',
+        text: `удалить ${g.duplicates.length} ${plural(g.duplicates.length, 'копию', 'копии', 'копий')}`,
+        onclick: () => cleanDupes(g.duplicates.map((d) => d.id)),
+      }),
+    ]),
+  ]);
+}
+
+async function cleanDupes(ids) {
+  const list = ids.filter(Boolean);
+  if (!list.length) return;
+  if (!window.confirm(`Удалить ${list.length} ${plural(list.length, 'копию', 'копии', 'копий')}? В каждой группе останется одна заявка.`)) return;
+  let deleted = 0;
+  try {
+    // сервер принимает не больше 50 id за раз — режем на порции
+    for (let i = 0; i < list.length; i += 50) {
+      const res = await adminApi('/api/admin/duplicates/clean', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: list.slice(i, i + 50) }),
+      });
+      if (!res.ok) throw new Error();
+      const data = await res.json().catch(() => ({}));
+      deleted += data.deleted ?? 0;
+    }
+    toast(`Удалено копий: ${deleted}.`);
+    await renderAdminDupes();
+  } catch {
+    toast('Не получилось удалить. Попробуйте ещё раз.');
+  }
+}
+
+async function renderAdminDupes() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'Повторы: ищем одинаковые заявки, которые уже успели попасть на доску.';
+  listEl.replaceChildren(el('p', { class: 'empty-note', text: 'ищу повторы…' }));
+  try {
+    const res = await adminApi('/api/admin/duplicates');
+    if (res.status === 401) {
+      localStorage.removeItem(ADMIN_KEY_STORAGE);
+      $('#admin-login').hidden = false;
+      $('#admin-panel').hidden = true;
+      return;
+    }
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    dupeGroups = Array.isArray(data.groups) ? data.groups : [];
+    const extra = data.extraCount ?? dupeGroups.reduce((n, g) => n + g.duplicates.length, 0);
+    $('#admin-count').textContent = dupeGroups.length
+      ? `Групп повторов: ${dupeGroups.length}, лишних заявок: ${extra}. Одну в группе оставляем, копии удаляем.`
+      : `Повторов нет — проверено ${data.total ?? 0} ${plural(data.total ?? 0, 'заявка', 'заявки', 'заявок')}.`;
+    listEl.replaceChildren();
+    if (!dupeGroups.length) {
+      listEl.append(el('p', {
+        class: 'empty-note',
+        text: 'Одинаковых заявок не нашлось: ни старых завалов, ни новых — защита от дублей работает.',
+      }));
+      return;
+    }
+    listEl.append(
+      el('div', { class: 'admin-card-actions dupe-toolbar' }, [
+        el('button', {
+          class: 'btn btn-ink btn-sm', type: 'button', text: `удалить все копии (${extra})`,
+          onclick: () => cleanDupes(dupeGroups.flatMap((g) => g.duplicates.map((d) => d.id))),
+        }),
+        el('span', {
+          class: 'form-note',
+          text: 'В каждой группе остаётся одна заявка — та, что на доске и с контактом. Копии удаляются вместе с жалобами на них.',
+        }),
+      ])
+    );
+    dupeGroups.forEach((g, i) => listEl.append(dupeGroup(g, i)));
+  } catch {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Не получилось проверить повторы. Нажмите «обновить».',
+    }));
+  }
+}
+
 async function adminDelete(id) {
   if (!window.confirm('Удалить объявление навсегда? Вместе с жалобами.')) return;
   try {
@@ -1204,6 +1320,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-board').classList.toggle('on', tab === 'board');
   $('#admin-tab-chats').classList.toggle('on', tab === 'chats');
   $('#admin-tab-match').classList.toggle('on', tab === 'match');
+  $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
   loadAdmin();
 }
 
@@ -1232,6 +1349,7 @@ function bindAdmin() {
   $('#admin-tab-board').addEventListener('click', () => switchAdminTab('board'));
   $('#admin-tab-chats').addEventListener('click', () => switchAdminTab('chats'));
   $('#admin-tab-match').addEventListener('click', () => switchAdminTab('match'));
+  $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();

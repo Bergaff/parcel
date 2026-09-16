@@ -682,3 +682,32 @@ export async function createListingSafe(
     why: hit ? hit.why : '',
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Разбор накопившихся дублей                                          */
+/* ------------------------------------------------------------------ */
+
+/** Все живые заявки — для поиска дублей, которые накопились до защиты. */
+export async function listForDuplicateSweep(
+  env: Env,
+  opts: { includeArchive?: boolean; limit?: number } = {}
+): Promise<Listing[]> {
+  const limit = Math.min(500, Math.max(1, opts.limit ?? 500));
+  const statuses = opts.includeArchive
+    ? "('pending', 'published', 'expired')"
+    : "('pending', 'published')";
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ${statuses}
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Удалить несколько заявок разом (чистка дублей). */
+export async function deleteListings(env: Env, ids: string[]): Promise<number> {
+  let deleted = 0;
+  for (const id of ids) {
+    if (await deleteListing(env, id)) deleted++;
+  }
+  return deleted;
+}
