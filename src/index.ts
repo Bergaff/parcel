@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, deleteMatchRun, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteMatchRun, findDuplicate, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
@@ -162,13 +162,29 @@ app.post('/api/listings', async (c) => {
   if (error || !input) return c.json({ error }, 400);
 
   input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
-  const listing = await createListing(c.env, input);
+  // Дубль не плодим: то же объявление тем же маршрутом и датой от того же человека
+  // уже есть — возвращаем существующую заявку (и освежаем её, если она на доске).
+  const res = await createListingSafe(c.env, input);
+  const listing = res.listing;
+
+  if (!res.created) {
+    return c.json({
+      item: listing,
+      duplicate: true,
+      message: listing.status === 'published'
+        ? 'Такое объявление уже есть на доске — второе создавать не стали, ваше снова вверху списка.'
+        : 'Такое объявление уже отправлено на модерацию — вторую заявку создавать не стали.',
+    });
+  }
 
   // Если объявление ушло на модерацию, тут же шлём его администратору в Telegram
   // с кнопками «Одобрить / Отклонить» (см. notifyAdmins в src/telegram.ts).
   if (listing.status === 'pending') {
+    const similar = res.kind === 'similar' && res.duplicateOf
+      ? { id: res.duplicateOf.id, why: res.why }
+      : null;
     c.executionCtx.waitUntil(
-      notifyAdmins(c.env, listing).catch((e) => console.error('notifyAdmins failed', e))
+      notifyAdmins(c.env, listing, similar).catch((e) => console.error('notifyAdmins failed', e))
     );
   }
 
@@ -334,18 +350,64 @@ app.post('/api/admin/listings/:id/status', async (c) => {
   if (!['published', 'rejected', 'expired'].includes(body.status ?? '')) {
     return c.json({ error: 'status должен быть published, rejected или expired' }, 400);
   }
-  const ok = await updateListingStatus(c.env, c.req.param('id'), body.status as 'published' | 'rejected' | 'expired');
+  const id = c.req.param('id');
+  const ok = await updateListingStatus(c.env, id, body.status as 'published' | 'rejected' | 'expired');
   if (!ok) return c.json({ error: 'not_found' }, 404);
-  return c.json({ ok: true });
+
+  // Публикуем — проверим, нет ли уже такой заявки на доске (дубль одобрили по забывчивости)
+  let duplicate: { id: string; why: string } | null = null;
+  if (body.status === 'published') {
+    const listing = await getListingById(c.env, id);
+    if (listing) {
+      const dup = await findDuplicate(c.env, listing).catch(() => null);
+      if (dup && dup.listing.id !== id && dup.listing.status === 'published') {
+        duplicate = { id: dup.listing.id, why: dup.why };
+      }
+    }
+  }
+  return c.json({ ok: true, duplicate });
 });
 
 /* Список заявок для админ-панели: tab=pending (очередь модерации)
    или tab=board (всё, что на доске, включая архив). */
+/** Пометка «похоже на дубль» для очереди модерации. */
+type DuplicateBadge = {
+  id: string;
+  kind: 'duplicate' | 'similar';
+  why: string;
+  status: string;
+  fromCity: string;
+  toCity: string;
+  departureDate: string | null;
+};
+
 app.get('/api/admin/listings', async (c) => {
-  const items = c.req.query('tab') === 'board'
+  const isBoard = c.req.query('tab') === 'board';
+  const items = isBoard
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
-  return c.json({ items });
+
+  // В очереди модерации помечаем повторы: одно и то же объявление пересылают
+  // каждый день, и админ не должен держать в голове, что уже одобрил.
+  if (isBoard) return c.json({ items });
+  const annotated: Array<Record<string, unknown>> = [];
+  for (const l of items.slice(0, 40)) {
+    let badge: DuplicateBadge | null = null;
+    try {
+      const dup = await findDuplicate(c.env, l);
+      if (dup && dup.listing.id !== l.id) {
+        badge = {
+          id: dup.listing.id, kind: dup.kind, why: dup.why, status: dup.listing.status,
+          fromCity: dup.listing.fromCity, toCity: dup.listing.toCity,
+          departureDate: dup.listing.departureDate ?? null,
+        };
+      }
+    } catch (e) {
+      console.error('duplicate check failed', e);
+    }
+    annotated.push({ ...l, duplicate: badge });
+  }
+  return c.json({ items: [...annotated, ...items.slice(40)] });
 });
 
 /* Редактирование заявки — админ-панель сайта. */

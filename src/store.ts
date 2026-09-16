@@ -1,6 +1,8 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingStatus } from './types';
 import type { MatchPair, ListingSnapshot } from './match';
 import { listingSnapshot, parseSnapshot } from './match';
+import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
+import { pickDuplicate } from './dedupe';
 import { normalizeContacts } from './util';
 
 function mapRow(row: Record<string, unknown>): Listing {
@@ -593,4 +595,90 @@ export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
     env.DB.prepare('DELETE FROM match_runs WHERE id = ?').bind(id),
   ]);
   return Number(res[1]?.meta.changes ?? 0) > 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Дубликаты: одно и то же объявление, присланное несколько раз         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Кандидаты в дубликаты: тот же тип и дата выезда рядом (±1 день), статус
+ * живой (на модерации, на доске или в архиве). Маршрут, контакты и текст
+ * сравнивает src/dedupe.ts — там города нормализуются, а телефоны сверяются
+ * по последним цифрам, поэтому в SQL эти условия не унести.
+ */
+export async function findDuplicateCandidates(env: Env, input: DedupeSubject): Promise<Listing[]> {
+  const date = input.departureDate ?? null;
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+      WHERE status IN ('pending', 'published', 'expired')
+        AND type = ?
+        AND (? IS NULL OR departure_date IS NULL
+             OR ABS(julianday(departure_date) - julianday(?)) <= 1)
+      ORDER BY (status = 'published') DESC, COALESCE(published_at, created_at) DESC
+      LIMIT 200`
+  ).bind(input.type, date, date).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/**
+ * Есть ли уже такая заявка: 'duplicate' — уверенно та же (не создаём вторую),
+ * 'similar' — похожая (создаём, но модератора предупредим).
+ */
+export async function findDuplicate(
+  env: Env,
+  input: DedupeSubject
+): Promise<DuplicateHit<Listing> | null> {
+  const candidates = await findDuplicateCandidates(env, input);
+  return pickDuplicate(candidates, input);
+}
+
+/**
+ * Освежить существующую заявку вместо создания дубля: published поднимается
+ * наверх доски (повторное «еду 20 сентября» снова свежее), pending остаётся
+ * в очереди модерации, архив не трогаем — его вернул туда модератор или дата.
+ */
+export async function touchListing(env: Env, id: string): Promise<Listing | null> {
+  const listing = await getListingById(env, id);
+  if (!listing) return null;
+  if (listing.status === 'published') {
+    await env.DB.prepare(
+      "UPDATE listings SET published_at = datetime('now') WHERE id = ?"
+    ).bind(id).run();
+  }
+  return getListingById(env, id);
+}
+
+/**
+ * Создать заявку, но не плодить дубликаты: если такая уже есть — вернуть её
+ * (и освежить, если она на доске). Через неё идут все источники: пересылки,
+ * сообщения в чатах, мастер /post и форма на сайте.
+ */
+export async function createListingSafe(
+  env: Env,
+  input: ListingInput,
+  opts: { force?: boolean } = {}
+): Promise<{
+  listing: Listing;
+  created: boolean;
+  duplicateOf: Listing | null;
+  kind: DuplicateKind | null;
+  why: string;
+}> {
+  const hit = await findDuplicate(env, input);
+  // force — заявку создаём в любом случае (например, /post человек заполнил сам),
+  // но сведения о дубле возвращаем: модератор увидит предупреждение.
+  if (hit && hit.kind === 'duplicate' && !opts.force) {
+    const refreshed = await touchListing(env, hit.listing.id);
+    const listing = refreshed ?? hit.listing;
+    return { listing, created: false, duplicateOf: listing, kind: 'duplicate', why: hit.why };
+  }
+  const listing = await createListing(env, input);
+  return {
+    listing,
+    created: true,
+    duplicateOf: hit ? hit.listing : null,
+    kind: hit ? hit.kind : null,
+    why: hit ? hit.why : '',
+  };
 }

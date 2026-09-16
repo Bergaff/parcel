@@ -105,12 +105,13 @@ function contactInfo(l) {
   return null;
 }
 
+/* Чем разобран текст (правилами или ИИ) — внутренняя деталь, на сайте её не видно.
+   Показываем только откуда объявление: чат, пересылка или форма на сайте. */
 function sourceLabel(l) {
-  if (l.sourceChat && l.sourceChat.startsWith('Переслано от ')) {
-    return l.source === 'parser' ? `${l.sourceChat} · ИИ-разбор` : l.sourceChat;
+  if (l.sourceChat && l.sourceChat.startsWith('Переслано от ')) return l.sourceChat;
+  if (l.source === 'parser' || l.source === 'telegram') {
+    return l.sourceChat ? `из чата «${l.sourceChat}»` : 'из Telegram';
   }
-  if (l.source === 'parser') return l.sourceChat ? `ИИ-разбор из чата «${l.sourceChat}»` : 'ИИ-разбор';
-  if (l.source === 'telegram') return l.sourceChat ? `из чата «${l.sourceChat}»` : 'из Telegram';
   return 'с сайта';
 }
 
@@ -548,10 +549,15 @@ function bindForm() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Не прошло. Проверьте поля.');
+      const dupeId = data.duplicate && data.item && data.item.id ? data.item.id : null;
       toast(data.message || 'Ушло на проверку.');
       e.target.reset();
-      location.hash = '#/';
-      await loadList(true);
+      if (dupeId) {
+        location.hash = `#/item/${dupeId}`; // вторая заявка не нужна — показываем ту, что уже есть
+      } else {
+        location.hash = '#/';
+        await loadList(true);
+      }
     } catch (ex) {
       err.textContent = ex.message;
       err.hidden = false;
@@ -575,6 +581,23 @@ async function adminApi(path, options = {}) {
     ...options,
     headers: { Authorization: `Bearer ${adminKey()}`, ...(options.headers || {}) },
   });
+}
+
+/* Предупреждение о дубле: одно и то же объявление пересылают каждый день,
+   и в очереди модерации видно, что такая заявка уже есть (или уже на доске). */
+function duplicateNote(l) {
+  const d = l.duplicate;
+  if (!d || !d.id) return null;
+  const where = d.status === 'published' ? 'уже на доске'
+    : d.status === 'expired' ? 'в архиве'
+    : 'уже в очереди модерации';
+  return el('p', { class: `dup-warn dup-${d.kind}` }, [
+    el('b', { text: d.kind === 'duplicate' ? '♻️ Это повтор — ' : '⚠️ Похоже на дубль — ' }),
+    `такая заявка ${where}: `,
+    el('a', { href: `#/item/${d.id}`, text: `№ ${d.id.slice(0, 8)}` }),
+    ` · ${d.fromCity} → ${d.toCity}${d.departureDate ? ` · ${fmtDate(d.departureDate)}` : ''}`,
+    el('span', { class: 'dup-why', text: d.why }),
+  ]);
 }
 
 function adminCard(l, mode = 'pending') {
@@ -639,6 +662,7 @@ function adminCard(l, mode = 'pending') {
         el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
       ];
   return el('article', { class: 'admin-card' }, [
+    duplicateNote(l),
     el('h3', { class: 'route-line' }, [
       l.fromCity,
       el('span', { class: 'r-arrow', text: '→' }),
@@ -1191,8 +1215,12 @@ async function adminSetStatus(id, status) {
       body: JSON.stringify({ status }),
     });
     if (!res.ok) throw new Error();
+    const data = await res.json().catch(() => ({}));
     const labels = { published: 'Опубликовано.', rejected: 'Отклонено.', expired: 'Отправлено в архив.' };
-    toast(labels[status] || 'Готово.');
+    // Сервер проверяет дубли и при публикации: вдруг такая заявка уже на доске
+    toast(data.duplicate && data.duplicate.id
+      ? `${labels[status] || 'Готово.'} Но на доске уже есть такая заявка № ${data.duplicate.id.slice(0, 8)} — проверьте, не дубль ли.`
+      : (labels[status] || 'Готово.'));
     await loadAdmin();
   } catch {
     toast('Не получилось. Попробуйте ещё раз.');

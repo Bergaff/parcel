@@ -59,7 +59,8 @@ describe('parseTelegramMessage', () => {
   });
 
   it('распознаёт запрос на передачу посылки', () => {
-    const p = parseTelegramMessage('Кто может передать посылку Краков → Киев? 5 кг, 15.09, +48 123 456 789');
+    // NOW фиксируем: без него «15.09» в прошлогоднем тесте уезжает на следующий год
+    const p = parseTelegramMessage('Кто может передать посылку Краков → Киев? 5 кг, 15.09, +48 123 456 789', NOW);
     expect(p.intent).toBe('request');
     expect(p.fromCity).toBe('Краков');
     expect(p.toCity).toBe('Киев');

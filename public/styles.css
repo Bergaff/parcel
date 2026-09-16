@@ -476,6 +476,15 @@ button { font-family: inherit; }
 .admin-count { font-size: 18px; font-weight: 700; }
 .admin-card { border: 1.5px solid var(--line); background: var(--card); padding: 16px 18px; margin-bottom: 14px; }
 .admin-card .route-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 8px; }
+/* Повтор/дубль в очереди модерации */
+.dup-warn {
+  font-size: 13.5px; margin: 0 0 10px; padding: 8px 12px;
+  border-left: 3px solid var(--accent); background: rgba(164, 58, 16, .07);
+  display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+}
+.dup-warn a { font-weight: 700; }
+.dup-similar { border-left-color: var(--line-strong); background: rgba(169, 158, 133, .12); }
+.dup-why { color: var(--muted); }
 .admin-card .desc { margin: 8px 0; }
 .admin-contact { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
 .admin-card-actions { display: flex; gap: 10px; flex-wrap: wrap; }

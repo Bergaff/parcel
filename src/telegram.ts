@@ -1,7 +1,7 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
 import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
 import {
-  addReport, createListing, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
+  addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
   searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import {
@@ -110,8 +110,9 @@ export function formatListing(l: Listing, sourceNote = ''): string {
     ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
     : '';
   const srcLinkTag = srcLink ? ` — <a href="${srcLink}">исходное сообщение</a>` : '';
-  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${srcRef ? `, ${srcRef}` : ''}${srcLinkTag}`);
-  else if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
+  // Чем разобран текст (правилами или ИИ) — внутренняя деталь, людям она не нужна.
+  // В карточке остаются только автор пересылки / чат и ссылка на исходное сообщение.
+  if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -614,6 +615,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       return;
     }
     const created: Listing[] = [];
+    const repeats: Repeat[] = [];
     for (const fields of list) {
       const input: ListingInput = {
         ...fields,
@@ -625,15 +627,27 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         sourceChatId: seenChat,
         sourceMessageId: origin.messageId ?? null,
       };
-      const listing = await createListing(env, input);
-      created.push(listing);
-      await notifyAdmins(env, listing);
+      // Одно и то же объявление пересылают каждый день — вторую заявку не плодим:
+      // освежаем уже имеющуюся и объясняем, почему не создали новую.
+      const res = await createListingSafe(env, input);
+      if (!res.created) {
+        repeats.push({ listing: res.listing, why: res.why });
+        await notifyAdminsRepeat(env, res.listing, res.why);
+        continue;
+      }
+      created.push(res.listing);
+      await notifyAdmins(env, res.listing, similarNote(res));
+    }
+    if (created.length === 0) {
+      await sendText(env, chatId, repeatReply(repeats));
+      return;
     }
     const statusNote = env.AUTO_APPROVE === '1'
       ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
       : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
     await sendText(env, chatId,
-      created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+      created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+      (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
     return;
   }
 
@@ -747,6 +761,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     if (looksLikeListing(text) || worthAiCheck(text)) {
       const parsed = parseTelegramMessage(text);
       let created: Listing[] = [];
+      const repeats: Repeat[] = [];
       if (parsed.confidence >= 0.7 || (env.AI_API_KEY && worthAiCheck(text))) {
         if (await markSeen(env, String(chatId), msg.message_id)) {
           const { list, source } = await cascade(env, text);
@@ -760,16 +775,26 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               sourceChatId: String(chatId),
               sourceMessageId: msg.message_id,
             };
-            const listing = await createListing(env, input);
-            created.push(listing);
-            await notifyAdmins(env, listing);
+            const res = await createListingSafe(env, input);
+            if (!res.created) {
+              repeats.push({ listing: res.listing, why: res.why });
+              await notifyAdminsRepeat(env, res.listing, res.why);
+              continue;
+            }
+            created.push(res.listing);
+            await notifyAdmins(env, res.listing, similarNote(res));
           }
           if (created.length > 0) {
             const statusNote = env.AUTO_APPROVE === '1'
               ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
               : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
             await sendText(env, chatId,
-              created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+              created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+              (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
+            return;
+          }
+          if (repeats.length > 0) {
+            await sendText(env, chatId, repeatReply(repeats));
             return;
           }
         }
@@ -881,14 +906,20 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     sourceChat: `Личное сообщение боту`,
     sourceChatId: String(chatId),
   };
-  const listing = await createListing(env, input);
+  // /post человек заполняет сам, шаг за шагом, — заявку создаём в любом случае,
+  // но если такая уже есть, предупреждаем и его, и модератора.
+  const res = await createListingSafe(env, input, { force: true });
+  const listing = res.listing;
   await setWizard(env, chatId, null);
   const statusNote =
     input.status === 'published'
       ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
       : '\n<b>Отправлено на модерацию.</b> Администратор одобрит его в ближайшее время.';
-  await sendText(env, chatId, formatListing(listing) + statusNote);
-  await notifyAdmins(env, listing);
+  const dupNote = res.duplicateOf
+    ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
+    : '';
+  await sendText(env, chatId, formatListing(listing) + statusNote + dupNote);
+  await notifyAdmins(env, listing, res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null);
 }
 
 /* ------------------------------------------------------------------ */
@@ -930,6 +961,8 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if (list.length === 0) return; // ИИ не признал объявлением — мимо
 
   const created: Listing[] = [];
+  const repeats: Repeat[] = [];
+  const similarBy = new Map<string, { id: string; why: string }>();
   for (const fields of list) {
     const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
     const input: ListingInput = {
@@ -942,9 +975,18 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       sourceMessageId: msg.message_id,
     };
     try {
-      const listing = await createListing(env, input);
+      const res = await createListingSafe(env, input);
+      if (!res.created) {
+        // Повтор в чате: в группе не шумим, модератору сообщаем лично
+        repeats.push({ listing: res.listing, why: res.why });
+        await notifyAdminsRepeat(env, res.listing, res.why);
+        continue;
+      }
+      const listing = res.listing;
       created.push(listing);
       await setSeenListing(env, chatKey, msg.message_id, listing.id);
+      const note = similarNote(res);
+      if (note) similarBy.set(listing.id, note);
     } catch (e) {
       // Вернём возможность обработать сообщение при повторной доставке вебхука
       // (если не создано ни одной заявки — иначе повтор даст дубль)
@@ -964,10 +1006,64 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
-  for (const listing of created) await notifyAdmins(env, listing);
+  // Карточки модератору — по одной на заявку (с предупреждением, если похоже на дубль)
+  for (const listing of created) {
+    await notifyAdmins(env, listing, similarBy.get(listing.id) ?? null);
+  }
 }
 
-export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
+/** Повтор: такое объявление уже есть, новую заявку не создавали. */
+export interface Repeat {
+  listing: Listing;
+  why: string;
+}
+
+/** Предупреждение модератору о «похожей» заявке: создали, но пусть проверит. */
+function similarNote(res: {
+  kind: string | null;
+  why: string;
+  duplicateOf: Listing | null;
+}): { id: string; why: string } | null {
+  return res.kind === 'similar' && res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null;
+}
+
+function listingLine(l: Listing): string {
+  return `№${l.id.slice(0, 8)} · ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}` +
+    (l.departureDate ? ` · ${l.departureDate}` : '');
+}
+
+/** Ответ человеку: объявление уже на доске, дубль не создан. */
+function repeatReply(repeats: Repeat[]): string {
+  const published = repeats.some(({ listing }) => listing.status === 'published');
+  const lines = repeats.map(({ listing, why }) => `${listingLine(listing)}\n${escapeHtml(why)}`);
+  return '♻️ <b>Такое объявление уже есть на доске</b> — дубль создавать не стал' +
+    (published ? ', освежил его (заявка снова вверху списка).' : '.') +
+    `\n\n${lines.join('\n\n')}` +
+    '\n\nЕсли это другой человек или другой рейс — добавьте отдельно: /post.';
+}
+
+/** Короткая заметка модератору: пришёл повтор, дубль не создан. */
+export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string): Promise<void> {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const link = site ? ` — <a href="${site}/#/item/${listing.id}">открыть</a>` : '';
+  const refreshed = listing.status === 'published' ? ' Освежил: заявка снова вверху доски.' : '';
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `♻️ <b>Повтор, дубль не создавал</b>\n${listingLine(listing)}${link}\n` +
+      `<b>Почему:</b> ${escapeHtml(why)}.${refreshed}`
+    ).catch(() => undefined);
+  }
+}
+
+/**
+ * Карточка на модерацию. `dup` — если такая заявка уже есть: модератор видит
+ * предупреждение до того, как нажмёт «Одобрить».
+ */
+export async function notifyAdmins(
+  env: Env,
+  listing: Listing,
+  dup?: { id: string; why: string } | null
+): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
   // У пересылок от людей со скрытым профилем контакта не бывает: модератор
   // дописывает его вручную в админке — даём ссылку прямо в карточке.
@@ -976,10 +1072,13 @@ export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
   const noContact = uniqueContacts(listing.telegram, listing.phone).length === 0
     ? `\n<i>⚠ Контакта нет (автор пересылки мог скрыть профиль)${editLink}</i>`
     : '';
+  const dupNote = dup && dup.id
+    ? `\n<i>⚠ Похоже на дубль: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}</i>`
+    : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing, noContact),
+      formatListing(listing, noContact + dupNote),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }

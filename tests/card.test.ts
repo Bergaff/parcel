@@ -57,7 +57,26 @@ describe('карточка модератора — без дублей инфо
 
   it('источник пересылки печатается без двойных пробелов', () => {
     const card = formatListing(listing({ sourceChat: 'Переслано от sergei' }));
-    expect(card).toContain('Источник: ИИ-разбор, Переслано от sergei');
+    expect(card).toContain('Источник: Переслано от sergei');
     expect(card).not.toMatch(/Переслано от\s\s+/);
+  });
+
+  it('чем разобрано объявление — не показываем: ни «ИИ», ни «разбор»', () => {
+    for (const source of ['parser', 'telegram', 'site'] as const) {
+      const card = formatListing(listing({ source, sourceChat: 'Переслано от sergei' }));
+      expect(card).not.toMatch(/ИИ|DeepSeek|разбор/i);
+      expect(card).toContain('Источник: Переслано от sergei');
+    }
+    // без названия чата строки «Источник:» просто нет
+    expect(formatListing(listing({ source: 'parser', sourceChat: null }))).not.toContain('Источник:');
+  });
+
+  it('ссылка на исходное сообщение остаётся, даже когда про ИИ не пишем', () => {
+    const card = formatListing(listing({
+      source: 'parser', sourceChat: 'Чат попутчиков', sourceChatId: '-1001234567890', sourceMessageId: 42,
+    }));
+    expect(card).toContain('Источник: чат «Чат попутчиков»');
+    expect(card).toContain('https://t.me/c/1234567890/42');
+    expect(card).not.toMatch(/ИИ/);
   });
 });
