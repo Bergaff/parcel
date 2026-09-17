@@ -226,7 +226,16 @@ window.addEventListener('hashchange', route);
 
 function buildRow(l) {
   const contact = contactInfo(l);
-  const row = el('article', { class: 'row', tabindex: '0', role: 'button' }, [
+  const row = el('article', { class: 'row' }, [
+    // Растянутая ссылка: переход по клику делает браузер, без JS в критическом
+    // пути (короче отклик — INP). Заодно работают средняя кнопка, «открыть в
+    // новой вкладке» и Enter с клавиатуры. Запрос заранее не шлём: карточка и
+    // так рисуется мгновенно из кэша, а GET карточки засчитывает просмотр.
+    el('a', {
+      class: 'row-link',
+      href: `#/item/${l.id}`,
+      'aria-label': `${l.fromCity} → ${l.toCity}: открыть объявление`,
+    }),
     el('div', { class: 'row-main' }, [
       el('h3', { class: 'route-line' }, [
         l.fromCity,
@@ -242,33 +251,25 @@ function buildRow(l) {
         el('span', { class: 'src' }, [sourceContent(l)]),
       ].filter(Boolean)),
     ]),
- el('div', { class: 'row-side' }, [
-   el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-   (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso()))
-     ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
-     : null,
-   contact
-   ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: contact.kind === 'phone' ? 'позвонить' : 'написать' })
-   : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
-   el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
-   el('a', {
-     class: 'write-link report-link',
-     href: `#/item/${l.id}`,
-     text: 'пожаловаться',
-     onclick: (e) => { e.preventDefault(); e.stopPropagation(); openReport(l.id); },
-   }),
-   el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
- ].filter(Boolean)),
+    el('div', { class: 'row-side' }, [
+      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso()))
+        ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
+        : null,
+      contact
+        ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: contact.kind === 'phone' ? 'позвонить' : 'написать' })
+        : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
+      el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
+      el('a', {
+        class: 'write-link report-link',
+        href: `#/item/${l.id}`,
+        text: 'пожаловаться',
+        onclick: (e) => { e.preventDefault(); e.stopPropagation(); openReport(l.id); },
+      }),
+      el('span', { class: 'row-no', text: `№ ${l.id.slice(0, 4).toUpperCase()}` }),
+    ].filter(Boolean)),
   ]);
 
-  const open = () => { location.hash = `#/item/${l.id}`; };
-  row.addEventListener('click', (e) => {
-    if (e.target.closest('a')) return;
-    open();
-  });
-  row.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
-  });
   return row;
 }
 
@@ -291,10 +292,14 @@ async function loadList(reset = false) {
     state.hasMore = data.hasMore;
     state.total = data.total ?? data.items.length;
 
+    cacheListings(data.items);
     const listEl = $('#list');
     if (state.page === 1) listEl.replaceChildren();
     if (data.items.length === 0 && state.page === 1) listEl.replaceChildren();
-    for (const l of data.items) listEl.append(buildRow(l));
+    // Один фрагмент вместо N вставок: меньше перерасчётов макета при прокрутке
+    const frag = document.createDocumentFragment();
+    for (const l of data.items) frag.append(buildRow(l));
+    listEl.append(frag);
 
     $('#total-count').textContent = `${state.total} ${plural(state.total, 'объявление', 'объявления', 'объявлений')}`;
     $('#list-empty').hidden = !(state.total === 0 && !state.archive);
@@ -376,110 +381,140 @@ function mskTodayIso() {
 
 /* ---------- карточка ---------- */
 
+/* Строки доски уже содержат все данные карточки — держим их в кэше и рисуем
+   объявление мгновенно, в тот же кадр, что и клик. Сеть потом просто
+   обновляет данные и засчитывает просмотр. */
+const listingCache = new Map();
+const detailInflight = new Map();
+
+function cacheListings(items) {
+  for (const l of items) if (l && l.id) listingCache.set(l.id, l);
+}
+
+/** Один запрос на объявление: повторный клик или возврат «назад» его не дублирует. */
+function fetchListing(id) {
+  const started = detailInflight.get(id);
+  if (started) return started;
+  const p = api(`/api/listings/${encodeURIComponent(id)}`)
+    .then(async (res) => (res.ok ? (await res.json()).item ?? null : null))
+    .catch(() => null);
+  detailInflight.set(id, p);
+  setTimeout(() => { if (detailInflight.get(id) === p) detailInflight.delete(id); }, 30000);
+  return p;
+}
+
 async function loadDetail(id) {
   const box = $('#item-detail');
-  box.replaceChildren(el('p', { class: 'empty-note', text: 'достаю карточку…' }));
-  try {
-    const res = await api(`/api/listings/${encodeURIComponent(id)}`);
-    if (!res.ok) throw new Error('not found');
-    const { item: l } = await res.json();
-    // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
-    const archived =
-      l.status === 'expired' ||
-      (l.departureDate != null && l.departureDate < mskTodayIso());
+  const cached = listingCache.get(id);
+  // Рисуем сразу то, что уже есть: никакой паузы «достаю карточку…» после клика
+  if (cached) renderDetail(cached);
+  else box.replaceChildren(el('p', { class: 'empty-note', text: 'достаю карточку…' }));
 
-    const contact = contactInfo(l);
-    const actions = [];
-    if (contact) {
-      actions.push(
-        el('a', {
-          class: 'btn btn-ink btn-lg',
-          href: contact.href,
-          target: '_blank',
-          rel: 'noopener',
-          text: `${contact.kind === 'phone' ? 'позвонить' : 'написать'} ${contact.label}`,
-        })
-      );
-    }
-    actions.push(
-      el('a', {
-        class: 'link-btn',
-        href: `#/item/${l.id}`,
-        onclick: (e) => { e.preventDefault(); openReport(l.id); },
-        text: 'пожаловаться',
-      })
-    );
-    actions.push(
-      el('button', {
-        class: 'btn btn-line btn-lg',
-        text: 'скопировать ссылку',
-        onclick: () => copyListingLink(l),
-      })
-    );
-
-    const cells = [];
-    if (l.departureDate) {
-      cells.push(el('div', { class: 'cell' }, [
-        el('span', { class: 'label', text: 'выезд' }),
-        el('span', { class: 'value', text: fmtFullDate(l.departureDate) }),
-      ]));
-    } else {
-      cells.push(el('div', { class: 'cell' }, [
-        el('span', { class: 'label', text: 'выезд' }),
-        el('span', { class: 'value', text: 'дата не указана' }),
-      ]));
-    }
-    if (l.weightKg != null) {
-      cells.push(el('div', { class: 'cell' }, [
-        el('span', { class: 'label', text: 'вес' }),
-        el('span', { class: 'value', text: `${String(l.weightKg).replace('.', ',')} кг` }),
-      ]));
-    }
-    if (l.price) {
-      cells.push(el('div', { class: 'cell' }, [
-        el('span', { class: 'label', text: 'цена' }),
-        el('span', { class: 'value', text: l.price }),
-      ]));
-    }
-    cells.push(el('div', { class: 'cell' }, [
-      el('span', { class: 'label', text: 'источник' }),
-      el('span', { class: 'value' }, [sourceContent(l)]),
-    ]));
-    cells.push(el('div', { class: 'cell' }, [
-      el('span', { class: 'label', text: 'добавлено' }),
-      el('span', { class: 'value', text: ago(l.createdAt) }),
-    ]));
-
-    box.replaceChildren(
-      el('div', { class: 'd-head' }, [
-        el('h2', { class: 'd-route' }, [
-          l.fromCity,
-          el('span', { class: 'r-arrow', text: '→' }),
-          el('span', { class: 'r-to', text: l.toCity }),
-        ]),
-        el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-        ...(archived ? [el('span', { class: 'stamp stamp-expired', text: 'архив' })] : []),
-      ]),
-      el('div', { class: 'd-meta' }, cells),
-      ...(archived
-        ? [el('p', {
-            class: 'd-note',
-            text: 'Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
-          })]
-        : []),
-      el('p', { class: 'd-desc', text: l.description }),
-      el('div', { class: 'd-actions' }, actions),
-      el('p', {
-        class: 'd-note',
-        text: 'Объявление проверено модератором, но это не гарантия: связывайтесь с человеком, задавайте вопросы и не передавайте деньги заранее. Опечатка или фейк, нажмите «пожаловаться», разберусь.',
-      }),
-    );
-  } catch {
+  const l = await fetchListing(id);
+  if (l) {
+    listingCache.set(l.id, l);
+    renderDetail(l);
+  } else if (!cached) {
     box.replaceChildren(
       el('p', { class: 'empty-note', text: 'Такого объявления нет. Возможно, его сняли после жалоб.' }),
       el('a', { class: 'back', href: '#/', text: '← к доске' }),
     );
   }
+}
+
+function renderDetail(l) {
+  const box = $('#item-detail');
+  // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
+  const archived =
+    l.status === 'expired' ||
+    (l.departureDate != null && l.departureDate < mskTodayIso());
+
+  const contact = contactInfo(l);
+  const actions = [];
+  if (contact) {
+    actions.push(
+      el('a', {
+        class: 'btn btn-ink btn-lg',
+        href: contact.href,
+        target: '_blank',
+        rel: 'noopener',
+        text: `${contact.kind === 'phone' ? 'позвонить' : 'написать'} ${contact.label}`,
+      })
+    );
+  }
+  actions.push(
+    el('a', {
+      class: 'link-btn',
+      href: `#/item/${l.id}`,
+      onclick: (e) => { e.preventDefault(); openReport(l.id); },
+      text: 'пожаловаться',
+    })
+  );
+  actions.push(
+    el('button', {
+      class: 'btn btn-line btn-lg',
+      text: 'скопировать ссылку',
+      onclick: () => copyListingLink(l),
+    })
+  );
+
+  const cells = [];
+  if (l.departureDate) {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'выезд' }),
+      el('span', { class: 'value', text: fmtFullDate(l.departureDate) }),
+    ]));
+  } else {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'выезд' }),
+      el('span', { class: 'value', text: 'дата не указана' }),
+    ]));
+  }
+  if (l.weightKg != null) {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'вес' }),
+      el('span', { class: 'value', text: `${String(l.weightKg).replace('.', ',')} кг` }),
+    ]));
+  }
+  if (l.price) {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'цена' }),
+      el('span', { class: 'value', text: l.price }),
+    ]));
+  }
+  cells.push(el('div', { class: 'cell' }, [
+    el('span', { class: 'label', text: 'источник' }),
+    el('span', { class: 'value' }, [sourceContent(l)]),
+  ]));
+  cells.push(el('div', { class: 'cell' }, [
+    el('span', { class: 'label', text: 'добавлено' }),
+    el('span', { class: 'value', text: ago(l.createdAt) }),
+  ]));
+
+  box.replaceChildren(
+    el('div', { class: 'd-head' }, [
+      el('h2', { class: 'd-route' }, [
+        l.fromCity,
+        el('span', { class: 'r-arrow', text: '→' }),
+        el('span', { class: 'r-to', text: l.toCity }),
+      ]),
+      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      ...(archived ? [el('span', { class: 'stamp stamp-expired', text: 'архив' })] : []),
+    ]),
+    el('div', { class: 'd-meta' }, cells),
+    ...(archived
+      ? [el('p', {
+          class: 'd-note',
+          text: 'Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
+        })]
+      : []),
+    el('p', { class: 'd-desc', text: l.description }),
+    el('div', { class: 'd-actions' }, actions),
+    el('p', {
+      class: 'd-note',
+      text: 'Объявление проверено модератором, но это не гарантия: связывайтесь с человеком, задавайте вопросы и не передавайте деньги заранее. Опечатка или фейк, нажмите «пожаловаться», разберусь.',
+    }),
+  );
 }
 
 let reportReason = '';

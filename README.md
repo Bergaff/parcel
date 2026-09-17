@@ -59,8 +59,6 @@
 
 ## 2. Создать ресурсы Cloudflare (D1 + KV)
 
-## 2. Создать ресурсы Cloudflare (D1 + KV)
-
 База D1 `poputchka-db` у вас уже создана — нужен её ID, а также ID KV-неймспейса (его, скорее всего, ещё нет — создайте). Всё делается в дашборде, CLI не обязателен:
 
 1. **D1**: Storage & Databases → D1 SQL Database → `poputchka-db` → скопируйте поле **Database ID**.
@@ -282,6 +280,11 @@ npm run dev                # http://localhost:8787
 npm run typecheck && npm test
 ```
 
+В `npm test` кроме серверной логики входят UI-тесты `tests/ui.test.ts`: настоящий
+`public/index.html` и `public/app.js` поднимаются в jsdom, сеть — заглушка. Так
+проверяется доска и карточка (в том числе что карточка рисуется сразу, не дожидаясь
+ответа сервера, — иначе Cloudflare Web Analytics показывает плохой INP).
+
 ## Как улучшить парсер
 
 Парсер в `src/parser.ts` работает эвристически (словарь городов, маршруты, даты, вес, цена). Понимает кириллицу и латиницу (Warszawa, Lviv, Krakow), разделители `—`, `->`, `=>`, `>>`, предлоги «до/в/из/от», даты «завтра», «в пятницу», «15.09», «15 сентября»/«5 жовтня».
@@ -311,6 +314,7 @@ src/
   types.ts      — типы
   util.ts       — валидация, rate limit, утилиты
 public/         — статика Pages (index.html, styles.css, app.js)
+tests/          — vitest: парсер, dedupe, подбор, карточка + UI-тесты app.js в jsdom
 migrations/     — схема D1
 scripts/        — установка/удаление вебхука
 deploy-workflows/ — шаблон авто-деплоя воркера

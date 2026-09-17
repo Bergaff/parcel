@@ -202,15 +202,26 @@ button { font-family: inherit; }
 /* строки объявлений */
 .rows { border-top: 1px solid var(--line); }
 .row {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px 24px;
   padding: 20px 6px;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
+  /* Строки вне экрана не рисуем: на слабом телефоне меньше длинных задач,
+     а значит короче задержка отклика на нажатие (INP) */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
 }
 .row:hover { background: var(--paper-deep); }
+.row:active { background: var(--paper-deep); } /* отклик виден сразу, до перехода */
 .row-main { min-width: 0; }
+/* Растянутая ссылка на всю строку: переход обрабатывает браузер, а не скрипт */
+.row-link { position: absolute; inset: 0; z-index: 0; }
+.row-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Кнопки и ссылки внутри строки остаются кликабельными поверх неё */
+.row-side a, .row-side button { position: relative; z-index: 1; }
 
 .route-line {
   font-family: var(--serif);
