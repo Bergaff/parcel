@@ -521,6 +521,14 @@ async function loadDetail(id) {
 
 function renderDetail(l) {
   const box = $('#item-detail');
+  // Серверная карточка (src/ssr.ts) полнее клиентской: в ней хлебные крошки и
+  // блок «Ещё по этому маршруту». Пока открыто то же объявление — не
+  // перерисовываем: иначе через секунду после загрузки контент схлопывается
+  // на глазах. Кнопки сервера работают — их ловит общий обработчик
+  // (data-report / data-copy), ссылки на похожие заявки тоже.
+  if (box.dataset.ssr === '1' && box.dataset.id === l.id) return;
+  box.removeAttribute('data-ssr');
+  box.removeAttribute('data-id');
   // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
   const archived =
     l.status === 'expired' ||

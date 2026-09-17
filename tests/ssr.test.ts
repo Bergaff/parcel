@@ -199,6 +199,19 @@ describe('оболочка сайта (renderShell)', () => {
     expect(JSON.parse(ssr.replace(/\\u003c/g, '<'))).toMatchObject({ view: 'item' });
   });
 
+  it('серверная карточка помечена: клиент её не перерисовывает', async () => {
+    const item = listing();
+    const html = await renderShell(fakeEnv(), {
+      view: 'item', title: 't', description: 'd', canonical: 'https://x/', origin: 'https://x',
+      detailData: item,
+      detailHtml: renderDetailHtml(item, { origin: 'https://x' }),
+    });
+    // data-ssr + data-id: пока открыто то же объявление, app.js оставляет
+    // серверный HTML (в нём крошки и «похожие», которых клиент не рисует)
+    expect(html).toContain(`<article id="item-detail" data-ssr="1" data-id="${item.id}">`);
+    expect(html).toContain('class="crumbs"');
+  });
+
   it('сегодняшняя дата — по МСК', () => {
     expect(todayLine(new Date('2026-09-17T22:00:00Z'))).toBe('Пятница, 18 сен'); // за полночью по МСК
     expect(todayLine(new Date('2026-09-17T06:00:00Z'))).toBe('Четверг, 17 сен');

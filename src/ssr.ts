@@ -266,7 +266,10 @@ export async function renderShell(env: Env, opts: ShellOptions): Promise<string>
     );
   }
   if (opts.detailHtml != null) {
-    html = html.replace(/<article id="item-detail"><\/article>/, `<article id="item-detail" data-ssr="1">${opts.detailHtml}</article>`);
+    // data-id нужен клиенту: пока открыто то же объявление, серверную карточку
+    // не перерисовываем (в ней крошки и «похожие», которых клиент не знает)
+    const ssrId = opts.detailData ? ` data-id="${escapeHtml(opts.detailData.id)}"` : '';
+    html = html.replace(/<article id="item-detail"><\/article>/, `<article id="item-detail" data-ssr="1"${ssrId}>${opts.detailHtml}</article>`);
   }
   if (opts.total != null) {
     html = html.replace(

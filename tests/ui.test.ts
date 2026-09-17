@@ -192,6 +192,12 @@ async function goto(path: string, ms = 60) {
   await settle(ms);
 }
 const rows = () => Array.from(win.document.querySelectorAll('#list article.row')) as HTMLElement[];
+/** Текстовый узел в обёртке <p> — для «серверного» контента в тестах. */
+function elText(t: string): HTMLElement {
+  const n = win.document.createElement('p');
+  n.textContent = t;
+  return n;
+}
 
 beforeAll(async () => {
   const vc = new VirtualConsole();
@@ -328,6 +334,46 @@ describe('карточка: отклик на нажатие (INP)', () => {
     expect(calls).toContain(`POST /api/listings/${ID}/report`);
     expect(server.reports).toContain('спам');
     expect(text('toast')).toContain('Жалоба принята');
+  });
+});
+
+/* Сервер отдаёт карточку объявления прямо в HTML (src/ssr.ts), и она полнее
+   клиентской: в ней хлебные крошки и блок «Ещё по этому маршруту». Клиент не
+   должен её затирать — иначе через секунду после загрузки контент схлопывается. */
+describe('серверная карточка (SSR)', () => {
+  const SSR_MARK = 'СЕРВЕРНАЯ КАРТОЧКА с крошками и похожими заявками';
+
+  it('пока открыто то же объявление — серверную карточку не перерисовываем', async () => {
+    await goto('/');
+    const detail = byId('item-detail');
+    detail.dataset.ssr = '1';
+    detail.dataset.id = ID;
+    detail.replaceChildren(elText(SSR_MARK));
+
+    calls.length = 0;
+    await goto(`/item/${ID}`, 250); // и запрос к API успеет ответить
+
+    expect(detail.textContent, 'серверный контент на месте').toContain(SSR_MARK);
+    expect(detail.dataset.ssr).toBe('1');
+    expect(detail.textContent).not.toContain('достаю карточку');
+  });
+
+  it('переход к другому объявлению заменяет серверную карточку', async () => {
+    await goto(`/item/${REQ}`, 250);
+    const detail = byId('item-detail');
+    expect(detail.textContent, 'старая карточка ушла').not.toContain(SSR_MARK);
+    expect(detail.dataset.ssr, 'метка серверной карточки снята').toBeUndefined();
+    expect(detail.textContent).toContain('Варшава');
+    await goto('/');
+  });
+
+  it('клиентская карточка рисуется как обычно, если серверной не было', async () => {
+    const detail = byId('item-detail');
+    detail.removeAttribute('data-ssr');
+    detail.removeAttribute('data-id');
+    await goto(`/item/${ID}`, 250);
+    expect(detail.textContent).toContain(BOARD_DESC);
+    await goto('/');
   });
 });
 
