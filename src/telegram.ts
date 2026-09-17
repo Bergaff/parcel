@@ -1,11 +1,17 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck } from './parser';
+import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck, findCities } from './parser';
+import { formatMatchDigest, pairListings } from './match';
 import {
-  addReport, createListing, findByIdPrefix, findRelated, getListingById, listPending, markSeen,
-  searchByCity, setSeenListing, updateListingStatus,
+  addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
+  listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
-import { admins, escapeHtml, normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, isRussianCity, mskTodayIso } from './util';
+import {
+  admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
+  normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
+} from './util';
 import { aiExtractListing, type AiFields } from './ai';
+import { currentPeriod, fmtPeriod } from './format';
+import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './stats';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -86,7 +92,8 @@ function approveKeyboard(listingId: string): Record<string, unknown> {
 /* Форматирование                                                       */
 /* ------------------------------------------------------------------ */
 
-function formatListing(l: Listing, sourceNote = ''): string {
+/** Карточка заявки для модератора (и ответ бота в личке). Экспортирована для тестов. */
+export function formatListing(l: Listing, sourceNote = ''): string {
   const typeLabel = l.type === 'offer' ? 'Водитель везёт' : 'Нужно передать';
   const parts = [
     `#${l.id.slice(0, 8)} ${typeLabel}`,
@@ -98,15 +105,17 @@ function formatListing(l: Listing, sourceNote = ''): string {
   if (l.price) extras.push(`цена ${escapeHtml(l.price)}`);
   if (extras.length) parts.push(`Детали: ${extras.join(' · ')}`);
   parts.push(`Описание: ${escapeHtml(l.description.slice(0, 300))}`);
-  if (l.telegram) parts.push(`Контакты: ${escapeHtml(l.telegram)}`);
-  if (l.phone) parts.push(`Контакты: ${escapeHtml(l.phone)}`);
+  // Контакты без дублей: раньше один и тот же номер печатался двумя строками
+  const contacts = uniqueContacts(l.telegram, l.phone);
+  if (contacts.length) parts.push(`Контакты: ${escapeHtml(contacts.join(', '))}`);
   const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
   const srcRef = l.sourceChat
     ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
     : '';
   const srcLinkTag = srcLink ? ` — <a href="${srcLink}">исходное сообщение</a>` : '';
-  if (l.source === 'parser') parts.push(`Источник: ИИ-разбор${srcRef ? `, ${srcRef}` : ''}${srcLinkTag}`);
-  else if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
+  // Чем разобран текст (правилами или ИИ) — внутренняя деталь, людям она не нужна.
+  // В карточке остаются только автор пересылки / чат и ссылка на исходное сообщение.
+  if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -234,7 +243,7 @@ const SEARCH_MONTHS = [
 function searchLine(env: Env, l: Listing, today: string): string {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const route = site
-    ? `<a href="${site}/#/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
+    ? `<a href="${site}/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
     : `${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`;
   const bits: string[] = [];
   if (l.departureDate) {
@@ -244,7 +253,8 @@ function searchLine(env: Env, l: Listing, today: string): string {
   }
   if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
   if (l.price) bits.push(escapeHtml(l.price));
-  if (l.telegram || l.phone) bits.push(escapeHtml(l.telegram ?? l.phone!));
+  const contacts = uniqueContacts(l.telegram, l.phone);
+  if (contacts.length) bits.push(escapeHtml(contacts.join(', ')));
   // Поездка уже прошла — заявка из архива (ещё месяц доступна, потом удаляется)
   if (l.status === 'expired' || (l.departureDate != null && l.departureDate < today)) bits.push('🗄️ архив');
   return `• ${route}${bits.length ? ' · ' + bits.join(' · ') : ''}`;
@@ -422,7 +432,7 @@ function relatedLine(l: Listing): string {
     relatedDay(l.departureDate),
     l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
     l.price,
-    l.telegram ?? l.phone ?? null,
+    uniqueContacts(l.telegram, l.phone)[0] ?? null,
     l.status === 'expired' ? 'архив' : null,
     l.status === 'pending' ? 'на модерации' : null,
     `№ ${l.id.slice(0, 8)}`,
@@ -431,6 +441,152 @@ function relatedLine(l: Listing): string {
 }
 
 /** Связи заявки: встречные рейсы, тот же маршрут, другие заявки автора. */
+/**
+ * Служебные слова команды /подбор: их нужно вычеркнуть, прежде чем принимать
+ * оставшиеся слова за города («с архивом и одним общим городом» — это флаги,
+ * а не два города).
+ */
+const MATCH_ARG_NOISE =
+  /(с\s+|и\s+|без\s+)?архив[а-яё]*|(од(ин|ним|ного|ной)\s+(общ[а-яё]*\s+)?город[а-яё]*)|частичн[а-яё]*|неполн[а-яё]*|по\s+городам|окн[а-яё]*|(?<!\d)\d{1,3}\s*(дн|день|дня|дней|days?)[а-яё.]*/gi;
+
+/** Города из аргументов команды: «Варшава Минск», «из Варшавы в Минск», «Варшава». */
+export function matchArgCities(args: string): { fromCity: string | null; toCity: string | null } {
+  const clean = (args ?? '').trim();
+  if (!clean) return { fromCity: null, toCity: null };
+  // знакомые города находим в любом падеже — остальное в аргументах игнорируем
+  const found = findCities(clean).map((c) => c.city);
+  const words = found.length
+    ? found
+    // незнакомые города: вычеркиваем флаги, дни и предлоги, нормализуем остаток
+    : clean
+        .replace(MATCH_ARG_NOISE, ' ')
+        .split(/[\s,;]+/)
+        .filter((w) => w.length > 1 && !/^(из|в|во|до|на|с|со|от|по|и|или|только|без|не|-|—|→)$/i.test(w))
+        .map((w) => normalizeCity(w));
+  const uniq: string[] = [];
+  for (const city of words) {
+    if (!city) continue;
+    if (!uniq.some((u) => u.toLowerCase() === city.toLowerCase())) uniq.push(city);
+  }
+  return { fromCity: uniq[0] ?? null, toCity: uniq[1] ?? null };
+}
+
+/** Окно по датам из аргументов: «7 дней», «窗口» не поддерживаем — только дни. */
+export function matchArgDays(args: string): number {
+  const m = /(?<!\d)(\d{1,3})\s*(?:дн|день|дня|дней|days?)/i.exec(args ?? '');
+  if (!m) return 3;
+  const n = Number(m[1]);
+  // «0 дней» — бессмыслица, берём окно по умолчанию; больше месяца не нужно
+  if (!Number.isFinite(n) || n <= 0) return 3;
+  return Math.min(30, Math.round(n));
+}
+
+/** Флаги из аргументов: «с архивом», «и с одним общим городом».
+ *  \b с кириллицей не работает (для JS это не «слово»), поэтому границы не ставим. */
+export function matchArgFlags(args: string): { includeArchive: boolean; partial: boolean } {
+  const text = args ?? '';
+  return {
+    includeArchive: /архив/i.test(text),
+    // «один город», «с одним общим городом», «частично» — в любых падежах
+    // \w и \b кириллицу не понимают — только явные классы букв
+    partial: /(од(ин|ним|ного|ной)\s+(общ[а-яё]*\s+)?город|частичн|неполн|по городам)/i.test(text),
+  };
+}
+
+/**
+ * /подбор — то же, что кнопка в админке, только из Telegram: сравнить водителей
+ * с заявками «нужно передать», прислать сводку и сохранить прогон в историю.
+ */
+async function cmdMatch(env: Env, msg: TgMessage, args: string): Promise<void> {
+  const chatId = msg.chat.id;
+  if (!admins(env).includes(String(msg.from?.id))) {
+    await sendText(env, chatId, 'Подбор пар — команда администратора.');
+    return;
+  }
+  const { fromCity, toCity } = matchArgCities(args);
+  const days = matchArgDays(args);
+  const { includeArchive, partial } = matchArgFlags(args);
+
+  const where = fromCity || toCity ? [fromCity, toCity].filter(Boolean).join(' → ') : 'все города';
+  await sendText(env, chatId, `🧩 Подбор пар: ${escapeHtml(where)}, окно ${days} дн. Считаю…`).catch(() => undefined);
+
+  const listings = await listForMatching(env, { includeArchive });
+  const { pairs, stats } = pairListings(listings, { fromCity, toCity, days, includeArchive, partial, limit: 50 });
+  // Прогон сохраняем: история подборов общая и для кнопки в админке, и для команды
+  const run = await saveMatchRun(env, {
+    fromCity, toCity, daysWindow: days, includeArchive, partial,
+    offersTotal: stats.offers, requestsTotal: stats.requests,
+    notified: true, note: 'из Telegram: /подбор',
+  }, pairs).catch((e) => {
+    console.error('saveMatchRun failed', e);
+    return null;
+  });
+
+  const digest = formatMatchDigest({ fromCity, toCity, days, pairs, stats, siteUrl: env.SITE_URL, maxPairs: 15 });
+  for (const part of splitDigest(digest)) {
+    await sendText(env, chatId, part).catch(() => undefined);
+  }
+  if (run) {
+    const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+    await sendText(env, chatId,
+      `Прогон № ${run.id.slice(0, 8)} сохранён в истории` +
+      (site ? ` — открыть в <a href="${site}/admin">админке</a>, вкладка «подбор».` : ' — вкладка «подбор» в админке.')
+    ).catch(() => undefined);
+  }
+}
+
+/**
+ * /статистика — итоги месяца готовым текстом для поста в канал.
+ *
+ * Админ просил «чтобы можно было просто скопировать и опубликовать», поэтому
+ * текст приходит одним блоком <pre>: в Telegram он копируется без разметки.
+ * Аргументы: «прошлый» — последний закрытый месяц, «force» — пересчитать всё.
+ */
+async function cmdStats(env: Env, msg: TgMessage, args: string): Promise<void> {
+  const chatId = msg.chat.id;
+  if (!admins(env).includes(String(msg.from?.id))) {
+    await sendText(env, chatId, 'Статистика — команда администратора.');
+    return;
+  }
+  const lower = args.toLowerCase();
+  const force = /force|полн|пересчит|заново/.test(lower);
+  const wantClosed = /прошл|предыд|закрыт|prev|last/.test(lower);
+
+  await sendText(env, chatId, '📊 Считаю итоги…').catch(() => undefined);
+
+  const res = await refreshStats(env, { force }).catch((e) => {
+    console.error('refreshStats failed', e);
+    return null;
+  });
+  const months = res?.months ?? (await listMonthStats(env).catch(() => [] as MonthStat[]));
+  if (months.length === 0) {
+    await sendText(env, chatId, 'Пока считать нечего: на доске не было опубликованных объявлений.');
+    return;
+  }
+
+  const current = currentPeriod();
+  const stat = wantClosed
+    ? months.find((m) => m.month !== current) ?? months[0]!
+    : months[0]!;
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const post = statsPostText(stat, { site: site || undefined, month: stat.month === current ? 'current' : 'past' });
+
+  // <pre> не режем по абзацам: иначе теги разъедутся. Длинный текст — без блока.
+  const body = post.length < 3500 ? `<pre>${escapeHtml(post)}</pre>` : escapeHtml(post);
+  const head = `📊 ${fmtPeriod(stat.month)}${stat.month === current ? ' (месяц ещё идёт)' : ''}: `
+    + `${stat.total} объявлений, ${stat.offers} «везут» и ${stat.requests} «нужно передать». `
+    + 'Текст ниже готов к публикации — копируйте как есть.';
+  await sendText(env, chatId, `${head}\n\n${body}`).catch(() => undefined);
+
+  const notes: string[] = [];
+  if (res) notes.push(`пересчитано месяцев: ${res.saved.length || 'ничего нового'}`);
+  if (months.length > 1) notes.push(`всего месяцев в истории: ${months.length}`);
+  if (site) notes.push(`публичная страница: ${site}/itogi`);
+  if (notes.length) {
+    await sendText(env, chatId, notes.map((n) => `• ${escapeHtml(n)}`).join('\n')).catch(() => undefined);
+  }
+}
+
 async function cmdRelated(env: Env, chatId: number, query: string): Promise<void> {
   const arg = query.trim();
   if (!arg) {
@@ -454,7 +610,7 @@ async function cmdRelated(env: Env, chatId: number, query: string): Promise<void
   }
   const l = matches[0]!;
   const rel = await findRelated(env, l);
-  const chunks: string[] = [`🔗 <b>Заявка:</b> ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${relatedDay(l.departureDate)} · ${escapeHtml(l.telegram ?? l.phone ?? 'без контакта')} · № ${l.id.slice(0, 8)}`];
+  const chunks: string[] = [`🔗 <b>Заявка:</b> ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)} · ${relatedDay(l.departureDate)} · ${escapeHtml(uniqueContacts(l.telegram, l.phone)[0] ?? 'без контакта')} · № ${l.id.slice(0, 8)}`];
   if (rel.reverse.length) {
     chunks.push(`\n↔ <b>Встречные рейсы (${rel.reverse.length}):</b>`);
     for (const x of rel.reverse) chunks.push(relatedLine(x));
@@ -488,7 +644,7 @@ async function sendParseReport(env: Env, chatId: number, text: string): Promise<
     `Дата: ${p.departureDate ?? '—'}\n` +
     `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
     `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
-    `Контакт: ${escapeHtml(p.telegram ?? p.phone ?? '—')}\n` +
+    `Контакт: ${escapeHtml(uniqueContacts(p.telegram, p.phone)[0] ?? '—')}\n` +
     `Уверенность: ${p.confidence}\n\n` +
     verdict
   );
@@ -503,6 +659,8 @@ function rulesFields(
   parsed: ReturnType<typeof parseTelegramMessage>,
   text: string
 ): AiFields {
+  // Один и тот же контакт не должен лежать в двух полях (дубль строки «Контакты:»)
+  const { telegram, phone } = normalizeContacts(parsed.telegram, parsed.phone);
   return {
     type: parsed.intent ?? 'offer',
     fromCity: parsed.fromCity ?? 'не указано',
@@ -510,9 +668,11 @@ function rulesFields(
     departureDate: parsed.departureDate,
     weightKg: parsed.weightKg,
     price: parsed.price,
-    telegram: parsed.telegram,
-    phone: parsed.phone,
-    description: text.slice(0, 2000),
+    telegram,
+    phone,
+    // Исходный текст модератору нужен дословно — убираем из него только контакты,
+    // которые карточка и так показывает отдельной строкой
+    description: dedupeDescription(text.slice(0, 2000), { telegram, phone, stripFields: false }),
   };
 }
 
@@ -553,10 +713,11 @@ function extractForwardOrigin(msg: TgMessage): {
     senderUser && typeof senderUser.username === 'string' && senderUser.username
       ? `@${senderUser.username}`
       : undefined;
-  const authorName =
+  const rawAuthorName =
     senderUser && typeof senderUser.first_name === 'string' && senderUser.first_name
       ? senderUser.first_name
       : hiddenName;
+  const authorName = rawAuthorName?.replace(/\s+/g, ' ').trim() || undefined;
   const title =
     chat && typeof chat.title === 'string' ? chat.title
     : authorName ? `Переслано от ${authorName}`
@@ -603,6 +764,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       return;
     }
     const created: Listing[] = [];
+    const repeats: Repeat[] = [];
     for (const fields of list) {
       const input: ListingInput = {
         ...fields,
@@ -614,15 +776,27 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         sourceChatId: seenChat,
         sourceMessageId: origin.messageId ?? null,
       };
-      const listing = await createListing(env, input);
-      created.push(listing);
-      await notifyAdmins(env, listing);
+      // Одно и то же объявление пересылают каждый день — вторую заявку не плодим:
+      // освежаем уже имеющуюся и объясняем, почему не создали новую.
+      const res = await createListingSafe(env, input);
+      if (!res.created) {
+        repeats.push({ listing: res.listing, why: res.why });
+        await notifyAdminsRepeat(env, res.listing, res.why);
+        continue;
+      }
+      created.push(res.listing);
+      await notifyAdmins(env, res.listing, similarNote(res));
+    }
+    if (created.length === 0) {
+      await sendText(env, chatId, repeatReply(repeats));
+      return;
     }
     const statusNote = env.AUTO_APPROVE === '1'
       ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
       : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
     await sendText(env, chatId,
-      created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+      created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+      (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
     return;
   }
 
@@ -639,6 +813,8 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/поиск город</b>: заявки по городу — что везут и что нужно передать (город — по-русски)\n` +
           `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
           `• <b>/связи номер</b>: встречные рейсы и похожие заявки — полезно владельцам чатов\n` +
+          `• <b>/подбор</b> (для администратора): найти пары «водитель везёт» ↔ «нужно передать»; можно сузить городами и окном по датам: <code>/подбор Варшава Минск 7 дней</code>\n` +
+          `• <b>/статистика</b> (для администратора): итоги месяца — сколько объявлений, какие направления и средняя цена; текст готов к публикации в канале\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
@@ -716,6 +892,20 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await cmdRelated(env, chatId, text.split(/\s+/).slice(1).join(' '));
         break;
       }
+      case '/подбор':
+      case '/подборы':
+      case '/пары':
+      case '/podbor': {
+        await cmdMatch(env, msg, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
+      case '/статистика':
+      case '/стата':
+      case '/итоги':
+      case '/stats': {
+        await cmdStats(env, msg, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
       default:
         await sendText(env, chatId, 'Не знаю такую команду. Список команд: /help.');
     }
@@ -736,6 +926,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     if (looksLikeListing(text) || worthAiCheck(text)) {
       const parsed = parseTelegramMessage(text);
       let created: Listing[] = [];
+      const repeats: Repeat[] = [];
       if (parsed.confidence >= 0.7 || (env.AI_API_KEY && worthAiCheck(text))) {
         if (await markSeen(env, String(chatId), msg.message_id)) {
           const { list, source } = await cascade(env, text);
@@ -749,16 +940,26 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               sourceChatId: String(chatId),
               sourceMessageId: msg.message_id,
             };
-            const listing = await createListing(env, input);
-            created.push(listing);
-            await notifyAdmins(env, listing);
+            const res = await createListingSafe(env, input);
+            if (!res.created) {
+              repeats.push({ listing: res.listing, why: res.why });
+              await notifyAdminsRepeat(env, res.listing, res.why);
+              continue;
+            }
+            created.push(res.listing);
+            await notifyAdmins(env, res.listing, similarNote(res));
           }
           if (created.length > 0) {
             const statusNote = env.AUTO_APPROVE === '1'
               ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
               : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
             await sendText(env, chatId,
-              created.map((l) => formatListing(l, source === 'parser' ? '\n<i>Разобрал ИИ — модератор перепроверит</i>' : '')).join('\n\n') + statusNote);
+              created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+              (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
+            return;
+          }
+          if (repeats.length > 0) {
+            await sendText(env, chatId, repeatReply(repeats));
             return;
           }
         }
@@ -870,14 +1071,20 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     sourceChat: `Личное сообщение боту`,
     sourceChatId: String(chatId),
   };
-  const listing = await createListing(env, input);
+  // /post человек заполняет сам, шаг за шагом, — заявку создаём в любом случае,
+  // но если такая уже есть, предупреждаем и его, и модератора.
+  const res = await createListingSafe(env, input, { force: true });
+  const listing = res.listing;
   await setWizard(env, chatId, null);
   const statusNote =
     input.status === 'published'
       ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
       : '\n<b>Отправлено на модерацию.</b> Администратор одобрит его в ближайшее время.';
-  await sendText(env, chatId, formatListing(listing) + statusNote);
-  await notifyAdmins(env, listing);
+  const dupNote = res.duplicateOf
+    ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
+    : '';
+  await sendText(env, chatId, formatListing(listing) + statusNote + dupNote);
+  await notifyAdmins(env, listing, res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null);
 }
 
 /* ------------------------------------------------------------------ */
@@ -919,6 +1126,8 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if (list.length === 0) return; // ИИ не признал объявлением — мимо
 
   const created: Listing[] = [];
+  const repeats: Repeat[] = [];
+  const similarBy = new Map<string, { id: string; why: string }>();
   for (const fields of list) {
     const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
     const input: ListingInput = {
@@ -931,9 +1140,18 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       sourceMessageId: msg.message_id,
     };
     try {
-      const listing = await createListing(env, input);
+      const res = await createListingSafe(env, input);
+      if (!res.created) {
+        // Повтор в чате: в группе не шумим, модератору сообщаем лично
+        repeats.push({ listing: res.listing, why: res.why });
+        await notifyAdminsRepeat(env, res.listing, res.why);
+        continue;
+      }
+      const listing = res.listing;
       created.push(listing);
       await setSeenListing(env, chatKey, msg.message_id, listing.id);
+      const note = similarNote(res);
+      if (note) similarBy.set(listing.id, note);
     } catch (e) {
       // Вернём возможность обработать сообщение при повторной доставке вебхука
       // (если не создано ни одной заявки — иначе повтор даст дубль)
@@ -953,18 +1171,79 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
-  for (const listing of created) await notifyAdmins(env, listing);
+  // Карточки модератору — по одной на заявку (с предупреждением, если похоже на дубль)
+  for (const listing of created) {
+    await notifyAdmins(env, listing, similarBy.get(listing.id) ?? null);
+  }
 }
 
-export async function notifyAdmins(env: Env, listing: Listing): Promise<void> {
+/** Повтор: такое объявление уже есть, новую заявку не создавали. */
+export interface Repeat {
+  listing: Listing;
+  why: string;
+}
+
+/** Предупреждение модератору о «похожей» заявке: создали, но пусть проверит. */
+function similarNote(res: {
+  kind: string | null;
+  why: string;
+  duplicateOf: Listing | null;
+}): { id: string; why: string } | null {
+  return res.kind === 'similar' && res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null;
+}
+
+function listingLine(l: Listing): string {
+  return `№${l.id.slice(0, 8)} · ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}` +
+    (l.departureDate ? ` · ${l.departureDate}` : '');
+}
+
+/** Ответ человеку: объявление уже на доске, дубль не создан. */
+function repeatReply(repeats: Repeat[]): string {
+  const published = repeats.some(({ listing }) => listing.status === 'published');
+  const lines = repeats.map(({ listing, why }) => `${listingLine(listing)}\n${escapeHtml(why)}`);
+  return '♻️ <b>Такое объявление уже есть на доске</b> — дубль создавать не стал' +
+    (published ? ', освежил его (заявка снова вверху списка).' : '.') +
+    `\n\n${lines.join('\n\n')}` +
+    '\n\nЕсли это другой человек или другой рейс — добавьте отдельно: /post.';
+}
+
+/** Короткая заметка модератору: пришёл повтор, дубль не создан. */
+export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string): Promise<void> {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
+  const refreshed = listing.status === 'published' ? ' Освежил: заявка снова вверху доски.' : '';
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `♻️ <b>Повтор, дубль не создавал</b>\n${listingLine(listing)}${link}\n` +
+      `<b>Почему:</b> ${escapeHtml(why)}.${refreshed}`
+    ).catch(() => undefined);
+  }
+}
+
+/**
+ * Карточка на модерацию. `dup` — если такая заявка уже есть: модератор видит
+ * предупреждение до того, как нажмёт «Одобрить».
+ */
+export async function notifyAdmins(
+  env: Env,
+  listing: Listing,
+  dup?: { id: string; why: string } | null
+): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
-  const noContact = !listing.telegram && !listing.phone
-    ? '\n<i>⚠ Контакта нет — сверьтесь с исходным сообщением или чатом</i>'
+  // У пересылок от людей со скрытым профилем контакта не бывает: модератор
+  // дописывает его вручную в админке — даём ссылку прямо в карточке.
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const editLink = site ? `, дописать в <a href="${site}/admin">админке</a>` : ' — допишите вручную в админке';
+  const noContact = uniqueContacts(listing.telegram, listing.phone).length === 0
+    ? `\n<i>⚠ Контакта нет (автор пересылки мог скрыть профиль)${editLink}</i>`
+    : '';
+  const dupNote = dup && dup.id
+    ? `\n<i>⚠ Похоже на дубль: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}</i>`
     : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing, noContact),
+      formatListing(listing, noContact + dupNote),
       { reply_markup: approveKeyboard(listing.id) }
     ).catch(() => undefined);
   }
@@ -989,6 +1268,42 @@ export async function notifyAdminsReport(env: Env, listing: Listing, reason: str
       }
     ).catch(() => undefined);
   }
+}
+
+/**
+ * Отправить готовую HTML-сводку всем админам (например, результат подбора пар
+ * «водитель ↔ нужно передать»). Режем на части: лимит сообщения Telegram — 4096 символов.
+ */
+export async function notifyAdminsDigest(env: Env, html: string): Promise<void> {
+  const text = (html ?? '').trim();
+  if (!text) return;
+  const parts = splitDigest(text, 3800);
+  for (const adminId of admins(env)) {
+    for (const part of parts) {
+      await sendText(env, Number(adminId), part).catch(() => undefined);
+    }
+  }
+}
+
+/** Разбить длинный текст на сообщения по пустым строкам (блоки не рвём). */
+export function splitDigest(text: string, max = 3800): string[] {
+  if (text.length <= max) return [text];
+  const out: string[] = [];
+  let cur = '';
+  for (const block of text.split('\n\n')) {
+    const piece = cur ? `${cur}\n\n${block}` : block;
+    if (piece.length <= max) { cur = piece; continue; }
+    if (cur) out.push(cur);
+    // Один блок длиннее лимита — режем жёстко
+    if (block.length > max) {
+      for (let i = 0; i < block.length; i += max) out.push(block.slice(i, i + max));
+      cur = '';
+    } else {
+      cur = block;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 }
 
 /* ------------------------------------------------------------------ */

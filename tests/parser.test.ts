@@ -59,7 +59,8 @@ describe('parseTelegramMessage', () => {
   });
 
   it('распознаёт запрос на передачу посылки', () => {
-    const p = parseTelegramMessage('Кто может передать посылку Краков → Киев? 5 кг, 15.09, +48 123 456 789');
+    // NOW фиксируем: без него «15.09» в прошлогоднем тесте уезжает на следующий год
+    const p = parseTelegramMessage('Кто может передать посылку Краков → Киев? 5 кг, 15.09, +48 123 456 789', NOW);
     expect(p.intent).toBe('request');
     expect(p.fromCity).toBe('Краков');
     expect(p.toCity).toBe('Киев');
@@ -140,6 +141,50 @@ describe('parseTelegramMessage', () => {
     expect(p.toCity).toBe('Киев');
     expect(p.departureDate).toBe('2026-09-06');
     expect(p.telegram).toBe('@driver88');
+  });
+});
+
+describe('тип заявки: «водитель везёт» против «нужно передать»', () => {
+  // Баг с доски: просьба «кто-то занимается перевозом посылок?» получала штамп
+  // «водитель везёт», потому что слово «перевоз» считалось признаком водителя.
+  it('просьбу найти перевозчика не принимает за предложение водителя', () => {
+    const p = parseTelegramMessage(
+      'добрый день, подскажи пожалуйста кто-то занимается перевозом посылок до 20 кг? варшава-брест?',
+      NOW
+    );
+    expect(p.intent).toBe('request');
+    expect(p.fromCity).toBe('Варшава');
+    expect(p.toCity).toBe('Брест');
+    expect(p.weightKg).toBe(20);
+    expect(p.departureDate).toBeNull();
+    // правила уверены — ИИ тратить не нужно
+    expect(p.confidence).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it('вопрос «занимаетесь доставкой?» — тоже просьба, а не рейс', () => {
+    expect(parseTelegramMessage('Здравствуйте! Занимаетесь доставкой посылок Варшава — Гродно?', NOW).intent).toBe('request');
+    expect(parseTelegramMessage('Кто везёт завтра Варшава — Брест? Посылка 5 кг', NOW).intent).toBe('request');
+    expect(parseTelegramMessage('Ищу водителя Варшава — Брест, посылка 20 кг', NOW).intent).toBe('request');
+  });
+
+  it('объявления водителей остаются предложениями', () => {
+    expect(parseTelegramMessage('Водитель, 25.09.2026 Варшава-Минск. Возьму посылки, домашние переезды.', NOW).intent).toBe('offer');
+    expect(parseTelegramMessage('Занимаюсь перевозкой посылок Варшава-Минск, возьму до 20 кг', NOW).intent).toBe('offer');
+    expect(parseTelegramMessage('Рейс Белосток — Минск 18.09, есть места, посылки, передачи', NOW).intent).toBe('offer');
+    expect(parseTelegramMessage('Отвезу посылки Варшава — Краков, суббота', NOW).intent).toBe('offer');
+  });
+
+  it('понимает маршрут в падежах: «из Бреста в Варшаву»', () => {
+    const p = parseTelegramMessage('есть кто из Бреста в Варшаву в пятницу? надо коробку передать', NOW);
+    expect(p.intent).toBe('request');
+    expect(p.fromCity).toBe('Брест');
+    expect(p.toCity).toBe('Варшава');
+  });
+
+  it('спорное сообщение правила отдают ИИ (confidence < 0.7)', () => {
+    const p = parseTelegramMessage('Варшава-Минск, перевозка посылок, есть кто 20.09?', NOW);
+    expect(p.intent).toBe('request');
+    expect(p.confidence).toBeLessThan(0.7);
   });
 });
 

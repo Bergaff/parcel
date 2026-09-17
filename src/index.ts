@@ -1,11 +1,20 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, deleteListing, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, listAdminBoard, listListings, listSourceChats, updateListing, updateListingStatus, upsertChatLink } from './store';
-import { getIp, rateLimit, sanitizeCity, sanitizeContact, sanitizeText, escapeHtml, isRussianCity, mskTodayIso } from './util';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsReport } from './telegram';
-import { renderOgImage } from './og';
-import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml } from './seo-routes';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
+import { groupDuplicates } from './dedupe';
+import { formatMatchDigest, listingSnapshot, pairListings } from './match';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
+import { renderOgImage, renderRouteOg } from './og';
+import {
+  buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
+  buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
+  cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
+} from './seo-routes';
+import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, siteOrigin, STATIC_PAGES } from './pages';
+import { currentPeriod } from './format';
+import { listMonthStats, refreshStats, statsPostText } from './stats';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -101,12 +110,9 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
     ? b.price.trim().slice(0, 40)
     : null;
 
-  const telegram = typeof b.telegram === 'string' && b.telegram.trim()
-    ? sanitizeContact(b.telegram.trim())
-    : null;
-  const phone = typeof b.phone === 'string' && b.phone.trim()
-    ? sanitizeContact(b.phone.trim())
-    : null;
+  // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
+  // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
+  const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
 
   return {
     input: {
@@ -151,7 +157,14 @@ app.get('/api/listings/:id', async (c) => {
   if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
     return c.json({ error: 'not_found' }, 404);
   }
-  return c.json({ item: listing });
+  // Вместе с заявкой отдаём то, из чего сервер собрал карточку: пути для хлебных
+  // крошек и похожие заявки. Клиент рисует их сам, когда объявление открыли
+  // кликом с доски, — карточка не «беднеет» после перехода.
+  const [related, routePath] = await Promise.all([
+    relatedListings(c.env, listing),
+    routePathFor(c.env, listing.fromCity, listing.toCity),
+  ]);
+  return c.json({ item: listing, related, routePath, cityPath: cityPathFor(listing.fromCity) });
 });
 
 app.post('/api/listings', async (c) => {
@@ -164,13 +177,29 @@ app.post('/api/listings', async (c) => {
   if (error || !input) return c.json({ error }, 400);
 
   input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
-  const listing = await createListing(c.env, input);
+  // Дубль не плодим: то же объявление тем же маршрутом и датой от того же человека
+  // уже есть — возвращаем существующую заявку (и освежаем её, если она на доске).
+  const res = await createListingSafe(c.env, input);
+  const listing = res.listing;
+
+  if (!res.created) {
+    return c.json({
+      item: listing,
+      duplicate: true,
+      message: listing.status === 'published'
+        ? 'Такое объявление уже есть на доске — второе создавать не стали, ваше снова вверху списка.'
+        : 'Такое объявление уже отправлено на модерацию — вторую заявку создавать не стали.',
+    });
+  }
 
   // Если объявление ушло на модерацию, тут же шлём его администратору в Telegram
   // с кнопками «Одобрить / Отклонить» (см. notifyAdmins в src/telegram.ts).
   if (listing.status === 'pending') {
+    const similar = res.kind === 'similar' && res.duplicateOf
+      ? { id: res.duplicateOf.id, why: res.why }
+      : null;
     c.executionCtx.waitUntil(
-      notifyAdmins(c.env, listing).catch((e) => console.error('notifyAdmins failed', e))
+      notifyAdmins(c.env, listing, similar).catch((e) => console.error('notifyAdmins failed', e))
     );
   }
 
@@ -207,80 +236,154 @@ app.post('/api/listings/:id/report', async (c) => {
   return c.json({ ok: true, message: res.autoRejected ? 'Объявление скрыто модерацией.' : 'Жалоба принята, спасибо.' });
 });
 
-/* ---------------- Страница объявления для превью (OG) ---------------- */
-/* Мессенджеры (Telegram, WhatsApp, VK и др.) не исполняют JS и не видят
-   hash-роутинг SPA, поэтому для ссылок вида /item/:id отдаём статичный HTML
-   с og-разметкой из базы. Живому человеку страница мгновенно делает
-   redirect на SPA #/item/:id — см. wrangler.toml: run_worker_first. */
+/* ---------------------- Страницы сайта (SSR) ---------------------- */
+/* Доска — SPA, но отдаёт её воркер уже с контентом в HTML: строки на главной,
+   карточка объявления, текстовые разделы. Без этого поисковик видит пустой
+   <div id="list"> и страницы за «#», которых для него не существует. */
 
-app.get('/item/:id', async (c) => {
-  const id = c.req.param('id');
-  const listing = await getListingById(c.env, id);
-  const origin = new URL(c.req.url).origin;
-
-  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
-    return c.redirect('/');
-  }
-  // Отметка «архив» для заявок с прошедшей датой — видна и в превью-ссылке
-  const archived =
-    listing.status === 'expired' ||
-    (listing.departureDate != null && listing.departureDate < mskTodayIso());
-
-  const typeLabel = listing.type === 'offer' ? 'водитель везёт' : 'нужно передать';
-  const title = `${listing.fromCity} → ${listing.toCity} · ${typeLabel}${archived ? ' · архив' : ''}`;
-  const bits = [
-    listing.departureDate ? `выезд ${listing.departureDate}` : null,
-    listing.weightKg != null ? `${String(listing.weightKg).replace('.', ',')} кг` : null,
-    listing.price,
-  ].filter(Boolean).join(' · ');
-  const description = [bits, listing.description.slice(0, 180)].filter(Boolean).join('. ');
-  const image = `${origin}/og/${encodeURIComponent(listing.id)}.png`;
-
-  return c.html(`<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <title>${escapeHtml(title)} — попутка.</title>
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="попутка." />
-  <meta property="og:title" content="${escapeHtml(title)}" />
-  <meta property="og:description" content="${escapeHtml(description)}" />
-  <meta property="og:url" content="${origin}/item/${encodeURIComponent(listing.id)}" />
-  <meta property="og:image" content="${image}" />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${escapeHtml(title)}" />
-  <meta name="twitter:description" content="${escapeHtml(description)}" />
-  <meta name="twitter:image" content="${image}" />
-  <script>location.replace('/#/item/${encodeURIComponent(listing.id)}');</script>
-</head>
-<body style="font-family:Georgia,serif;background:#f2eee5;color:#201d17;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh">
-  <div style="max-width:560px;padding:40px;text-align:center">
-    <div style="font-size:44px;font-weight:700">${escapeHtml(listing.fromCity)} <span style="color:#a43a10">→</span> ${escapeHtml(listing.toCity)}</div>
-    <p style="color:#6f675a">${escapeHtml(description)}</p>
-    <p style="font-size:14px"><a href="/#/item/${encodeURIComponent(listing.id)}" style="color:#201d17">открыть на доске попутка. →</a></p>
-  </div>
-</body>
-</html>`);
+app.get('/', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildHomePage(c.env, origin, new URL(c.req.url));
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
 });
 
-/* ---------------- SEO-страницы маршрутов ---------------- */
-/* Статичные страницы под запросы «передать посылку Варшава → Львов»:
-   текст + живые заявки по маршруту. Список маршрутов — src/seo-routes.ts. */
+/* «Как это работает», бот, условия, приватность, форма, админка */
+for (const path of Object.keys(STATIC_PAGES)) {
+  app.get(path, async (c) => {
+    const origin = siteOrigin(c.env, c.req.url);
+    const page = await buildStaticPage(c.env, origin, path);
+    if (!page) return c.notFound();
+    c.header('Cache-Control', page.cacheControl ?? 'no-store');
+    return c.html(page.html);
+  });
+}
+
+/* Карточка объявления: контент целиком в HTML (раньше — пустышка с мгновенным
+   location.replace на #/item/…), свои title/description/canonical, OG-картинка
+   и JSON-LD. Снятые и непубликованные заявки — честный 404 вместо 302 на главную
+   (soft-404 и утечка ссылочного веса). Просмотр засчитывает API-запрос клиента. */
+app.get('/item/:id', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildItemPage(c.env, origin, c.req.param('id'), {
+    routePath: (from, to) => routePathFor(c.env, from, to),
+    cityPath: (city) => cityPathFor(city),
+  });
+  if (!page) {
+    const nf = await buildNotFoundPage(c.env, origin, 'Объявление снято с доски или удалено: заявки живут месяц после даты выезда, а потом удаляются.');
+    c.status(404);
+    c.header('Cache-Control', nf.cacheControl ?? 'no-store');
+    return c.html(nf.html);
+  }
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
+
+/* Неизвестный адрес: своя страница 404 со ссылками на доску и маршруты,
+   для API — JSON. Дефолтная заглушка Cloudflare человеку ничего не предлагает. */
+app.notFound(async (c) => {
+  if (c.req.path.startsWith('/api/')) return c.json({ error: 'not_found' }, 404);
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildNotFoundPage(c.env, origin);
+  c.status(404);
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
+
+/* ---------------- SEO-страницы: маршруты и города ---------------- */
+/* Страницы под запросы «передать посылку Варшава → Львов»: текст + живые
+   заявки по маршруту. Кроме витрины (src/seo-routes.ts) сюда попадают любые
+   пары городов, где есть хотя бы одна активная заявка, и страницы городов. */
 app.get('/r/:slug', async (c) => {
-  const origin = new URL(c.req.url).origin;
-  const html = await buildRoutePage(c.env, c.req.param('slug'), origin);
-  if (!html) return c.redirect('/');
+  const origin = siteOrigin(c.env, c.req.url);
+  const slug = c.req.param('slug');
+  const html = await buildRoutePage(c.env, slug, origin);
+  if (!html) {
+    // транслитный слаг витринной пары («varshava-keln») — постоянный редирект,
+    // иначе у одного направления два адреса и вес делится пополам
+    const canonical = await resolveRouteAlias(c.env, slug);
+    if (canonical) return c.redirect(`/r/${canonical}`, 301);
+    return c.notFound();
+  }
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
   return c.html(html);
 });
 
-app.get('/routes', (c) => {
-  return c.html(buildRoutesIndexPage(new URL(c.req.url).origin));
+app.get('/routes', async (c) => {
+  const html = await buildRoutesIndexPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
+  return c.html(html);
 });
 
-/* Динамическая карта сайта: главная, страницы маршрутов, активные объявления. */
+app.get('/gorod', async (c) => {
+  const html = await buildCitiesIndexPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
+  return c.html(html);
+});
+
+/* Публичная страница итогов: цифры по месяцам и средние цены по валютам. */
+app.get('/itogi', async (c) => {
+  const page = await buildStatsPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
+
+app.get('/gorod/:slug', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const html = await buildCityPage(c.env, c.req.param('slug'), origin);
+  if (!html) return c.notFound();
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
+  return c.html(html);
+});
+
+/* Карта сайта: /sitemap.xml — индекс из трёх файлов (страницы, маршруты,
+   объявления). Разбивка нужна, потому что объявления меняются каждый час,
+   а витрина маршрутов — раз в день. */
 app.get('/sitemap.xml', async (c) => {
-  const xml = await buildSitemapXml(c.env, new URL(c.req.url).origin);
-  return new Response(xml, { headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+  const xml = await buildSitemapXml(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
+  });
+});
+
+app.get('/sitemap-pages.xml', (c) => {
+  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso());
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
+  });
+});
+
+app.get('/sitemap-routes.xml', async (c) => {
+  const xml = await buildRoutesSitemap(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=1800' },
+  });
+});
+
+app.get('/sitemap-items.xml', async (c) => {
+  const xml = await buildItemsSitemap(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=1800' },
+  });
+});
+
+/* OG-картинка маршрута или города: /og-route/varshava-minsk.png */
+app.get('/og-route/:slug', async (c) => {
+  const slug = (c.req.param('slug') ?? '').replace(/\.png$/, '');
+  const route = await resolveRoute(c.env, slug);
+  const city = route ? null : await resolveCity(c.env, slug);
+  if (!route && !city) return c.redirect('/og-cover.png');
+  try {
+    const png = route
+      ? await renderRouteOg(routeOgSpec(route), c.env)
+      : await renderRouteOg(cityOgSpec(city!.city, city!.stat), c.env);
+    return new Response(png.buffer as ArrayBuffer, {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' },
+    });
+  } catch (e) {
+    console.error('og route render failed', e);
+    return c.redirect('/og-cover.png');
+  }
 });
 
 /* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере
@@ -336,18 +439,64 @@ app.post('/api/admin/listings/:id/status', async (c) => {
   if (!['published', 'rejected', 'expired'].includes(body.status ?? '')) {
     return c.json({ error: 'status должен быть published, rejected или expired' }, 400);
   }
-  const ok = await updateListingStatus(c.env, c.req.param('id'), body.status as 'published' | 'rejected' | 'expired');
+  const id = c.req.param('id');
+  const ok = await updateListingStatus(c.env, id, body.status as 'published' | 'rejected' | 'expired');
   if (!ok) return c.json({ error: 'not_found' }, 404);
-  return c.json({ ok: true });
+
+  // Публикуем — проверим, нет ли уже такой заявки на доске (дубль одобрили по забывчивости)
+  let duplicate: { id: string; why: string } | null = null;
+  if (body.status === 'published') {
+    const listing = await getListingById(c.env, id);
+    if (listing) {
+      const dup = await findDuplicate(c.env, listing).catch(() => null);
+      if (dup && dup.listing.id !== id && dup.listing.status === 'published') {
+        duplicate = { id: dup.listing.id, why: dup.why };
+      }
+    }
+  }
+  return c.json({ ok: true, duplicate });
 });
 
 /* Список заявок для админ-панели: tab=pending (очередь модерации)
    или tab=board (всё, что на доске, включая архив). */
+/** Пометка «похоже на дубль» для очереди модерации. */
+type DuplicateBadge = {
+  id: string;
+  kind: 'duplicate' | 'similar';
+  why: string;
+  status: string;
+  fromCity: string;
+  toCity: string;
+  departureDate: string | null;
+};
+
 app.get('/api/admin/listings', async (c) => {
-  const items = c.req.query('tab') === 'board'
+  const isBoard = c.req.query('tab') === 'board';
+  const items = isBoard
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
-  return c.json({ items });
+
+  // В очереди модерации помечаем повторы: одно и то же объявление пересылают
+  // каждый день, и админ не должен держать в голове, что уже одобрил.
+  if (isBoard) return c.json({ items });
+  const annotated: Array<Record<string, unknown>> = [];
+  for (const l of items.slice(0, 40)) {
+    let badge: DuplicateBadge | null = null;
+    try {
+      const dup = await findDuplicate(c.env, l);
+      if (dup && dup.listing.id !== l.id) {
+        badge = {
+          id: dup.listing.id, kind: dup.kind, why: dup.why, status: dup.listing.status,
+          fromCity: dup.listing.fromCity, toCity: dup.listing.toCity,
+          departureDate: dup.listing.departureDate ?? null,
+        };
+      }
+    } catch (e) {
+      console.error('duplicate check failed', e);
+    }
+    annotated.push({ ...l, duplicate: badge });
+  }
+  return c.json({ items: [...annotated, ...items.slice(40)] });
 });
 
 /* Редактирование заявки — админ-панель сайта. */
@@ -388,19 +537,17 @@ app.put('/api/admin/listings/:id', async (c) => {
   const description = sanitizeText(b.description, 2000, 'description');
   if (!description || description.length < 5) return c.json({ error: 'description обязательна (от 5 символов)' }, 400);
 
-  const telegram = typeof b.telegram === 'string' && b.telegram.trim()
-    ? sanitizeContact(b.telegram.trim())
-    : null;
-  const phone = typeof b.phone === 'string' && b.phone.trim()
-    ? sanitizeContact(b.phone.trim())
-    : null;
-  if (!telegram && !phone) return c.json({ error: 'Нужен хотя бы один контакт: telegram или телефон' }, 400);
+  // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
+  // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
+  const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
 
   const item = await updateListing(c.env, c.req.param('id'), {
     type, fromCity, toCity, departureDate, weightKg, price, description, telegram, phone,
   });
   if (!item) return c.json({ error: 'not_found' }, 404);
-  return c.json({ ok: true, item });
+  // Без контакта сохранить можно (у пересылок от людей со скрытым профилем контакта
+  // и не было) — но предупреждаем: заявку с пустым контактом публиковать смысла нет.
+  return c.json({ ok: true, item, warning: telegram || phone ? null : 'no_contact' });
 });
 
 /* Полное удаление заявки (вместе с жалобами) — админ-панель сайта. */
@@ -465,11 +612,172 @@ app.post('/api/admin/archive', async (c) => {
   return c.json({ ok: true, archived: res.archived, deleted: res.deleted });
 });
 
+/* ------------------------------------------------------------------ */
+/* Повторы: дубликаты, которые уже накопились на доске                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * GET /api/admin/duplicates — группы одинаковых заявок: какую оставить
+ * и какие копии удалить. Защита от дублей не создаёт новые, но до неё
+ * одно и то же объявление успевали одобрить по несколько раз.
+ */
+app.get('/api/admin/duplicates', async (c) => {
+  const includeArchive = c.req.query('archive') === '1';
+  const listings = await listForDuplicateSweep(c.env, { includeArchive });
+  const groups = groupDuplicates(listings).slice(0, 40);
+  return c.json({
+    total: listings.length,
+    extraCount: groups.reduce((n, g) => n + g.duplicates.length, 0),
+    groups: groups.map((g) => ({ why: g.why, keep: g.keep, duplicates: g.duplicates })),
+  });
+});
+
+/** POST /api/admin/duplicates/clean — удалить перечисленные копии ({ ids: [...] }). */
+app.post('/api/admin/duplicates/clean', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { ids?: unknown };
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter((v): v is string => typeof v === 'string').slice(0, 50)
+    : [];
+  if (ids.length === 0) return c.json({ error: 'нужен список id' }, 400);
+  const deleted = await deleteListings(c.env, ids);
+  return c.json({ ok: true, deleted });
+});
+
+/* ------------------------------------------------------------------ */
+/* Подбор пар «водитель везёт» ↔ «нужно передать» + история прогонов     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * POST /api/admin/match — та самая кнопка в админке: сравнить все заявки
+ * (или заявки выбранных городов) и найти пары «водитель ↔ нужно передать».
+ * Каждый прогон сохраняется в историю (match_runs / match_pairs).
+ *
+ * body: { fromCity?, toCity?, days?, includeArchive?, partial?, notify?, note? }
+ */
+app.post('/api/admin/match', async (c) => {
+  const env = c.env;
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const truthy = (v: unknown): boolean => v === true || v === 1 || v === '1' || v === 'true';
+  const fromCity = sanitizeCity(String(body.fromCity ?? ''));
+  const toCity = sanitizeCity(String(body.toCity ?? ''));
+  const days = Math.min(30, Math.max(1, Number(body.days ?? 3) || 3));
+  const includeArchive = truthy(body.includeArchive);
+  const partial = truthy(body.partial);
+  const notify = truthy(body.notify);
+  const note = sanitizeText(String(body.note ?? ''), 300) || null;
+
+  const listings = await listForMatching(env, { includeArchive });
+  const { pairs, stats } = pairListings(listings, {
+    fromCity: fromCity || null,
+    toCity: toCity || null,
+    days,
+    includeArchive,
+    partial,
+    limit: 50,
+  });
+
+  if (notify) {
+    const digest = formatMatchDigest({
+      fromCity: fromCity || null, toCity: toCity || null, days, pairs, stats, siteUrl: env.SITE_URL,
+    });
+    await notifyAdminsDigest(env, digest).catch(() => undefined);
+  }
+
+  const run = await saveMatchRun(env, {
+    fromCity: fromCity || null,
+    toCity: toCity || null,
+    daysWindow: days,
+    includeArchive,
+    partial,
+    offersTotal: stats.offers,
+    requestsTotal: stats.requests,
+    notified: notify,
+    note,
+  }, pairs);
+
+  return c.json({
+    run,
+    stats,
+    pairs: pairs.map((p) => ({
+      score: p.score,
+      reasons: p.reasons,
+      offer: listingSnapshot(p.offer),
+      request: listingSnapshot(p.request),
+    })),
+  });
+});
+
+/** GET /api/admin/match — история прогонов подбора. */
+app.get('/api/admin/match', async (c) => {
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit')) || 30));
+  return c.json({ runs: await listMatchRuns(c.env, limit) });
+});
+
+/* ---------------------- Итоги месяца (статистика) ---------------------- */
+/* Объявления удаляются кроном через 30 дней после выезда, поэтому считаем не
+   по живым строкам, а по снимкам stats_months. Тексты постов собирает
+   src/stats.ts — админ копирует готовый текст и ничего не дописывает руками. */
+
+/**
+ * Снимки месяцев + готовый текст поста на каждый месяц.
+ * Тексты считаем сразу для всех: админка переключает месяцы без лишних запросов.
+ */
+async function statsPayload(env: Env, origin: string) {
+  const months = await listMonthStats(env);
+  const current = currentPeriod();
+  const withPosts = months.map((m) => ({
+    ...m,
+    post: statsPostText(m, { site: origin, month: m.month === current ? 'current' : 'past' }),
+  }));
+  const headline = withPosts.find((m) => m.month === current) ?? withPosts[0] ?? null;
+  return {
+    months: withPosts,
+    currentMonth: current,
+    post: headline?.post ?? null,
+    updatedAt: months[0]?.updatedAt ?? null,
+  };
+}
+
+app.get('/api/admin/stats', async (c) => {
+  const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
+  return c.json(payload);
+});
+
+app.post('/api/admin/stats/refresh', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
+  const res = await refreshStats(c.env, { force: body.force === true });
+  const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
+  return c.json({ ...payload, saved: res.saved, kept: res.kept });
+});
+
+/** GET /api/admin/match/:id — прогон с парами. Пары хранятся снимками заявок,
+ *  поэтому история читается даже после того, как крон почистит архив. */
+app.get('/api/admin/match/:id', async (c) => {
+  const found = await getMatchRun(c.env, c.req.param('id'));
+  if (!found) return c.json({ error: 'not_found' }, 404);
+  return c.json(found);
+});
+
+/** DELETE /api/admin/match/:id — удалить прогон из истории. */
+app.delete('/api/admin/match/:id', async (c) => {
+  const ok = await deleteMatchRun(c.env, c.req.param('id'));
+  if (!ok) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true });
+});
+
 /* Cron: раз в сутки архивируем просроченные заявки и подчищаем старый архив.
    Расписание — [triggers] в wrangler.toml; ручной запуск — POST /api/admin/archive. */
 const worker = {
   fetch: app.fetch,
   scheduled: async (_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> => {
+    // Снимок итогов сохраняем ДО чистки архива: удалённые объявления
+    // не должны «съедать» цифры месяца, который уже закрыт.
+    try {
+      const stats = await refreshStats(env);
+      console.log('refreshStats:', JSON.stringify({ saved: stats.saved, kept: stats.kept.length }));
+    } catch (e) {
+      console.error('refreshStats failed', e);
+    }
     const res = await archiveExpired(env);
     console.log('archiveExpired:', JSON.stringify(res));
   },

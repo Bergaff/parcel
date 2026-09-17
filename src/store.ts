@@ -1,4 +1,9 @@
 import type { Env, ListFilters, Listing, ListingInput, ListingStatus } from './types';
+import type { MatchPair, ListingSnapshot } from './match';
+import { listingSnapshot, parseSnapshot } from './match';
+import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
+import { pickDuplicate } from './dedupe';
+import { normalizeContacts } from './util';
 
 function mapRow(row: Record<string, unknown>): Listing {
   return {
@@ -24,22 +29,31 @@ function mapRow(row: Record<string, unknown>): Listing {
 }
 
 export async function createListing(env: Env, input: ListingInput): Promise<Listing> {
+  // Колонки *_lc должны существовать до записи: на проде миграцию могут
+  // применить позже деплоя, а без них INSERT упадёт.
+  await ensureSearchColumns(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
+  // Единая точка нормализации контактов: номер не должен лежать в поле telegram,
+  // а один и тот же контакт — в обоих полях (иначе дубли в карточке и битая
+  // ссылка t.me/+48… на сайте). Через createListing проходят все источники.
+  const { telegram, phone } = normalizeContacts(input.telegram, input.phone);
   await env.DB.prepare(
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       created_at, published_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       created_at, published_at, from_city_lc, to_city_lc, description_lc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.weightKg ?? null, input.price ?? null,
-      input.description, input.phone ?? null, input.telegram ?? null,
+      input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null, now, publishedAt
+      input.sourceMessageId ?? null, now, publishedAt,
+      // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
+      input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
     .run();
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -53,6 +67,7 @@ export async function listListings(
   env: Env,
   f: ListFilters
 ): Promise<{ items: Listing[]; hasMore: boolean }> {
+  if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   let fullSql = `SELECT * FROM listings${sql}`;
   if (f.type) { fullSql += ' AND type = ?'; params.push(f.type); }
@@ -66,6 +81,17 @@ export async function listListings(
   const rows = (res.results ?? []) as unknown as Array<Record<string, unknown>>;
   const hasMore = rows.length > perPage;
   return { items: rows.slice(0, perPage).map(mapRow), hasMore };
+}
+
+/** Соседние заявки того же маршрута (кроме этой) — блок «Ещё по этому маршруту».
+ *  Один и тот же набор нужен и серверной карточке (src/pages.ts), и API, по
+ *  которому клиент дорисовывает карточку: иначе при переходе кликом с доски
+ *  блок похожих пропадает. */
+export async function relatedListings(env: Env, l: Listing, limit = 5): Promise<Listing[]> {
+  const { items } = await listListings(env, {
+    from: l.fromCity, to: l.toCity, perPage: limit + 1,
+  });
+  return items.filter((x) => x.id !== l.id).slice(0, limit);
 }
 
 export async function getListingById(env: Env, id: string, opts: { hitView?: boolean } = {}): Promise<Listing | null> {
@@ -99,11 +125,12 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
  * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
  */
 export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
-  const pattern = globCi(city);
+  await ensureSearchColumns(env);
+  const pattern = likeContains(city);
   const res = await env.DB.prepare(
     `SELECT * FROM listings
      WHERE status IN ('published', 'expired')
-       AND (from_city GLOB ? OR to_city GLOB ?)
+       AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
      ORDER BY (CASE WHEN status = 'expired' OR departure_date < date('now', '+3 hours') THEN 1 ELSE 0 END),
               COALESCE(published_at, created_at) DESC
@@ -158,15 +185,21 @@ export async function updateListing(
   patch: Partial<Pick<ListingInput,
     'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
 ): Promise<Listing | null> {
+  await ensureSearchColumns(env);
+  // Те же правила, что при создании: контакты без дублей и каждый в своём поле
+  const { telegram, phone } = normalizeContacts(patch.telegram, patch.phone);
   const res = await env.DB.prepare(
     `UPDATE listings SET
        type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
-       price = ?, description = ?, telegram = ?, phone = ?
+       price = ?, description = ?, telegram = ?, phone = ?,
+       from_city_lc = ?, to_city_lc = ?, description_lc = ?
      WHERE id = ?`
   ).bind(
     patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
     patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
-    patch.description ?? '', patch.telegram ?? null, patch.phone ?? null, id
+    patch.description ?? '', telegram, phone,
+    (patch.fromCity ?? '').toLowerCase(), (patch.toCity ?? '').toLowerCase(),
+    (patch.description ?? '').toLowerCase(), id
   ).run();
   if ((res.meta.changes ?? 0) === 0) return null;
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -276,7 +309,12 @@ export async function deleteListing(env: Env, id: string): Promise<boolean> {
 
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
-  if (!listing || listing.status !== 'published') return { ok: false, autoRejected: false, count: 0 };
+  // Жаловаться можно и на архивную заявку: она месяц висит по ссылке, автору
+  // всё ещё пишут. Раньше принимались только 'published' — кнопка на странице
+  // архивной заявки отвечала «не получилось отправить жалобу».
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
+    return { ok: false, autoRejected: false, count: 0 };
+  }
 
   await env.DB.prepare(
     'INSERT INTO reports (id, listing_id, reason, reporter_ip, created_at) VALUES (?, ?, ?, ?, ?)'
@@ -316,19 +354,77 @@ function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
 }
 
-/** Паттерн для GLOB без учёта регистра (SQLite LIKE не сворачивает регистр кириллицы):
- *  каждая буква превращается в класс [аА], спецсимволы GLOB (* ? [ ]) экранируются. */
-function globCi(q: string): string {
-  let out = '';
-  for (const ch of q) {
-    const lo = ch.toLowerCase();
-    const up = ch.toUpperCase();
-    if (ch === ']' ) out += '[]]';
-    else if (ch === '*' || ch === '?' || ch === '[') out += `[${ch}]`;
-    else if (lo !== up) out += `[${lo}${up}]`;
-    else out += ch;
+/**
+ * Поиск по городам и тексту без учёта регистра.
+ *
+ * Раньше здесь был GLOB-шаблон «*[Аа][Мм][Сс]…» — по классу на каждую букву.
+ * SQLite отвергает такие шаблоны целиком: «LIKE or GLOB pattern too complex»,
+ * лимит 10 спецэлементов. То есть доска падала в 500 на любом городе от девяти
+ * букв (Амстердам, Санкт-Петербург, Ивано-Франковск) и на любом поисковом
+ * запросе от девяти символов («лекарства», «документы»). Встроенный lower()
+ * в SQLite знает только ASCII, поэтому нижний регистр храним в колонках *_lc:
+ * их заполняет JS при записи и один раз — SQL при миграции.
+ */
+const CYR_UPPER = 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯІЇЄҐ';
+
+/**
+ * SQL-выражение «нижний регистр, включая кириллицу»: цепочка REPLACE.
+ * Дорого на каждую строку, поэтому используется только в разовом заполнении
+ * колонок (миграция), а не в запросах.
+ */
+export function sqlLowerCyr(expr: string): string {
+  let out = expr;
+  for (const ch of CYR_UPPER) out = `REPLACE(${out}, '${ch}', '${ch.toLowerCase()}')`;
+  return out;
+}
+
+/** Шаблон «содержит» для LIKE: спецсимволы экранированы, регистр свёрнут. */
+export function likeContains(q: string): string {
+  const esc = q.toLowerCase().replace(/[\\%_]/g, (m) => `\\${m}`);
+  return `%${esc}%`;
+}
+
+const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
+
+let searchColumnsReady: Promise<void> | null = null;
+
+/** Сбросить отметку «колонки готовы» (тесты и смена базы). */
+export function resetSearchColumnsCache(): void {
+  searchColumnsReady = null;
+}
+
+/**
+ * Колонки *_lc на месте и заполнены. Вызывается перед любым поиском:
+ * на проде миграцию могут применить позже деплоя, а без колонок запрос
+ * упадёт. Повторно не выполняется — ни в этом isolate, ни по данным.
+ */
+export function ensureSearchColumns(env: Env): Promise<void> {
+  if (!searchColumnsReady) {
+    searchColumnsReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      for (const col of LC_COLUMNS) {
+        if (!names.has(col)) await env.DB.prepare(`ALTER TABLE listings ADD COLUMN ${col} TEXT`).run();
+      }
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_listings_from_lc ON listings(from_city_lc)`
+      ).run();
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_listings_to_lc ON listings(to_city_lc)`
+      ).run();
+      await env.DB.prepare(
+        `UPDATE listings SET
+           from_city_lc = ${sqlLowerCyr(`COALESCE(from_city, '')`)},
+           to_city_lc = ${sqlLowerCyr(`COALESCE(to_city, '')`)},
+           description_lc = ${sqlLowerCyr(`COALESCE(description, '')`)}
+         WHERE from_city_lc IS NULL OR to_city_lc IS NULL OR description_lc IS NULL`
+      ).run();
+    })();
+    searchColumnsReady.catch(() => { searchColumnsReady = null; });
   }
-  return `*${out}*`;
+  return searchColumnsReady;
 }
 
 interface WhereClause { sql: string; params: (string | number)[] }
@@ -349,12 +445,12 @@ function buildWhere(f: ListFilters): WhereClause {
       sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
     }
   }
-  if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
-  if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }
+  if (f.from) { sql += ` AND from_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
+  if (f.to) { sql += ` AND to_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.to)); }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
   if (f.q) {
-    const pattern = globCi(f.q);
-    sql += ' AND (description GLOB ? OR from_city GLOB ? OR to_city GLOB ?)';
+    const pattern = likeContains(f.q);
+    sql += ` AND (description_lc LIKE ? ESCAPE '\\' OR from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')`;
     params.push(pattern, pattern, pattern);
   }
   return { sql, params };
@@ -362,6 +458,7 @@ function buildWhere(f: ListFilters): WhereClause {
 
 /** Количество объявлений по типам с учётом фильтров поиска (без учёта вкладки-типа). */
 export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: number; request: number }> {
+  if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   const res = await env.DB.prepare(
     `SELECT type, COUNT(*) AS n FROM listings${sql} GROUP BY type`
@@ -373,4 +470,536 @@ export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: numb
     if (row.type === 'request') request = Number(row.n ?? 0);
   }
   return { offer, request };
+}
+
+/* ------------------------------------------------------------------ */
+/* Подбор пар «водитель ↔ нужно передать» и история прогонов           */
+/* ------------------------------------------------------------------ */
+
+export interface MatchRun {
+  id: string;
+  createdAt: string;
+  fromCity: string | null;
+  toCity: string | null;
+  daysWindow: number;
+  includeArchive: boolean;
+  partial: boolean;
+  offersTotal: number;
+  requestsTotal: number;
+  pairsFound: number;
+  notified: boolean;
+  note: string | null;
+}
+
+export interface StoredMatchPair {
+  id: string;
+  runId: string;
+  offerId: string;
+  requestId: string;
+  score: number;
+  reason: string | null;
+  offer: ListingSnapshot | null;
+  request: ListingSnapshot | null;
+  createdAt: string;
+}
+
+function mapRun(row: Record<string, unknown>): MatchRun {
+  return {
+    id: String(row.id),
+    createdAt: String(row.created_at),
+    fromCity: row.from_city ? String(row.from_city) : null,
+    toCity: row.to_city ? String(row.to_city) : null,
+    daysWindow: Number(row.days_window ?? 3),
+    includeArchive: Number(row.include_archive ?? 0) === 1,
+    partial: Number(row.partial ?? 0) === 1,
+    offersTotal: Number(row.offers_total ?? 0),
+    requestsTotal: Number(row.requests_total ?? 0),
+    pairsFound: Number(row.pairs_found ?? 0),
+    notified: Number(row.notified ?? 0) === 1,
+    note: row.note ? String(row.note) : null,
+  };
+}
+
+function mapPair(row: Record<string, unknown>): StoredMatchPair {
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    offerId: String(row.offer_id),
+    requestId: String(row.request_id),
+    score: Number(row.score ?? 0),
+    reason: row.reason ? String(row.reason) : null,
+    offer: parseSnapshot(row.offer_json ? String(row.offer_json) : null),
+    request: parseSnapshot(row.request_json ? String(row.request_json) : null),
+    createdAt: String(row.created_at ?? ''),
+  };
+}
+
+/** Разово создать таблицы подбора, если их нет (тот же DDL, что в миграции 0005).
+ *  Идемпотентно — можно звать перед каждым прогоном. */
+export async function ensureMatchTables(env: Env): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS match_runs (
+      id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      from_city TEXT,
+      to_city TEXT,
+      days_window INTEGER NOT NULL DEFAULT 3,
+      include_archive INTEGER NOT NULL DEFAULT 0,
+      partial INTEGER NOT NULL DEFAULT 0,
+      offers_total INTEGER NOT NULL DEFAULT 0,
+      requests_total INTEGER NOT NULL DEFAULT 0,
+      pairs_found INTEGER NOT NULL DEFAULT 0,
+      notified INTEGER NOT NULL DEFAULT 0,
+      note TEXT
+    )`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_runs_created ON match_runs (created_at DESC)'),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS match_pairs (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES match_runs(id) ON DELETE CASCADE,
+      offer_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      score INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      offer_json TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )`),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_pairs_run ON match_pairs (run_id)'),
+    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_match_pairs_offer ON match_pairs (offer_id)'),
+  ]);
+}
+
+/** Заявки для подбора: опубликованные (и, если попросят, архив). Города и даты
+ *  дальше фильтрует src/match.ts — тут только статус и актуальность. */
+export async function listForMatching(
+  env: Env,
+  opts: { includeArchive?: boolean; limit?: number } = {}
+): Promise<Listing[]> {
+  const limit = Math.min(500, Math.max(1, opts.limit ?? 400));
+  const statuses = opts.includeArchive ? "('published', 'expired')" : "('published')";
+  // Без архива берём только будущие даты: заявка со вчерашним выездом уже не полезна
+  const fresh = opts.includeArchive
+    ? ''
+    : "AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ${statuses} ${fresh}
+     ORDER BY (departure_date IS NULL), departure_date ASC, COALESCE(published_at, created_at) DESC
+     LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Сохранить прогон подбора вместе с парами (история). */
+export async function saveMatchRun(
+  env: Env,
+  input: {
+    fromCity: string | null;
+    toCity: string | null;
+    daysWindow: number;
+    includeArchive: boolean;
+    partial: boolean;
+    offersTotal: number;
+    requestsTotal: number;
+    notified: boolean;
+    note?: string | null;
+  },
+  pairs: MatchPair[]
+): Promise<MatchRun> {
+  await ensureMatchTables(env);
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const statements = [
+    env.DB.prepare(
+      `INSERT INTO match_runs
+        (id, created_at, from_city, to_city, days_window, include_archive, partial,
+         offers_total, requests_total, pairs_found, notified, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      id, createdAt, input.fromCity, input.toCity, input.daysWindow,
+      input.includeArchive ? 1 : 0, input.partial ? 1 : 0,
+      input.offersTotal, input.requestsTotal, pairs.length,
+      input.notified ? 1 : 0, input.note ?? null
+    ),
+  ];
+  for (const p of pairs) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO match_pairs
+          (id, run_id, offer_id, request_id, score, reason, offer_json, request_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        crypto.randomUUID(), id, p.offer.id, p.request.id, p.score,
+        p.reasons.join('; ').slice(0, 400),
+        JSON.stringify(listingSnapshot(p.offer)), JSON.stringify(listingSnapshot(p.request)), createdAt
+      )
+    );
+  }
+  // D1 batch ограничен по числу запросов — режем на порции
+  for (let i = 0; i < statements.length; i += 50) {
+    await env.DB.batch(statements.slice(i, i + 50));
+  }
+  return {
+    id, createdAt,
+    fromCity: input.fromCity, toCity: input.toCity, daysWindow: input.daysWindow,
+    includeArchive: input.includeArchive, partial: input.partial,
+    offersTotal: input.offersTotal, requestsTotal: input.requestsTotal,
+    pairsFound: pairs.length, notified: input.notified, note: input.note ?? null,
+  };
+}
+
+export async function listMatchRuns(env: Env, limit = 30): Promise<MatchRun[]> {
+  await ensureMatchTables(env);
+  const res = await env.DB.prepare(
+    'SELECT * FROM match_runs ORDER BY created_at DESC LIMIT ?'
+  ).bind(Math.min(100, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRun);
+}
+
+export async function getMatchRun(
+  env: Env,
+  id: string
+): Promise<{ run: MatchRun; pairs: StoredMatchPair[] } | null> {
+  await ensureMatchTables(env);
+  const row = (await env.DB.prepare('SELECT * FROM match_runs WHERE id = ?').bind(id).first()) as
+    | Record<string, unknown> | null;
+  if (!row) return null;
+  const pairsRes = await env.DB.prepare(
+    'SELECT * FROM match_pairs WHERE run_id = ? ORDER BY score DESC, created_at ASC LIMIT 200'
+  ).bind(id).all();
+  const pairs = ((pairsRes.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapPair);
+  return { run: mapRun(row), pairs };
+}
+
+export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
+  const res = await env.DB.batch([
+    env.DB.prepare('DELETE FROM match_pairs WHERE run_id = ?').bind(id),
+    env.DB.prepare('DELETE FROM match_runs WHERE id = ?').bind(id),
+  ]);
+  return Number(res[1]?.meta.changes ?? 0) > 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Дубликаты: одно и то же объявление, присланное несколько раз         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Кандидаты в дубликаты: тот же тип и дата выезда рядом (±1 день), статус
+ * живой (на модерации, на доске или в архиве). Маршрут, контакты и текст
+ * сравнивает src/dedupe.ts — там города нормализуются, а телефоны сверяются
+ * по последним цифрам, поэтому в SQL эти условия не унести.
+ */
+export async function findDuplicateCandidates(env: Env, input: DedupeSubject): Promise<Listing[]> {
+  const date = input.departureDate ?? null;
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+      WHERE status IN ('pending', 'published', 'expired')
+        AND type = ?
+        AND (? IS NULL OR departure_date IS NULL
+             OR ABS(julianday(departure_date) - julianday(?)) <= 1)
+      ORDER BY (status = 'published') DESC, COALESCE(published_at, created_at) DESC
+      LIMIT 200`
+  ).bind(input.type, date, date).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/**
+ * Есть ли уже такая заявка: 'duplicate' — уверенно та же (не создаём вторую),
+ * 'similar' — похожая (создаём, но модератора предупредим).
+ */
+export async function findDuplicate(
+  env: Env,
+  input: DedupeSubject
+): Promise<DuplicateHit<Listing> | null> {
+  const candidates = await findDuplicateCandidates(env, input);
+  return pickDuplicate(candidates, input);
+}
+
+/**
+ * Освежить существующую заявку вместо создания дубля: published поднимается
+ * наверх доски (повторное «еду 20 сентября» снова свежее), pending остаётся
+ * в очереди модерации, архив не трогаем — его вернул туда модератор или дата.
+ */
+export async function touchListing(env: Env, id: string): Promise<Listing | null> {
+  const listing = await getListingById(env, id);
+  if (!listing) return null;
+  if (listing.status === 'published') {
+    await env.DB.prepare(
+      "UPDATE listings SET published_at = datetime('now') WHERE id = ?"
+    ).bind(id).run();
+  }
+  return getListingById(env, id);
+}
+
+/**
+ * Создать заявку, но не плодить дубликаты: если такая уже есть — вернуть её
+ * (и освежить, если она на доске). Через неё идут все источники: пересылки,
+ * сообщения в чатах, мастер /post и форма на сайте.
+ */
+export async function createListingSafe(
+  env: Env,
+  input: ListingInput,
+  opts: { force?: boolean } = {}
+): Promise<{
+  listing: Listing;
+  created: boolean;
+  duplicateOf: Listing | null;
+  kind: DuplicateKind | null;
+  why: string;
+}> {
+  const hit = await findDuplicate(env, input);
+  // force — заявку создаём в любом случае (например, /post человек заполнил сам),
+  // но сведения о дубле возвращаем: модератор увидит предупреждение.
+  if (hit && hit.kind === 'duplicate' && !opts.force) {
+    const refreshed = await touchListing(env, hit.listing.id);
+    const listing = refreshed ?? hit.listing;
+    return { listing, created: false, duplicateOf: listing, kind: 'duplicate', why: hit.why };
+  }
+  const listing = await createListing(env, input);
+  return {
+    listing,
+    created: true,
+    duplicateOf: hit ? hit.listing : null,
+    kind: hit ? hit.kind : null,
+    why: hit ? hit.why : '',
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Разбор накопившихся дублей                                          */
+/* ------------------------------------------------------------------ */
+
+/** Все живые заявки — для поиска дублей, которые накопились до защиты. */
+export async function listForDuplicateSweep(
+  env: Env,
+  opts: { includeArchive?: boolean; limit?: number } = {}
+): Promise<Listing[]> {
+  const limit = Math.min(500, Math.max(1, opts.limit ?? 500));
+  const statuses = opts.includeArchive
+    ? "('pending', 'published', 'expired')"
+    : "('pending', 'published')";
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings WHERE status IN ${statuses}
+     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
+/** Удалить несколько заявок разом (чистка дублей). */
+export async function deleteListings(env: Env, ids: string[]): Promise<number> {
+  let deleted = 0;
+  for (const id of ids) {
+    if (await deleteListing(env, id)) deleted++;
+  }
+  return deleted;
+}
+
+/* ------------------------------------------------------------------ */
+/* Для SEO-страниц: пары городов, города, ссылки для sitemap            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Что вообще видно на сайте: опубликованные заявки с не прошедшей датой
+ * и архив (месяц после даты выезда, потом cron удаляет). Тот же набор,
+ * что показывают доска и /api/listings — иначе страницы маршрутов
+ * появлялись бы и исчезали каждый день.
+ */
+const VISIBLE_WHERE = `(
+    (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')))
+    OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-30 days'))
+  )`;
+
+/** Активная заявка: на доске прямо сейчас (не архив). */
+const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')) THEN 1 ELSE 0 END`;
+
+export interface RoutePair {
+  fromCity: string;
+  toCity: string;
+  /** сколько заявок видно на сайте (активные + архив месяца) */
+  total: number;
+  /** сколько из них на доске прямо сейчас */
+  active: number;
+  /** когда последний раз публиковали — для lastmod в sitemap */
+  lastmod: string;
+}
+
+/**
+ * Пары городов, которые реально встречаются в заявках.
+ * Страница маршрута создаётся, только если есть хотя бы одна активная заявка:
+ * пустые страницы — это тонкий контент, который поисковик не любит.
+ */
+export async function listRoutePairs(env: Env, limit = 500): Promise<RoutePair[]> {
+  const res = await env.DB.prepare(
+    `SELECT from_city, to_city,
+            COUNT(*) AS total,
+            SUM(${ACTIVE_EXPR}) AS active,
+            MAX(COALESCE(published_at, created_at)) AS lastmod
+       FROM listings
+      WHERE ${VISIBLE_WHERE}
+      GROUP BY from_city, to_city
+     HAVING active >= 1
+      ORDER BY active DESC, total DESC, from_city
+      LIMIT ?`
+  ).bind(Math.min(1000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    fromCity: String(r.from_city),
+    toCity: String(r.to_city),
+    total: Number(r.total ?? 0),
+    active: Number(r.active ?? 0),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
+
+export interface CityStat {
+  city: string;
+  /** заявок, где город — точка отправления или назначения */
+  count: number;
+  active: number;
+  lastmod: string;
+}
+
+/** Города, которые встречаются в заявках (откуда или куда). */
+export async function listCityStats(env: Env, limit = 300): Promise<CityStat[]> {
+  const res = await env.DB.prepare(
+    `SELECT city, COUNT(*) AS count, SUM(active) AS active, MAX(lastmod) AS lastmod
+       FROM (
+         SELECT from_city AS city, ${ACTIVE_EXPR} AS active, COALESCE(published_at, created_at) AS lastmod
+           FROM listings WHERE ${VISIBLE_WHERE}
+         UNION ALL
+         SELECT to_city AS city, ${ACTIVE_EXPR} AS active, COALESCE(published_at, created_at) AS lastmod
+           FROM listings WHERE ${VISIBLE_WHERE}
+       )
+      GROUP BY city
+      ORDER BY active DESC, count DESC, city
+      LIMIT ?`
+  ).bind(Math.min(1000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    city: String(r.city),
+    count: Number(r.count ?? 0),
+    active: Number(r.active ?? 0),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
+
+export interface SitemapItem {
+  id: string;
+  lastmod: string;
+}
+
+/** Объявления для sitemap: те же, что видны на сайте, последними изменениями вперёд. */
+export async function listSitemapItems(env: Env, limit = 5000): Promise<SitemapItem[]> {
+  const res = await env.DB.prepare(
+    `SELECT id, COALESCE(published_at, created_at) AS lastmod
+       FROM listings
+      WHERE ${VISIBLE_WHERE}
+      ORDER BY lastmod DESC
+      LIMIT ?`
+  ).bind(Math.min(20000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Статистика по месяцам: исходные строки и снимки итогов              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Месяц объявления — когда оно попало на доску (published_at), а не когда
+ * было создано черновиком. Считаем только то, что реально публиковали:
+ * снятые за фейк «rejected» в итоги не идут.
+ */
+const MONTH_EXPR = `strftime('%Y-%m', COALESCE(published_at, created_at))`;
+
+/** Таблица снимков: итоги месяца переживают удаление самих объявлений. */
+export async function ensureStatsTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS stats_months (
+       month TEXT PRIMARY KEY,
+       total INTEGER NOT NULL DEFAULT 0,
+       payload TEXT NOT NULL DEFAULT '{}',
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run();
+}
+
+export interface MonthRow {
+  id: string;
+  type: 'offer' | 'request';
+  fromCity: string;
+  toCity: string;
+  price: string | null;
+  source: string | null;
+}
+
+/** Объявления месяца — сырьё для подсчёта (цена как написана человеком). */
+export async function listMonthRows(env: Env, month: string): Promise<MonthRow[]> {
+  const res = await env.DB.prepare(
+    `SELECT id, type, from_city, to_city, price, source
+       FROM listings
+      WHERE status IN ('published', 'expired')
+        AND ${MONTH_EXPR} = ?
+      ORDER BY COALESCE(published_at, created_at)`
+  ).bind(month).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    type: r.type === 'request' ? 'request' : 'offer',
+    fromCity: String(r.from_city ?? ''),
+    toCity: String(r.to_city ?? ''),
+    price: r.price == null ? null : String(r.price),
+    source: r.source == null ? null : String(r.source),
+  }));
+}
+
+/** В каких месяцах есть опубликованные объявления. */
+export async function listMonthsPresent(env: Env): Promise<string[]> {
+  const res = await env.DB.prepare(
+    `SELECT DISTINCT ${MONTH_EXPR} AS month
+       FROM listings
+      WHERE status IN ('published', 'expired')
+      ORDER BY month DESC
+      LIMIT 60`
+  ).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => String(r.month))
+    .filter((m) => /^\d{4}-\d{2}$/.test(m));
+}
+
+export interface StatsSnapshot {
+  month: string;
+  total: number;
+  /** итог месяца целиком (см. MonthStat в src/stats.ts) */
+  payload: string;
+  updatedAt: string;
+}
+
+/** Все сохранённые итоги, свежими вперёд. */
+export async function loadStatsSnapshots(env: Env): Promise<StatsSnapshot[]> {
+  await ensureStatsTable(env);
+  const res = await env.DB.prepare(
+    `SELECT month, total, payload, updated_at FROM stats_months ORDER BY month DESC LIMIT 60`
+  ).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    month: String(r.month),
+    total: Number(r.total ?? 0),
+    payload: String(r.payload ?? '{}'),
+    updatedAt: String(r.updated_at ?? ''),
+  }));
+}
+
+/** Сохранить итог месяца. */
+export async function saveStatsSnapshot(env: Env, month: string, total: number, payload: unknown): Promise<void> {
+  await ensureStatsTable(env);
+  await env.DB.prepare(
+    `INSERT INTO stats_months (month, total, payload, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(month) DO UPDATE SET
+       total = excluded.total,
+       payload = excluded.payload,
+       updated_at = excluded.updated_at`
+  ).bind(month, total, JSON.stringify(payload)).run();
 }

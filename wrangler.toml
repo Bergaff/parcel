@@ -21,15 +21,40 @@ AUTO_APPROVE = "0"                          # "1" — публиковать о�
 BOT_USERNAME = "parcel_transfer_bot"        # юзернейм бота без @
 SITE_URL = "https://pop-utka.app"           # основной домен сайта (custom domain воркера)
 
-# Статика: воркер дополнительно раздаёт сайт на своём домене
-# (основной сайт живёт на Pages, друг другу не мешает).
-# /item/* и /og/* всегда идут в воркер: страница с og-разметкой и
-# динамическая OG-картинка объявления для превью в мессенджерах.
+# Статика раздаётся из public/, но все страницы сайта сначала идут в воркер:
+# он подставляет в index.html контент (объявления на главной, карточку, meta-теги
+# и JSON-LD) — иначе поисковик видит пустой <div id="list"> и не индексирует
+# разделы. Файлы (css, js, картинки, шрифты) отдаёт сам биндинг ASSETS.
 [assets]
 directory = "./public"
 not_found_handling = "404-page"
 binding = "ASSETS"
-run_worker_first = ["/item/*", "/og/*", "/og-debug/*", "/r/*", "/routes", "/sitemap.xml"]
+# Важно: /api/* обязательно здесь. Как только в public/ появляется 404.html,
+# assets-слой начинает отвечать им на любой неизвестный путь вместо воркера
+# (not_found_handling = "404-page") — без этой строчки API «пропадает».
+run_worker_first = [
+  "/api/*",
+  "/",
+  "/item/*",
+  "/how",
+  "/bot",
+  "/terms",
+  "/privacy",
+  "/new",
+  "/admin",
+  "/r/*",
+  "/gorod",
+  "/gorod/*",
+  "/routes",
+  "/itogi",
+  "/sitemap.xml",
+  "/sitemap-pages.xml",
+  "/sitemap-routes.xml",
+  "/sitemap-items.xml",
+  "/og/*",
+  "/og-debug/*",
+  "/og-route/*",
+]
 
 # База объявлений.
 [[d1_databases]]
