@@ -123,6 +123,8 @@ export interface DetailOptions {
   origin: string;
   /** ссылка на страницу маршрута, если она есть */
   routePath?: string | null;
+  /** страница города отправления — второй уровень хлебных крошек */
+  cityPath?: string | null;
   chatLinks?: Record<string, string>;
   /** соседние заявки того же маршрута */
   related?: Listing[];
@@ -153,6 +155,8 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
 
   const crumbs = [
     '<a href="/">Доска</a>',
+    // порядок тот же, что в JSON-LD BreadcrumbList: доска → город → маршрут → объявление
+    opts.cityPath ? `<a href="${escapeHtml(opts.cityPath)}">${escapeHtml(l.fromCity)}</a>` : null,
     opts.routePath ? `<a href="${escapeHtml(opts.routePath)}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>` : null,
     `<span>№ ${escapeHtml(l.id.slice(0, 8))}</span>`,
   ].filter(Boolean).join(' <span class="crumb-sep">›</span> ');

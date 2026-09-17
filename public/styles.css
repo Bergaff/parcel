@@ -572,3 +572,82 @@ button { font-family: inherit; }
 }
 .crumbs a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .crumb-sep { color: var(--line-strong); }
+
+/* ---------- Итоги месяца: цифры и таблицы статистики ---------- */
+.stats-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 26px 0 6px;
+}
+.stats-fig {
+  border: 1.5px solid var(--ink);
+  background: var(--paper);
+  padding: 14px 16px;
+}
+.stats-fig b {
+  display: block;
+  font-family: var(--serif, Georgia, 'Times New Roman', serif);
+  font-size: 34px;
+  line-height: 1.1;
+  letter-spacing: -0.5px;
+}
+.stats-fig span { display: block; font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 6px;
+  font-size: 15px;
+}
+.stats-table thead th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 12.5px;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1.5px solid var(--ink);
+  padding: 6px 10px 6px 0;
+}
+.stats-table tbody th {
+  text-align: left;
+  font-weight: 500;
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.stats-table tbody td {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+.stats-table tbody tr:last-child th,
+.stats-table tbody tr:last-child td { border-bottom: none; }
+.stats-table-wide { font-size: 14px; }
+@media (max-width: 640px) {
+  .stats-table thead th:nth-child(3),
+  .stats-table tbody td:nth-child(3) { display: none; }
+  .stats-table-wide { font-size: 13px; }
+  .stats-fig b { font-size: 28px; }
+}
+
+/* ---------- Админка: вкладка «итоги» ---------- */
+.stats-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 4px 0 16px; }
+.stats-month {
+  font: inherit;
+  padding: 7px 10px;
+  border: 1.5px solid var(--ink);
+  background: var(--paper);
+  color: var(--ink);
+}
+.stats-post {
+  width: 100%;
+  font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 12px 14px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--paper);
+  color: var(--ink);
+  resize: vertical;
+  white-space: pre-wrap;
+}
+.admin-hint { font-size: 13px; color: var(--muted); margin: 10px 0 0; }

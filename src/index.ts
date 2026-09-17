@@ -12,7 +12,9 @@ import {
   buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
   cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
 } from './seo-routes';
-import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, siteOrigin, STATIC_PAGES } from './pages';
+import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, siteOrigin, STATIC_PAGES } from './pages';
+import { currentPeriod } from './format';
+import { listMonthStats, refreshStats, statsPostText } from './stats';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -310,6 +312,13 @@ app.get('/gorod', async (c) => {
   const html = await buildCitiesIndexPage(c.env, siteOrigin(c.env, c.req.url));
   c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
   return c.html(html);
+});
+
+/* Публичная страница итогов: цифры по месяцам и средние цены по валютам. */
+app.get('/itogi', async (c) => {
+  const page = await buildStatsPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
 });
 
 app.get('/gorod/:slug', async (c) => {
@@ -697,6 +706,43 @@ app.get('/api/admin/match', async (c) => {
   return c.json({ runs: await listMatchRuns(c.env, limit) });
 });
 
+/* ---------------------- Итоги месяца (статистика) ---------------------- */
+/* Объявления удаляются кроном через 30 дней после выезда, поэтому считаем не
+   по живым строкам, а по снимкам stats_months. Тексты постов собирает
+   src/stats.ts — админ копирует готовый текст и ничего не дописывает руками. */
+
+/**
+ * Снимки месяцев + готовый текст поста на каждый месяц.
+ * Тексты считаем сразу для всех: админка переключает месяцы без лишних запросов.
+ */
+async function statsPayload(env: Env, origin: string) {
+  const months = await listMonthStats(env);
+  const current = currentPeriod();
+  const withPosts = months.map((m) => ({
+    ...m,
+    post: statsPostText(m, { site: origin, month: m.month === current ? 'current' : 'past' }),
+  }));
+  const headline = withPosts.find((m) => m.month === current) ?? withPosts[0] ?? null;
+  return {
+    months: withPosts,
+    currentMonth: current,
+    post: headline?.post ?? null,
+    updatedAt: months[0]?.updatedAt ?? null,
+  };
+}
+
+app.get('/api/admin/stats', async (c) => {
+  const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
+  return c.json(payload);
+});
+
+app.post('/api/admin/stats/refresh', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
+  const res = await refreshStats(c.env, { force: body.force === true });
+  const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
+  return c.json({ ...payload, saved: res.saved, kept: res.kept });
+});
+
 /** GET /api/admin/match/:id — прогон с парами. Пары хранятся снимками заявок,
  *  поэтому история читается даже после того, как крон почистит архив. */
 app.get('/api/admin/match/:id', async (c) => {
@@ -717,6 +763,14 @@ app.delete('/api/admin/match/:id', async (c) => {
 const worker = {
   fetch: app.fetch,
   scheduled: async (_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> => {
+    // Снимок итогов сохраняем ДО чистки архива: удалённые объявления
+    // не должны «съедать» цифры месяца, который уже закрыт.
+    try {
+      const stats = await refreshStats(env);
+      console.log('refreshStats:', JSON.stringify({ saved: stats.saved, kept: stats.kept.length }));
+    } catch (e) {
+      console.error('refreshStats failed', e);
+    }
     const res = await archiveExpired(env);
     console.log('archiveExpired:', JSON.stringify(res));
   },

@@ -10,6 +10,8 @@ import {
   normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
 } from './util';
 import { aiExtractListing, type AiFields } from './ai';
+import { currentPeriod, fmtPeriod } from './format';
+import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './stats';
 
 /* ------------------------------------------------------------------ */
 /* Минимальные типы Telegram Bot API (без внешних SDK)                  */
@@ -528,8 +530,60 @@ async function cmdMatch(env: Env, msg: TgMessage, args: string): Promise<void> {
     const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
     await sendText(env, chatId,
       `Прогон № ${run.id.slice(0, 8)} сохранён в истории` +
-      (site ? ` — открыть в <a href="${site}/#/admin">админке</a>, вкладка «подбор».` : ' — вкладка «подбор» в админке.')
+      (site ? ` — открыть в <a href="${site}/admin">админке</a>, вкладка «подбор».` : ' — вкладка «подбор» в админке.')
     ).catch(() => undefined);
+  }
+}
+
+/**
+ * /статистика — итоги месяца готовым текстом для поста в канал.
+ *
+ * Админ просил «чтобы можно было просто скопировать и опубликовать», поэтому
+ * текст приходит одним блоком <pre>: в Telegram он копируется без разметки.
+ * Аргументы: «прошлый» — последний закрытый месяц, «force» — пересчитать всё.
+ */
+async function cmdStats(env: Env, msg: TgMessage, args: string): Promise<void> {
+  const chatId = msg.chat.id;
+  if (!admins(env).includes(String(msg.from?.id))) {
+    await sendText(env, chatId, 'Статистика — команда администратора.');
+    return;
+  }
+  const lower = args.toLowerCase();
+  const force = /force|полн|пересчит|заново/.test(lower);
+  const wantClosed = /прошл|предыд|закрыт|prev|last/.test(lower);
+
+  await sendText(env, chatId, '📊 Считаю итоги…').catch(() => undefined);
+
+  const res = await refreshStats(env, { force }).catch((e) => {
+    console.error('refreshStats failed', e);
+    return null;
+  });
+  const months = res?.months ?? (await listMonthStats(env).catch(() => [] as MonthStat[]));
+  if (months.length === 0) {
+    await sendText(env, chatId, 'Пока считать нечего: на доске не было опубликованных объявлений.');
+    return;
+  }
+
+  const current = currentPeriod();
+  const stat = wantClosed
+    ? months.find((m) => m.month !== current) ?? months[0]!
+    : months[0]!;
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const post = statsPostText(stat, { site: site || undefined, month: stat.month === current ? 'current' : 'past' });
+
+  // <pre> не режем по абзацам: иначе теги разъедутся. Длинный текст — без блока.
+  const body = post.length < 3500 ? `<pre>${escapeHtml(post)}</pre>` : escapeHtml(post);
+  const head = `📊 ${fmtPeriod(stat.month)}${stat.month === current ? ' (месяц ещё идёт)' : ''}: `
+    + `${stat.total} объявлений, ${stat.offers} «везут» и ${stat.requests} «нужно передать». `
+    + 'Текст ниже готов к публикации — копируйте как есть.';
+  await sendText(env, chatId, `${head}\n\n${body}`).catch(() => undefined);
+
+  const notes: string[] = [];
+  if (res) notes.push(`пересчитано месяцев: ${res.saved.length || 'ничего нового'}`);
+  if (months.length > 1) notes.push(`всего месяцев в истории: ${months.length}`);
+  if (site) notes.push(`публичная страница: ${site}/itogi`);
+  if (notes.length) {
+    await sendText(env, chatId, notes.map((n) => `• ${escapeHtml(n)}`).join('\n')).catch(() => undefined);
   }
 }
 
@@ -760,6 +814,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/репорт</b>: пожаловаться на объявление (номер или ссылка) или на что угодно другое\n` +
           `• <b>/связи номер</b>: встречные рейсы и похожие заявки — полезно владельцам чатов\n` +
           `• <b>/подбор</b> (для администратора): найти пары «водитель везёт» ↔ «нужно передать»; можно сузить городами и окном по датам: <code>/подбор Варшава Минск 7 дней</code>\n` +
+          `• <b>/статистика</b> (для администратора): итоги месяца — сколько объявлений, какие направления и средняя цена; текст готов к публикации в канале\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
@@ -842,6 +897,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/пары':
       case '/podbor': {
         await cmdMatch(env, msg, text.split(/\s+/).slice(1).join(' '));
+        break;
+      }
+      case '/статистика':
+      case '/стата':
+      case '/итоги':
+      case '/stats': {
+        await cmdStats(env, msg, text.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:
@@ -1171,7 +1233,7 @@ export async function notifyAdmins(
   // У пересылок от людей со скрытым профилем контакта не бывает: модератор
   // дописывает его вручную в админке — даём ссылку прямо в карточке.
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
-  const editLink = site ? `, дописать в <a href="${site}/#/admin">админке</a>` : ' — допишите вручную в админке';
+  const editLink = site ? `, дописать в <a href="${site}/admin">админке</a>` : ' — допишите вручную в админке';
   const noContact = uniqueContacts(listing.telegram, listing.phone).length === 0
     ? `\n<i>⚠ Контакта нет (автор пересылки мог скрыть профиль)${editLink}</i>`
     : '';

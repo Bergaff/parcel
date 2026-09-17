@@ -51,6 +51,14 @@ export function fmtPeriod(period: string): string {
   return month ? `${month} ${m[1]}` : period;
 }
 
+/** '2026-09' → 'сентября 2026' («итоги сентября», родительный падеж). */
+export function fmtPeriodGen(period: string): string {
+  const m = /^(20\d\d)-(\d\d)$/.exec(period);
+  if (!m) return period;
+  const month = MONTHS_GEN[Number(m[2]) - 1];
+  return month ? `${month} ${m[1]}` : period;
+}
+
 /** '2026-09' → 'в сентябре 2026' (текст сводки). */
 export function fmtPeriodIn(period: string): string {
   const m = /^(20\d\d)-(\d\d)$/.exec(period);

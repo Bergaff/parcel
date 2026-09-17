@@ -821,3 +821,104 @@ export async function listSitemapItems(env: Env, limit = 5000): Promise<SitemapI
     lastmod: String(r.lastmod ?? '').slice(0, 10),
   }));
 }
+
+/* ------------------------------------------------------------------ */
+/* Статистика по месяцам: исходные строки и снимки итогов              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Месяц объявления — когда оно попало на доску (published_at), а не когда
+ * было создано черновиком. Считаем только то, что реально публиковали:
+ * снятые за фейк «rejected» в итоги не идут.
+ */
+const MONTH_EXPR = `strftime('%Y-%m', COALESCE(published_at, created_at))`;
+
+/** Таблица снимков: итоги месяца переживают удаление самих объявлений. */
+export async function ensureStatsTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS stats_months (
+       month TEXT PRIMARY KEY,
+       total INTEGER NOT NULL DEFAULT 0,
+       payload TEXT NOT NULL DEFAULT '{}',
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run();
+}
+
+export interface MonthRow {
+  id: string;
+  type: 'offer' | 'request';
+  fromCity: string;
+  toCity: string;
+  price: string | null;
+  source: string | null;
+}
+
+/** Объявления месяца — сырьё для подсчёта (цена как написана человеком). */
+export async function listMonthRows(env: Env, month: string): Promise<MonthRow[]> {
+  const res = await env.DB.prepare(
+    `SELECT id, type, from_city, to_city, price, source
+       FROM listings
+      WHERE status IN ('published', 'expired')
+        AND ${MONTH_EXPR} = ?
+      ORDER BY COALESCE(published_at, created_at)`
+  ).bind(month).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    type: r.type === 'request' ? 'request' : 'offer',
+    fromCity: String(r.from_city ?? ''),
+    toCity: String(r.to_city ?? ''),
+    price: r.price == null ? null : String(r.price),
+    source: r.source == null ? null : String(r.source),
+  }));
+}
+
+/** В каких месяцах есть опубликованные объявления. */
+export async function listMonthsPresent(env: Env): Promise<string[]> {
+  const res = await env.DB.prepare(
+    `SELECT DISTINCT ${MONTH_EXPR} AS month
+       FROM listings
+      WHERE status IN ('published', 'expired')
+      ORDER BY month DESC
+      LIMIT 60`
+  ).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => String(r.month))
+    .filter((m) => /^\d{4}-\d{2}$/.test(m));
+}
+
+export interface StatsSnapshot {
+  month: string;
+  total: number;
+  /** итог месяца целиком (см. MonthStat в src/stats.ts) */
+  payload: string;
+  updatedAt: string;
+}
+
+/** Все сохранённые итоги, свежими вперёд. */
+export async function loadStatsSnapshots(env: Env): Promise<StatsSnapshot[]> {
+  await ensureStatsTable(env);
+  const res = await env.DB.prepare(
+    `SELECT month, total, payload, updated_at FROM stats_months ORDER BY month DESC LIMIT 60`
+  ).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    month: String(r.month),
+    total: Number(r.total ?? 0),
+    payload: String(r.payload ?? '{}'),
+    updatedAt: String(r.updated_at ?? ''),
+  }));
+}
+
+/** Сохранить итог месяца. */
+export async function saveStatsSnapshot(env: Env, month: string, total: number, payload: unknown): Promise<void> {
+  await ensureStatsTable(env);
+  await env.DB.prepare(
+    `INSERT INTO stats_months (month, total, payload, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(month) DO UPDATE SET
+       total = excluded.total,
+       payload = excluded.payload,
+       updated_at = excluded.updated_at`
+  ).bind(month, total, JSON.stringify(payload)).run();
+}

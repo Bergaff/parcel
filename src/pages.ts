@@ -14,6 +14,10 @@ import { escapeHtml } from './util';
 import { plural, fmtDayShort } from './format';
 import { breadcrumbsLd, itemListLd, listingLd, webSiteLd, faqPageLd, SITE_NAME } from './seo';
 import { isArchived, renderDetailHtml, renderRowsHtml, renderShell, readShellTemplate, type View } from './ssr';
+import { seoPageShell, routePathFor } from './seo-routes';
+import { listMonthStats, refreshStats, type MonthStat } from './stats';
+import { fmtAmount, CURRENCY_LABEL } from './price';
+import { fmtPeriod } from './format';
 
 export interface PageResult {
   html: string;
@@ -276,7 +280,7 @@ export async function buildItemPage(
     robots: archived ? 'noindex, follow' : undefined,
     image: `${origin}/og/${encodeURIComponent(listing.id)}.png`,
     imageAlt: `${listing.fromCity} → ${listing.toCity}: ${listing.type === 'offer' ? 'водитель везёт' : 'нужно передать'}`,
-    detailHtml: renderDetailHtml(listing, { origin, routePath, chatLinks, related }),
+    detailHtml: renderDetailHtml(listing, { origin, routePath, cityPath: cityFromPath, chatLinks, related }),
     detailData: listing,
     jsonLd: [
       breadcrumbsLd(origin, [
@@ -315,6 +319,138 @@ export async function buildNotFoundPage(env: Env, origin: string, message?: stri
     .replace('<!--404_MESSAGE-->', message ? `<p class="empty-note">${escapeHtml(message)}</p>` : '')
     .replace(/<!--404_CANONICAL-->/g, origin);
   return { html: page, status: 404, cacheControl: 'public, max-age=0, s-maxage=60' };
+}
+
+/* ------------------------------------------------------------------ */
+/* Итоги месяца                                                        */
+/* ------------------------------------------------------------------ */
+
+/** Есть ли у пары городов SEO-страница — ссылка в топе направлений. */
+async function routePath(env: Env, from: string, to: string): Promise<string | null> {
+  try {
+    return await routePathFor(env, from, to);
+  } catch {
+    return null;
+  }
+}
+
+/** Строка таблицы цен: валюта, среднее, разброс, сколько объявлений. */
+function priceRowsHtml(stat: MonthStat): string {
+  if (stat.prices.length === 0) {
+    return `<p class="empty-note">В этом месяце цену почти никто не писал — договаривались в переписке.</p>`;
+  }
+  const rows = stat.prices.map((b) => `        <tr>
+          <th scope="row">${escapeHtml(CURRENCY_LABEL[b.currency])}</th>
+          <td class="mono">${escapeHtml(fmtAmount(b.avg))}</td>
+          <td class="mono">${b.min === b.max ? '—' : `${escapeHtml(fmtAmount(b.min))}–${escapeHtml(fmtAmount(b.max))}`}</td>
+          <td class="mono">${b.count}</td>
+        </tr>`).join('\n');
+  const tails: string[] = [];
+  if (stat.free > 0) tails.push(`${stat.free} ${plural(stat.free, 'человек предложил', 'человека предложили', 'человек предложили')} передать бесплатно`);
+  const without = stat.total - stat.priced - stat.free;
+  if (without > 0) tails.push(`${without} ${plural(without, 'объявление', 'объявления', 'объявлений')} без цены`);
+  return `<table class="stats-table">
+      <thead>
+        <tr><th>валюта</th><th>средняя цена</th><th>от и до</th><th>объявлений</th></tr>
+      </thead>
+      <tbody>
+${rows}
+      </tbody>
+    </table>
+    ${tails.length ? `<p class="foot-note">Ещё ${escapeHtml(tails.join(', '))}. Среднее считаем отдельно по каждой валюте: смешивать евро с рублями было бы бессмыслицей.</p>` : ''}`;
+}
+
+/** Строка сводной таблицы прошлых месяцев. */
+function monthRowHtml(stat: MonthStat): string {
+  const main = stat.prices.find((b) => b.currency !== 'none');
+  const price = main ? `${fmtAmount(main.avg)} ${main.currency}` : (stat.prices.length ? 'без валюты' : '—');
+  return `        <tr>
+          <th scope="row">${escapeHtml(fmtPeriod(stat.month))}</th>
+          <td class="mono">${stat.total}</td>
+          <td class="mono">${stat.offers}</td>
+          <td class="mono">${stat.requests}</td>
+          <td class="mono">${stat.cities}</td>
+          <td class="mono">${escapeHtml(price)}</td>
+        </tr>`;
+}
+
+/**
+ * Публичная страница итогов /itogi: цифры по месяцам и средние цены.
+ *
+ * Объявления живут на доске месяц после выезда, а потом удаляются кроном —
+ * поэтому берём не живые строки, а снимки stats_months (см. src/stats.ts).
+ * Если снимков ещё нет (первый запуск), считаем и сохраняем на месте.
+ */
+export async function buildStatsPage(env: Env, origin: string): Promise<PageResult> {
+  let months = await listMonthStats(env);
+  if (months.length === 0) {
+    await refreshStats(env).catch((e) => console.error('stats refresh failed', e));
+    months = await listMonthStats(env);
+  }
+  const current = months[0];
+
+  let body: string;
+  if (!current) {
+    body = `    <p class="doc-date">цифры доски</p>
+    <h1 class="page-title">Итоги месяца</h1>
+    <p class="lead">Пока считать нечего: на доске не было опубликованных объявлений. Как только появится первое, здесь будут цифры за месяц — сколько заявок, откуда и по чём договаривались.</p>
+    <p class="colophon">Загляните на <a href="/">доску</a> или <a href="/new">разместите объявление</a>.</p>`;
+  } else {
+    const figures = [
+      [current.total, 'объявлений за месяц'],
+      [current.offers, '«водитель везёт»'],
+      [current.requests, '«нужно передать»'],
+      [current.cities, plural(current.cities, 'город', 'города', 'городов')],
+    ] as Array<[number, string]>;
+
+    const directions = current.topDirections.length > 0
+      ? await Promise.all(current.topDirections.map(async (d) => {
+          const path = d.from && d.to ? await routePath(env, d.from, d.to) : null;
+          const label = `${escapeHtml(d.pair)} <span class="mono">${d.count}</span>`;
+          return path ? `<a href="${escapeHtml(path)}">${label}</a>` : `<span>${label}</span>`;
+        }))
+      : [];
+
+    body = `    <nav class="crumbs" aria-label="Хлебные крошки"><a href="/">Доска</a> <span class="crumb-sep">›</span> <span>Итоги месяца</span></nav>
+    <p class="doc-date">цифры доски</p>
+    <h1 class="page-title">Итоги месяца</h1>
+    <p class="route-cities">${escapeHtml(fmtPeriod(current.month))} · ${current.total} ${plural(current.total, 'объявление', 'объявления', 'объявлений')} · направлений ${current.directions}</p>
+
+    <p class="lead">Сколько объявлений прошло через доску и по чём люди договаривались. Считаем по тем заявкам, что публиковались в этом месяце: водители и те, кому нужно передать. Цену берём ту, что человек написал сам, поэтому среднее — отдельно по каждой валюте.</p>
+
+    <div class="stats-figures">
+${figures.map(([n, label]) => `      <div class="stats-fig"><b>${n}</b><span>${escapeHtml(label)}</span></div>`).join('\n')}
+    </div>
+
+    <h2 class="rule-head">Средняя цена передачи</h2>
+    ${priceRowsHtml(current)}
+
+${directions.length > 0 ? `    <h2 class="rule-head">Куда везли чаще всего</h2>
+    <p class="related">${directions.join('')}</p>` : ''}
+
+${months.length > 1 ? `    <h2 class="rule-head">Прошлые месяцы</h2>
+    <table class="stats-table stats-table-wide">
+      <thead>
+        <tr><th>месяц</th><th>всего</th><th>везут</th><th>передать</th><th>городов</th><th>средняя цена</th></tr>
+      </thead>
+      <tbody>
+${months.map(monthRowHtml).join('\n')}
+      </tbody>
+    </table>
+    <p class="foot-note">Итоги прошлых месяцев не меняются, даже когда объявления уходят в архив и удаляются: цифры сохраняются снимком.</p>` : ''}
+
+    <p class="colophon">Хотите передать посылку по одному из направлений? Откройте <a href="/">доску</a> или <a href="/routes">список маршрутов</a> — там живые заявки водителей.</p>`;
+  }
+
+  const html = seoPageShell({
+    title: `Итоги месяца на доске попутных передач — сколько заявок и по чём | ${SITE_NAME}`,
+    description: 'Статистика доски попутных передач по месяцам: сколько объявлений опубликовано, какие направления самые живые и какая средняя цена передачи в евро, злотых и рублях.',
+    canonical: `${origin}/itogi`,
+    origin,
+    jsonLd: [breadcrumbsLd(origin, [{ name: 'Доска', path: '/' }, { name: 'Итоги месяца' }])],
+    body,
+  });
+  return { html, cacheControl: 'public, max-age=0, s-maxage=1800' };
 }
 
 /** Сколько всего объявлений на доске (подпись в шапке, итоги месяца). */

@@ -702,7 +702,8 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'stats'
+let statsMonth = null; // выбранный месяц на вкладке «итоги»
 let adminEditId = null; // id заявки, открытой на редактирование
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
@@ -910,6 +911,10 @@ async function loadAdmin() {
     await renderAdminDupes();
     return;
   }
+  if (adminTab === 'stats') {
+    await renderAdminStats();
+    return;
+  }
   try {
     const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
     if (res.status === 401) {
@@ -1078,7 +1083,10 @@ function matchMessage(p) {
   ].join('\n');
 }
 
-async function copyText(text) {
+/** Скопировать текст в буфер. Подписи тоста можно свои — смысл копирования разный. */
+async function copyText(text, opts = {}) {
+  const okText = opts.ok || 'Сообщение скопировано — можно вставлять в Telegram.';
+  const failText = opts.fail || 'Скопировать не получилось. Откройте карточки и напишите вручную.';
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
@@ -1092,9 +1100,9 @@ async function copyText(text) {
       document.execCommand('copy');
       ta.remove();
     }
-    toast('Сообщение скопировано — можно вставлять в Telegram.');
+    toast(okText);
   } catch {
-    toast('Скопировать не получилось. Откройте карточки и напишите вручную.');
+    toast(failText);
   }
 }
 
@@ -1445,6 +1453,147 @@ async function adminDelete(id) {
   }
 }
 
+/* ---------- итоги месяца: текст для поста и цифры ---------- */
+
+async function renderAdminStats() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'Итоги месяца: сколько объявлений прошло через доску и по чём договаривались.';
+  listEl.replaceChildren(el('p', { class: 'empty-note', text: 'считаю…' }));
+  let data;
+  try {
+    const res = await adminApi('/api/admin/stats');
+    if (!res.ok) throw new Error('network');
+    data = await res.json();
+  } catch {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Не получилось загрузить итоги. Проверьте связь и нажмите «обновить».',
+    }));
+    return;
+  }
+  const months = data.months || [];
+  if (months.length === 0) {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Пока считать нечего: на доске не было опубликованных объявлений. Как только появится первое, пересчитайте итоги здесь или дождитесь ночного cron.',
+    }));
+    return;
+  }
+  if (!statsMonth || !months.some((m) => m.month === statsMonth)) statsMonth = months[0].month;
+  const stat = months.find((m) => m.month === statsMonth) || months[0];
+
+  listEl.replaceChildren();
+
+  // выбор месяца + пересчёт
+  const select = el('select', {
+    class: 'stats-month',
+    onchange: (e) => { statsMonth = e.target.value; renderAdminStats(); },
+  }, months.map((m) => el('option', {
+    value: m.month,
+    ...(m.month === stat.month ? { selected: true } : {}),
+    text: `${fmtPeriodRu(m.month)} — ${m.total} объявл.`,
+  })));
+  const refreshBtn = el('button', {
+    class: 'btn btn-line',
+    type: 'button',
+    onclick: async () => {
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = 'пересчитываю…';
+      try {
+        const res = await adminApi('/api/admin/stats/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!res.ok) throw new Error('network');
+        const fresh = await res.json();
+        toast(`Пересчитано месяцев: ${(fresh.saved || []).length || 0}.`);
+        await renderAdminStats();
+      } catch {
+        toast('Пересчитать не получилось. Попробуйте ещё раз.');
+        refreshBtn.disabled = false;
+        refreshBtn.textContent = 'пересчитать';
+      }
+    },
+  }, 'пересчитать');
+
+  listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn]));
+
+  // готовый текст поста
+  const post = el('textarea', { class: 'stats-post', rows: '16', readonly: true, spellcheck: 'false' });
+  post.value = stat.post || '';
+  listEl.append(el('p', { class: 'admin-hint', text: 'Текст для поста в канал — копируйте как есть:' }));
+  listEl.append(post);
+  listEl.append(el('div', { class: 'cta-row' }, [
+    el('button', {
+      class: 'btn btn-ink',
+      type: 'button',
+      onclick: () => copyText(post.value, {
+        ok: 'Текст поста скопирован — вставляйте в канал.',
+        fail: 'Скопировать не получилось: выделите текст в поле и скопируйте вручную.',
+      }),
+    }, 'скопировать текст'),
+    el('a', { class: 'btn btn-line', href: '/itogi', target: '_blank', rel: 'noopener' }, 'страница итогов'),
+  ]));
+
+  // цифры месяца
+  const price = stat.prices || [];
+  const rows = price.map((p) => el('tr', {}, [
+    el('th', { scope: 'row', text: currencyWordRu(p.currency) }),
+    el('td', { class: 'mono', text: fmtMoney(p.avg) }),
+    el('td', { class: 'mono', text: p.min === p.max ? '—' : `${fmtMoney(p.min)}–${fmtMoney(p.max)}` }),
+    el('td', { class: 'mono', text: String(p.count) }),
+  ]));
+  listEl.append(el('table', { class: 'stats-table' }, [
+    el('thead', {}, [el('tr', {}, [
+      el('th', { text: 'валюта' }), el('th', { text: 'средняя цена' }),
+      el('th', { text: 'от и до' }), el('th', { text: 'объявлений' }),
+    ])]),
+    el('tbody', {}, rows),
+  ]));
+  if (price.length === 0) {
+    listEl.append(el('p', { class: 'empty-note', text: 'Цену в этом месяце никто не указал.' }));
+  }
+  listEl.append(el('p', {
+    class: 'admin-hint',
+    text: `${stat.cities} городов · ${stat.directions} направлений · из чатов ${stat.fromChats}, с сайта ${stat.fromSite} · бесплатно ${stat.free}.`,
+  }));
+  const tops = stat.topDirections || [];
+  if (tops.length) {
+    listEl.append(el('p', {
+      class: 'admin-hint',
+      text: `Топ направлений: ${tops.map((d) => `${d.pair} (${d.count})`).join(', ')}.`,
+    }));
+  }
+  listEl.append(el('p', {
+    class: 'admin-hint',
+    text: 'Прошлые месяцы сохраняются снимком: удаление старого архива цифры не меняет. Ночной cron пересчитывает текущий месяц сам.',
+  }));
+}
+
+/** '2026-09' → 'сентябрь 2026' — подпись месяца в админке. */
+function fmtPeriodRu(period) {
+  const m = /^(\d{4})-(\d{2})$/.exec(period || '');
+  if (!m) return period || '';
+  const names = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+    'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+  const name = names[Number(m[2]) - 1];
+  return name ? `${name} ${m[1]}` : period;
+}
+
+function currencyWordRu(code) {
+  return {
+    EUR: 'евро', PLN: 'злотых', USD: 'долларов', BYN: 'белорусских рублей',
+    RUB: 'российских рублей', UAH: 'гривен', GBP: 'фунтов', CZK: 'чешских крон',
+    none: 'валюта не указана',
+  }[code] || code;
+}
+
+function fmtMoney(n) {
+  const r = Math.round(Number(n) * 10) / 10;
+  return String(r).replace('.', ',');
+}
+
 function switchAdminTab(tab) {
   adminTab = tab;
   $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
@@ -1452,6 +1601,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-chats').classList.toggle('on', tab === 'chats');
   $('#admin-tab-match').classList.toggle('on', tab === 'match');
   $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
+  $('#admin-tab-stats').classList.toggle('on', tab === 'stats');
   loadAdmin();
 }
 
@@ -1481,6 +1631,7 @@ function bindAdmin() {
   $('#admin-tab-chats').addEventListener('click', () => switchAdminTab('chats'));
   $('#admin-tab-match').addEventListener('click', () => switchAdminTab('match'));
   $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
+  $('#admin-tab-stats').addEventListener('click', () => switchAdminTab('stats'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();

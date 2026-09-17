@@ -237,7 +237,8 @@ function listingCard(l: Listing, chatLinks: Record<string, string>): string {
 /* Оболочка SEO-страницы                                               */
 /* ------------------------------------------------------------------ */
 
-function pageShell(opts: {
+/** Общая оболочка SEO-страниц (маршруты, города, каталоги, итоги). */
+export function seoPageShell(opts: {
   title: string;
   description: string;
   canonical: string;
@@ -591,7 +592,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
 
     <p class="colophon">Не нашли рейс на нужную дату? Разместите просьбу — это бесплатно и занимает минуту: <a href="/new">форма на сайте</a> или бот в Telegram.</p>`;
 
-  return pageShell({
+  return seoPageShell({
     title,
     description,
     canonical: `${origin}/r/${r.slug}`,
@@ -698,7 +699,7 @@ ${otherCities.length > 0 ? `\n    <h2 class="rule-head">Другие город�
 
     <p class="colophon">Не нашли нужное направление? Откройте <a href="/">доску</a> и впишите города в поиск — заявки фильтруются по любому маршруту.</p>`;
 
-  return pageShell({
+  return seoPageShell({
     title,
     description,
     canonical: `${origin}/gorod/${slug}`,
@@ -750,7 +751,7 @@ export async function buildRoutesIndexPage(env: Env, origin: string): Promise<st
 
   const totalActive = idx.pairs.reduce((n, p) => n + p.active, 0);
 
-  return pageShell({
+  return seoPageShell({
     title: `Маршруты передачи посылок — все направления | ${SITE_NAME}`,
     description: 'Все направления передачи посылок попутно: Польша, Беларусь, Украина, Литва, Германия, Чехия и другие. На странице маршрута — живые заявки водителей, цены, вес и контакты.',
     canonical: `${origin}/routes`,
@@ -791,7 +792,7 @@ export async function buildCitiesIndexPage(env: Env, origin: string): Promise<st
         `<a href="/gorod/${citySlug(c.city)}">${escapeHtml(c.city)} <span class="mono">${c.active}</span></a>`).join('')}</p>`)
     .join('\n');
 
-  return pageShell({
+  return seoPageShell({
     title: `Города — откуда и куда передают посылки | ${SITE_NAME}`,
     description: 'Города на доске попутных передач: направления, живые заявки водителей и просьбы передать посылку. Польша, Беларусь, Украина, Литва, Германия и другие страны.',
     canonical: `${origin}/gorod`,
