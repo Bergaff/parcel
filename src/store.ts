@@ -83,6 +83,17 @@ export async function listListings(
   return { items: rows.slice(0, perPage).map(mapRow), hasMore };
 }
 
+/** Соседние заявки того же маршрута (кроме этой) — блок «Ещё по этому маршруту».
+ *  Один и тот же набор нужен и серверной карточке (src/pages.ts), и API, по
+ *  которому клиент дорисовывает карточку: иначе при переходе кликом с доски
+ *  блок похожих пропадает. */
+export async function relatedListings(env: Env, l: Listing, limit = 5): Promise<Listing[]> {
+  const { items } = await listListings(env, {
+    from: l.fromCity, to: l.toCity, perPage: limit + 1,
+  });
+  return items.filter((x) => x.id !== l.id).slice(0, limit);
+}
+
 export async function getListingById(env: Env, id: string, opts: { hitView?: boolean } = {}): Promise<Listing | null> {
   if (opts.hitView) {
     await env.DB.prepare('UPDATE listings SET views = views + 1 WHERE id = ?').bind(id).run();

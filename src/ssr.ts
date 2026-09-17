@@ -14,7 +14,7 @@
  */
 import type { Env, Listing } from './types';
 import { escapeHtml, mskTodayIso, normalizeContacts } from './util';
-import { fmtDayShort, fmtWeight, plural, MONTHS_SHORT, WEEKDAY_NAMES } from './format';
+import { agoText, fmtDateWithYear, fmtDayShort, fmtWeight, plural, MONTHS_SHORT, WEEKDAY_NAMES } from './format';
 import { headMeta, jsonLdAll } from './seo';
 
 export type View = 'list' | 'item' | 'new' | 'how' | 'bot' | 'terms' | 'privacy' | 'admin';
@@ -76,6 +76,10 @@ export interface RowOptions {
   chatLinks?: Record<string, string>;
   /** показывать ссылку «открыть» справа (на страницах маршрутов — да) */
   openLink?: boolean;
+  /** кнопки «скопировать»/«пожаловаться» — там, где есть app.js (доска и
+   *  блок похожих заявок). На витринных страницах скрипта нет, кнопки были бы
+   *  мёртвыми, поэтому там их не рисуем. */
+  actions?: boolean;
 }
 
 /** Одна строка доски — та же разметка, что рисует buildRow() в public/app.js. */
@@ -83,7 +87,8 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   const contact = contactOf(l);
   const archived = isArchived(l);
   const meta = [
-    `<span>${escapeHtml(fmtDayShort((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span>`,
+    // «2 дн. назад»/«15 сен» — как в app.js, иначе строка меняется после гидрации
+    `<span>${escapeHtml(agoText(l.publishedAt ?? l.createdAt))}</span>`,
     l.departureDate ? `<span>выезд ${escapeHtml(fmtDayShort(l.departureDate))}</span>` : '<span>дата не указана</span>',
     fmtWeight(l.weightKg) ? `<span class="mono">${escapeHtml(fmtWeight(l.weightKg)!)}</span>` : null,
     l.price ? `<span class="mono">${escapeHtml(l.price)}</span>` : null,
@@ -97,6 +102,8 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
       ? `<a class="write-link" href="${escapeHtml(contact.href)}" target="_blank" rel="noopener">${contact.kind === 'phone' ? 'позвонить' : 'написать'}</a>`
       : '<span class="write-link" style="cursor:default">контакт в карточке</span>',
     opts.openLink ? `<a class="write-link" href="/item/${encodeURIComponent(l.id)}">открыть</a>` : null,
+    opts.actions ? `<a class="write-link share-link" href="/item/${encodeURIComponent(l.id)}" data-copy="${escapeHtml(l.id)}">скопировать</a>` : null,
+    opts.actions ? `<a class="write-link report-link" href="/item/${encodeURIComponent(l.id)}" data-report="${escapeHtml(l.id)}">пожаловаться</a>` : null,
     `<span class="row-no">№ ${escapeHtml(l.id.slice(0, 4).toUpperCase())}</span>`,
   ].filter(Boolean).join('\n    ');
 
@@ -113,8 +120,12 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
 </article>`;
 }
 
+/** Список заявок для доски и блока «Ещё по этому маршруту»: оба рисуются внутри
+ *  оболочки с app.js, поэтому строки сразу с кнопками «скопировать» и
+ *  «пожаловаться» — иначе они появляются спустя мгновение после гидрации.
+ *  Витринные страницы (/r/…, /gorod/…) зовут renderRowHtml напрямую. */
 export function renderRowsHtml(items: Listing[], opts: RowOptions = {}): string {
-  return items.map((l) => renderRowHtml(l, opts)).join('\n');
+  return items.map((l) => renderRowHtml(l, { actions: true, ...opts })).join('\n');
 }
 
 /* ------------------------------ карточка -------------------------------- */
@@ -136,7 +147,7 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
   const archived = isArchived(l);
 
   const cells = [
-    ['выезд', l.departureDate ? fmtDayShort(l.departureDate) : 'дата не указана'],
+    ['выезд', l.departureDate ? fmtDateWithYear(l.departureDate) : 'дата не указана'],
     ...(fmtWeight(l.weightKg) ? [['вес', fmtWeight(l.weightKg)!]] : []),
     ...(l.price ? [['цена', l.price]] : []),
   ] as Array<[string, string]>;
@@ -171,7 +182,7 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
   <span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>
   ${archived ? '<span class="stamp stamp-expired">архив</span>' : ''}
 </div>
-<div class="d-meta">${cellsHtml}<div class="cell"><span class="label">источник</span><span class="value">${sourceHtml(l, opts.chatLinks)}</span></div><div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDayShort((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>
+<div class="d-meta">${cellsHtml}<div class="cell"><span class="label">источник</span><span class="value">${sourceHtml(l, opts.chatLinks)}</span></div><div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDateWithYear((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>
 ${archived ? '<p class="d-note">Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.</p>' : ''}
 <p class="d-desc">${escapeHtml(l.description)}</p>
 <div class="d-actions">

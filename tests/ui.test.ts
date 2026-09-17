@@ -101,7 +101,14 @@ function makeFetch(calls: string[]) {
         const item = known[id];
         if (!item) return { status: 404, body: { error: 'not_found' } };
         return {
-          body: { item: { ...item, description: `${item.description} ${FRESH_MARK}` } },
+          body: {
+            item: { ...item, description: `${item.description} ${FRESH_MARK}` },
+            // как настоящий GET /api/listings/:id: из этого клиент собирает
+            // крошки и блок «Ещё по этому маршруту» (иначе карточка беднее SSR)
+            related: [listing({ id: REQ, type: 'request' })].filter((x) => x.id !== id),
+            routePath: '/r/varshava-minsk',
+            cityPath: '/gorod/varshava',
+          },
           delayMs: server.detailDelayMs,
         };
       }
@@ -373,6 +380,58 @@ describe('серверная карточка (SSR)', () => {
     detail.removeAttribute('data-id');
     await goto(`/item/${ID}`, 250);
     expect(detail.textContent).toContain(BOARD_DESC);
+    await goto('/');
+  });
+});
+
+/* Открыл заявку кликом с доски — карточку рисует клиент. Она должна быть такой
+   же, как при прямой загрузке страницы: те же крошки, тот же блок похожих
+   заявок, те же даты. Данные для этого приходят в ответе GET /api/listings/:id. */
+describe('карточка после клика с доски', () => {
+  const plain = (s: string | null) => (s || '').replace(/\s+/g, ' ').trim();
+
+  it('крошки, заголовок h1, даты с годом и похожие заявки — как на сервере', async () => {
+    await goto('/');
+    const detail = byId('item-detail');
+    detail.removeAttribute('data-ssr');
+    detail.removeAttribute('data-id');
+    await goto(`/item/${ID}`, 250);
+
+    const crumbs = detail.querySelector('.crumbs') as HTMLElement | null;
+    expect(plain(crumbs?.textContent ?? null)).toBe(`Доска › Варшава › Варшава → Минск › № ${ID.slice(0, 8)}`);
+    expect(Array.from(crumbs!.querySelectorAll('a')).map((a) => a.getAttribute('href')))
+      .toEqual(['/', '/gorod/varshava', '/r/varshava-minsk']);
+
+    expect(detail.querySelector('h1.d-route'), 'заголовок карточки — h1, как в SSR').toBeTruthy();
+    expect(detail.textContent).toContain('20 мая 2030');       // выезд — с годом
+    expect(detail.textContent).toContain('10 сентября 2026');  // добавлено — полная дата, не «5 дн. назад»
+
+    const related = Array.from(detail.querySelectorAll('.rows article.row')) as HTMLElement[];
+    expect(related.length, 'блок «Ещё по этому маршруту»').toBe(1);
+    expect(detail.textContent).toContain('Ещё по этому маршруту');
+    expect(related[0]!.textContent).toContain('Минск');
+    expect(related[0]!.querySelector('a.row-link')?.getAttribute('href')).toBe(`/item/${REQ}`);
+    await goto('/');
+  });
+
+  it('в первый кадр крошки короткие — строка уже занимает своё место', async () => {
+    await goto(`/item/${ID}`, 250); // прогрели кэш объявления
+    await goto('/');
+    const detail = byId('item-detail');
+    detail.removeAttribute('data-ssr');
+    detail.removeAttribute('data-id');
+
+    // переходим и смотрим ДО ответа сети: карточка рисуется из кэша доски,
+    // пути города и маршрута знает только сервер — они доедут следом
+    win.history.pushState(null, '', `/item/${ID}`);
+    win.dispatchEvent(new win.Event('popstate'));
+    expect(plain(detail.querySelector('.crumbs')?.textContent ?? null))
+      .toBe(`Доска › № ${ID.slice(0, 8)}`);
+    expect(detail.querySelectorAll('.crumbs a').length, 'ссылок города и маршрута ещё нет').toBe(1);
+
+    await settle(250);
+    expect(plain(detail.querySelector('.crumbs')?.textContent ?? null)).toContain('Варшава → Минск');
+    expect(detail.querySelectorAll('.crumbs a').length).toBe(3);
     await goto('/');
   });
 });

@@ -8,7 +8,7 @@
  * жили за «#», которого для поисковика не существует.
  */
 import type { Env, Listing } from './types';
-import { getCounts, getListingById, listListings, getChatLinks } from './store';
+import { getCounts, getListingById, listListings, getChatLinks, relatedListings } from './store';
 import { normalizeCity } from './parser';
 import { escapeHtml } from './util';
 import { plural, fmtDayShort } from './format';
@@ -265,10 +265,7 @@ export async function buildItemPage(
   const chatLinks = await getChatLinks(env).catch(() => ({} as Record<string, string>));
 
   // соседние заявки того же маршрута: и человеку полезно, и перелинковка
-  const { items: same } = await listListings(env, {
-    from: listing.fromCity, to: listing.toCity, perPage: 6,
-  });
-  const related = same.filter((x) => x.id !== listing.id).slice(0, 5);
+  const related = await relatedListings(env, listing);
 
   const html = await renderShell(env, {
     view: 'item',

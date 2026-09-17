@@ -268,6 +268,47 @@ describe('строка доски в SSR', () => {
   });
 });
 
+/* Строки доски печатает сервер, а через мгновение их же перерисовывает клиент
+   (public/app.js). Совпадать должно всё: и кнопки справа, и дата слева — иначе
+   текст строки меняется на глазах после гидрации. */
+describe('строки: сервер против клиента', () => {
+  it('на доске сразу есть «скопировать» и «пожаловаться»', () => {
+    const html = renderRowsHtml([listing()], { chatLinks: {} });
+    expect(html).toContain('скопировать');
+    expect(html).toContain('пожаловаться');
+    expect(html).toContain(`data-copy="${listing().id}"`);
+    expect(html).toContain(`data-report="${listing().id}"`);
+    // кнопки — якоря с настоящим href: без JS уводят в карточку
+    expect(html).toContain(`class="write-link report-link" href="/item/${listing().id}"`);
+  });
+
+  it('на витринных страницах кнопок нет — app.js там не подключён', () => {
+    const html = renderRowHtml(listing(), { chatLinks: {}, openLink: true });
+    expect(html).toContain('>открыть<');
+    expect(html).not.toContain('data-report');
+    expect(html).not.toContain('data-copy');
+    expect(html).not.toContain('пожаловаться');
+  });
+
+  it('дата слева относительная, как считает ago() в app.js', () => {
+    const fresh = listing({ publishedAt: new Date(Date.now() - 30 * 1000).toISOString() });
+    expect(renderRowHtml(fresh)).toContain('<span>только что</span>');
+
+    const minutes = listing({ publishedAt: new Date(Date.now() - 3 * 60 * 1000).toISOString() });
+    expect(renderRowHtml(minutes)).toContain('<span>3 мин назад</span>');
+
+    const old = listing({ publishedAt: '2026-09-07T09:00:00.000Z', createdAt: '2026-09-07T09:00:00.000Z' });
+    expect(renderRowHtml(old)).toContain('<span>7 сен</span>');
+  });
+
+  it('в карточке даты с годом — так же рисует клиентская renderDetail', () => {
+    const html = renderDetailHtml(listing(), { origin: 'https://pop-utka.app' });
+    expect(html).toContain('20 мая 2030');       // выезд
+    expect(html).toContain('15 сентября 2026');  // добавлено
+    expect(html).toContain('<h1 class="d-route">');
+  });
+});
+
 describe('карточка в SSR', () => {
   it('хлебные крошки, данные и действия', () => {
     const html = renderDetailHtml(listing(), {

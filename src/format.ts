@@ -85,3 +85,30 @@ export function fmtWeight(kg: number | null | undefined): string | null {
   if (kg == null) return null;
   return `${String(kg).replace('.', ',')} кг`;
 }
+
+/** Относительное время по МСК: «только что», «5 мин назад», «сегодня в 14:20»,
+ *  «вчера», «15 сен». В точности повторяет ago() из public/app.js: строки доски
+ *  рисует сначала сервер, потом клиент дорисовывает их же — если считать
+ *  по-разному, текст под заголовком меняется на глазах.
+ *  МСК выбран потому, что по нему же живёт архив (mskTodayIso) и «сегодня». */
+export function agoText(iso: string | null | undefined, nowMs: number = Date.now()): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const MSK = 3 * 3600 * 1000;
+  const t = d.getTime() + MSK;
+  const n = nowMs + MSK;
+  // день берём из времени по МСК, а не из первых 10 символов строки: заявка,
+  // опубликованная в 22:30 UTC, по МСК уже следующая дата — клиент считает так же
+  const dd = new Date(t);
+  const day = `${dd.getUTCDate()} ${MONTHS_SHORT[dd.getUTCMonth()]}`;
+  const s = Math.floor((n - t) / 1000);
+  if (s < 0) return day;
+  if (s < 60) return 'только что';
+  if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
+  if (s < 86400 && dd.getUTCDate() === new Date(n).getUTCDate()) {
+    return `сегодня в ${String(dd.getUTCHours()).padStart(2, '0')}:${String(dd.getUTCMinutes()).padStart(2, '0')}`;
+  }
+  if (s < 172800) return 'вчера';
+  return day;
+}

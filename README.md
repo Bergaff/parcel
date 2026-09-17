@@ -256,7 +256,7 @@ https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<адрес-во�
 | Метод | Путь | Описание |
 |---|---|---|
 | GET | `/api/listings` | список (query: `type`, `from`, `to`, `date`, `q`, `page`) |
-| GET | `/api/listings/:id` | карточка (считает просмотр) |
+| GET | `/api/listings/:id` | карточка (считает просмотр); в ответе ещё `related`, `routePath`, `cityPath` — из них клиент рисует блок «Ещё по этому маршруту» и хлебные крошки, как в SSR |
 | POST | `/api/listings` | создать (лимит 10/час с IP → модерация) |
 | POST | `/api/listings/:id/report` | жалоба (3 жалобы → скрытие) |
 | GET | `/api/admin/pending` | очередь модерации (все `/api/admin/*` — с `Authorization: Bearer <ADMIN_API_TOKEN>`) |

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
@@ -157,7 +157,14 @@ app.get('/api/listings/:id', async (c) => {
   if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
     return c.json({ error: 'not_found' }, 404);
   }
-  return c.json({ item: listing });
+  // Вместе с заявкой отдаём то, из чего сервер собрал карточку: пути для хлебных
+  // крошек и похожие заявки. Клиент рисует их сам, когда объявление открыли
+  // кликом с доски, — карточка не «беднеет» после перехода.
+  const [related, routePath] = await Promise.all([
+    relatedListings(c.env, listing),
+    routePathFor(c.env, listing.fromCity, listing.toCity),
+  ]);
+  return c.json({ item: listing, related, routePath, cityPath: cityPathFor(listing.fromCity) });
 });
 
 app.post('/api/listings', async (c) => {

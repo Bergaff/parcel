@@ -52,6 +52,8 @@ function toast(message) {
 }
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+// «17 сентября 2026» — тот же вид, что печатает сервер (MONTHS_GEN в src/format.ts)
+const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
 const WEEKDAYS = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 
 function fmtDate(iso) {
@@ -63,17 +65,27 @@ function fmtDate(iso) {
 function fmtFullDate(iso) {
   if (!iso) return '';
   const d = new Date(iso + 'T00:00:00');
-  return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`;
+  return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`;
 }
 
+/** «только что» → «15 сен». Считаем по МСК, как agoText() на сервере: первые
+ *  строки доски рисует SSR, потом их же перерисовывает клиент — при разных
+ *  правилах текст под заголовком менялся бы на глазах (и «сегодня» у
+ *  пользователя в другом часовом поясе не совпадало бы с архивом). */
 function ago(iso) {
-  const d = new Date(iso);
-  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  const MSK = 3 * 3600 * 1000;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const d = new Date(t + MSK);
+  const n = new Date(Date.now() + MSK);
+  const day = `${d.getUTCDate()} ${MONTHS_SHORT[d.getUTCMonth()]}`;
+  const s = Math.floor((n - d) / 1000);
+  if (s < 0) return day;
   if (s < 60) return 'только что';
   if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
-  if (s < 86400 && d.getDate() === new Date().getDate()) return `сегодня в ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (s < 86400 && d.getUTCDate() === n.getUTCDate()) return `сегодня в ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
   if (s < 172800) return 'вчера';
-  return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`;
+  return day;
 }
 
 function plural(n, one, few, many) {
@@ -493,7 +505,13 @@ function fetchListing(id) {
   const started = detailInflight.get(id);
   if (started) return started;
   const p = api(`/api/listings/${encodeURIComponent(id)}`)
-    .then(async (res) => (res.ok ? (await res.json()).item ?? null : null))
+    // целый ответ, а не только item: в нём related и пути для хлебных крошек —
+    // из того же набора сервер собирает карточку при прямой загрузке страницы
+    .then(async (res) => {
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data && data.item ? data : null;
+    })
     .catch(() => null);
   detailInflight.set(id, p);
   setTimeout(() => { if (detailInflight.get(id) === p) detailInflight.delete(id); }, 30000);
@@ -507,10 +525,11 @@ async function loadDetail(id) {
   if (cached) renderDetail(cached);
   else box.replaceChildren(el('p', { class: 'empty-note', text: 'достаю карточку…' }));
 
-  const l = await fetchListing(id);
+  const payload = await fetchListing(id);
+  const l = payload ? payload.item : null;
   if (l) {
     listingCache.set(l.id, l);
-    renderDetail(l);
+    renderDetail(l, payload);
   } else if (!cached) {
     box.replaceChildren(
       el('p', { class: 'empty-note', text: 'Такого объявления нет. Возможно, его сняли после жалоб.' }),
@@ -519,7 +538,21 @@ async function loadDetail(id) {
   }
 }
 
-function renderDetail(l) {
+/** Хлебные крошки карточки — те же, что печатает сервер (src/ssr.ts) и что
+ *  лежат в JSON-LD BreadcrumbList: Доска › город › маршрут › №.
+ *  Пути города и маршрута знает только сервер (витринный slug или динамический,
+ *  есть ли страница города), поэтому до его ответа рисуем короткую цепочку —
+ *  высота строки та же, контент не прыгает. */
+function buildCrumbs(l, meta) {
+  const sep = () => [' ', el('span', { class: 'crumb-sep', text: '›' }), ' '];
+  const parts = [el('a', { href: '/', text: 'Доска' })];
+  if (meta && meta.cityPath) parts.push(...sep(), el('a', { href: meta.cityPath, text: l.fromCity }));
+  if (meta && meta.routePath) parts.push(...sep(), el('a', { href: meta.routePath, text: `${l.fromCity} → ${l.toCity}` }));
+  parts.push(...sep(), el('span', { text: `№ ${l.id.slice(0, 8)}` }));
+  return el('nav', { class: 'crumbs', 'aria-label': 'Хлебные крошки' }, parts);
+}
+
+function renderDetail(l, meta) {
   const box = $('#item-detail');
   // Серверная карточка (src/ssr.ts) полнее клиентской: в ней хлебные крошки и
   // блок «Ещё по этому маршруту». Пока открыто то же объявление — не
@@ -593,14 +626,24 @@ function renderDetail(l) {
   ]));
   cells.push(el('div', { class: 'cell' }, [
     el('span', { class: 'label', text: 'добавлено' }),
-    el('span', { class: 'value', text: ago(l.createdAt) }),
+    // полная дата, как в серверной карточке: относительное «3 дн. назад»
+    // устаревает в кэше и не совпадает с HTML при прямой загрузке
+    el('span', { class: 'value', text: fmtFullDate((l.publishedAt || l.createdAt || '').slice(0, 10)) }),
   ]));
 
+  // Похожие заявки того же маршрута: клик по такой строке рисует карточку
+  // мгновенно — данные уже в кэше.
+  const related = meta && Array.isArray(meta.related) ? meta.related : [];
+  for (const r of related) listingCache.set(r.id, r);
+
   box.replaceChildren(
+    buildCrumbs(l, meta),
     el('div', { class: 'd-head' }, [
-      el('h2', { class: 'd-route' }, [
+      el('h1', { class: 'd-route' }, [
         l.fromCity,
+        ' ',
         el('span', { class: 'r-arrow', text: '→' }),
+        ' ',
         el('span', { class: 'r-to', text: l.toCity }),
       ]),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
@@ -619,6 +662,12 @@ function renderDetail(l) {
       class: 'd-note',
       text: 'Объявление проверено модератором, но это не гарантия: связывайтесь с человеком, задавайте вопросы и не передавайте деньги заранее. Опечатка или фейк, нажмите «пожаловаться», разберусь.',
     }),
+    ...(related.length > 0
+      ? [
+          el('h2', { class: 'rule-head', text: 'Ещё по этому маршруту' }),
+          el('div', { class: 'rows' }, related.map((r) => buildRow(r))),
+        ]
+      : []),
   );
 }
 
