@@ -34,9 +34,9 @@ vi.mock('../src/store', () => ({
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap, buildRoutePage,
   buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml, cityPathFor, clearRouteIndexCache,
-  footRoutes, resolveCity, resolveRoute, resolveRouteAlias, routePathFor,
+  footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routePathFor, SEO_ROUTES,
 } from '../src/seo-routes';
-import { routeSlug } from '../src/seo';
+import { citySlug, routeSlug } from '../src/seo';
 
 const ORIGIN = 'https://pop-utka.app';
 const env = {} as Env;
@@ -297,5 +297,26 @@ describe('карта сайта', () => {
     expect(xml).toContain(`${ORIGIN}/item/b5023c82-e043-4863-9fae-ee19a095f211`);
     expect(xml).toContain('<lastmod>2026-09-17</lastmod>');
     expect((xml.match(/<url>/g) ?? []).length).toBe(2);
+  });
+});
+
+describe('вся витрина рендерится', () => {
+  it('каждый маршрут из списка отдаёт страницу с заголовком', async () => {
+    const broken: string[] = [];
+    for (const r of SEO_ROUTES) {
+      const html = await buildRoutePage(env, r.slug, ORIGIN);
+      if (!html || !html.includes('<h1 class="page-title">') || html.includes('undefined')) broken.push(r.slug);
+    }
+    expect(broken).toEqual([]);
+  });
+
+  it('каждый известный город отдаёт страницу', async () => {
+    const broken: string[] = [];
+    for (const city of knownCities()) {
+      const slug = citySlug(city);
+      const html = await buildCityPage(env, slug, ORIGIN);
+      if (!html || !html.includes('<h1 class="page-title">') || html.includes('undefined')) broken.push(`${city} (${slug})`);
+    }
+    expect(broken).toEqual([]);
   });
 });

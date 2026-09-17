@@ -29,6 +29,9 @@ function mapRow(row: Record<string, unknown>): Listing {
 }
 
 export async function createListing(env: Env, input: ListingInput): Promise<Listing> {
+  // Колонки *_lc должны существовать до записи: на проде миграцию могут
+  // применить позже деплоя, а без них INSERT упадёт.
+  await ensureSearchColumns(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
@@ -40,15 +43,17 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       created_at, published_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       created_at, published_at, from_city_lc, to_city_lc, description_lc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null, now, publishedAt
+      input.sourceMessageId ?? null, now, publishedAt,
+      // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
+      input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
     .run();
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -62,6 +67,7 @@ export async function listListings(
   env: Env,
   f: ListFilters
 ): Promise<{ items: Listing[]; hasMore: boolean }> {
+  if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   let fullSql = `SELECT * FROM listings${sql}`;
   if (f.type) { fullSql += ' AND type = ?'; params.push(f.type); }
@@ -108,11 +114,12 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
  * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
  */
 export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
-  const pattern = globCi(city);
+  await ensureSearchColumns(env);
+  const pattern = likeContains(city);
   const res = await env.DB.prepare(
     `SELECT * FROM listings
      WHERE status IN ('published', 'expired')
-       AND (from_city GLOB ? OR to_city GLOB ?)
+       AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
      ORDER BY (CASE WHEN status = 'expired' OR departure_date < date('now', '+3 hours') THEN 1 ELSE 0 END),
               COALESCE(published_at, created_at) DESC
@@ -167,17 +174,21 @@ export async function updateListing(
   patch: Partial<Pick<ListingInput,
     'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
 ): Promise<Listing | null> {
+  await ensureSearchColumns(env);
   // Те же правила, что при создании: контакты без дублей и каждый в своём поле
   const { telegram, phone } = normalizeContacts(patch.telegram, patch.phone);
   const res = await env.DB.prepare(
     `UPDATE listings SET
        type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
-       price = ?, description = ?, telegram = ?, phone = ?
+       price = ?, description = ?, telegram = ?, phone = ?,
+       from_city_lc = ?, to_city_lc = ?, description_lc = ?
      WHERE id = ?`
   ).bind(
     patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
     patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
-    patch.description ?? '', telegram, phone, id
+    patch.description ?? '', telegram, phone,
+    (patch.fromCity ?? '').toLowerCase(), (patch.toCity ?? '').toLowerCase(),
+    (patch.description ?? '').toLowerCase(), id
   ).run();
   if ((res.meta.changes ?? 0) === 0) return null;
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -332,19 +343,77 @@ function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
 }
 
-/** Паттерн для GLOB без учёта регистра (SQLite LIKE не сворачивает регистр кириллицы):
- *  каждая буква превращается в класс [аА], спецсимволы GLOB (* ? [ ]) экранируются. */
-function globCi(q: string): string {
-  let out = '';
-  for (const ch of q) {
-    const lo = ch.toLowerCase();
-    const up = ch.toUpperCase();
-    if (ch === ']' ) out += '[]]';
-    else if (ch === '*' || ch === '?' || ch === '[') out += `[${ch}]`;
-    else if (lo !== up) out += `[${lo}${up}]`;
-    else out += ch;
+/**
+ * Поиск по городам и тексту без учёта регистра.
+ *
+ * Раньше здесь был GLOB-шаблон «*[Аа][Мм][Сс]…» — по классу на каждую букву.
+ * SQLite отвергает такие шаблоны целиком: «LIKE or GLOB pattern too complex»,
+ * лимит 10 спецэлементов. То есть доска падала в 500 на любом городе от девяти
+ * букв (Амстердам, Санкт-Петербург, Ивано-Франковск) и на любом поисковом
+ * запросе от девяти символов («лекарства», «документы»). Встроенный lower()
+ * в SQLite знает только ASCII, поэтому нижний регистр храним в колонках *_lc:
+ * их заполняет JS при записи и один раз — SQL при миграции.
+ */
+const CYR_UPPER = 'АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯІЇЄҐ';
+
+/**
+ * SQL-выражение «нижний регистр, включая кириллицу»: цепочка REPLACE.
+ * Дорого на каждую строку, поэтому используется только в разовом заполнении
+ * колонок (миграция), а не в запросах.
+ */
+export function sqlLowerCyr(expr: string): string {
+  let out = expr;
+  for (const ch of CYR_UPPER) out = `REPLACE(${out}, '${ch}', '${ch.toLowerCase()}')`;
+  return out;
+}
+
+/** Шаблон «содержит» для LIKE: спецсимволы экранированы, регистр свёрнут. */
+export function likeContains(q: string): string {
+  const esc = q.toLowerCase().replace(/[\\%_]/g, (m) => `\\${m}`);
+  return `%${esc}%`;
+}
+
+const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
+
+let searchColumnsReady: Promise<void> | null = null;
+
+/** Сбросить отметку «колонки готовы» (тесты и смена базы). */
+export function resetSearchColumnsCache(): void {
+  searchColumnsReady = null;
+}
+
+/**
+ * Колонки *_lc на месте и заполнены. Вызывается перед любым поиском:
+ * на проде миграцию могут применить позже деплоя, а без колонок запрос
+ * упадёт. Повторно не выполняется — ни в этом isolate, ни по данным.
+ */
+export function ensureSearchColumns(env: Env): Promise<void> {
+  if (!searchColumnsReady) {
+    searchColumnsReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      for (const col of LC_COLUMNS) {
+        if (!names.has(col)) await env.DB.prepare(`ALTER TABLE listings ADD COLUMN ${col} TEXT`).run();
+      }
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_listings_from_lc ON listings(from_city_lc)`
+      ).run();
+      await env.DB.prepare(
+        `CREATE INDEX IF NOT EXISTS idx_listings_to_lc ON listings(to_city_lc)`
+      ).run();
+      await env.DB.prepare(
+        `UPDATE listings SET
+           from_city_lc = ${sqlLowerCyr(`COALESCE(from_city, '')`)},
+           to_city_lc = ${sqlLowerCyr(`COALESCE(to_city, '')`)},
+           description_lc = ${sqlLowerCyr(`COALESCE(description, '')`)}
+         WHERE from_city_lc IS NULL OR to_city_lc IS NULL OR description_lc IS NULL`
+      ).run();
+    })();
+    searchColumnsReady.catch(() => { searchColumnsReady = null; });
   }
-  return `*${out}*`;
+  return searchColumnsReady;
 }
 
 interface WhereClause { sql: string; params: (string | number)[] }
@@ -365,12 +434,12 @@ function buildWhere(f: ListFilters): WhereClause {
       sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
     }
   }
-  if (f.from) { sql += ' AND from_city GLOB ?'; params.push(globCi(f.from)); }
-  if (f.to) { sql += ' AND to_city GLOB ?'; params.push(globCi(f.to)); }
+  if (f.from) { sql += ` AND from_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
+  if (f.to) { sql += ` AND to_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.to)); }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
   if (f.q) {
-    const pattern = globCi(f.q);
-    sql += ' AND (description GLOB ? OR from_city GLOB ? OR to_city GLOB ?)';
+    const pattern = likeContains(f.q);
+    sql += ` AND (description_lc LIKE ? ESCAPE '\\' OR from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')`;
     params.push(pattern, pattern, pattern);
   }
   return { sql, params };
@@ -378,6 +447,7 @@ function buildWhere(f: ListFilters): WhereClause {
 
 /** Количество объявлений по типам с учётом фильтров поиска (без учёта вкладки-типа). */
 export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: number; request: number }> {
+  if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   const res = await env.DB.prepare(
     `SELECT type, COUNT(*) AS n FROM listings${sql} GROUP BY type`
