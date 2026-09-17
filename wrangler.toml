@@ -43,6 +43,7 @@ run_worker_first = [
   "/new",
   "/admin",
   "/r/*",
+  "/gorod",
   "/gorod/*",
   "/routes",
   "/itogi",

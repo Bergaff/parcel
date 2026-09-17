@@ -246,13 +246,18 @@ export async function buildItemPage(
   env: Env,
   origin: string,
   id: string,
-  opts: { routePath?: (from: string, to: string) => string | null } = {}
+  opts: {
+    /** есть ли SEO-страница у маршрута (может смотреть в базу — поэтому async) */
+    routePath?: (from: string, to: string) => string | null | Promise<string | null>;
+    cityPath?: (city: string) => string | null | Promise<string | null>;
+  } = {}
 ): Promise<PageResult | null> {
   const listing = await getListingById(env, id);
   if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) return null;
 
   const archived = isArchived(listing);
-  const routePath = opts.routePath ? opts.routePath(listing.fromCity, listing.toCity) : null;
+  const routePath = opts.routePath ? await opts.routePath(listing.fromCity, listing.toCity) : null;
+  const cityFromPath = opts.cityPath ? await opts.cityPath(listing.fromCity) : null;
   const chatLinks = await getChatLinks(env).catch(() => ({} as Record<string, string>));
 
   // соседние заявки того же маршрута: и человеку полезно, и перелинковка
@@ -276,6 +281,7 @@ export async function buildItemPage(
     jsonLd: [
       breadcrumbsLd(origin, [
         { name: 'Доска', path: '/' },
+        ...(cityFromPath ? [{ name: listing.fromCity, path: cityFromPath }] : []),
         ...(routePath ? [{ name: `${listing.fromCity} → ${listing.toCity}`, path: routePath }] : []),
         { name: `№ ${listing.id.slice(0, 8)}` },
       ]),

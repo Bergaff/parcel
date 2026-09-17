@@ -6,8 +6,12 @@ import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity
 import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
-import { renderOgImage } from './og';
-import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml, routePathFor } from './seo-routes';
+import { renderOgImage, renderRouteOg } from './og';
+import {
+  buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
+  buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
+  cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
+} from './seo-routes';
 import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, siteOrigin, STATIC_PAGES } from './pages';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -253,7 +257,8 @@ for (const path of Object.keys(STATIC_PAGES)) {
 app.get('/item/:id', async (c) => {
   const origin = siteOrigin(c.env, c.req.url);
   const page = await buildItemPage(c.env, origin, c.req.param('id'), {
-    routePath: (from, to) => routePathFor(from, to),
+    routePath: (from, to) => routePathFor(c.env, from, to),
+    cityPath: (city) => cityPathFor(city),
   });
   if (!page) {
     const nf = await buildNotFoundPage(c.env, origin, 'Объявление снято с доски или удалено: заявки живут месяц после даты выезда, а потом удаляются.');
@@ -276,28 +281,93 @@ app.notFound(async (c) => {
   return c.html(page.html);
 });
 
-/* ---------------- SEO-страницы маршрутов ---------------- */
-/* Статичные страницы под запросы «передать посылку Варшава → Львов»:
-   текст + живые заявки по маршруту. Список маршрутов — src/seo-routes.ts. */
+/* ---------------- SEO-страницы: маршруты и города ---------------- */
+/* Страницы под запросы «передать посылку Варшава → Львов»: текст + живые
+   заявки по маршруту. Кроме витрины (src/seo-routes.ts) сюда попадают любые
+   пары городов, где есть хотя бы одна активная заявка, и страницы городов. */
 app.get('/r/:slug', async (c) => {
-  const origin = new URL(c.req.url).origin;
-  const html = await buildRoutePage(c.env, c.req.param('slug'), origin);
+  const origin = siteOrigin(c.env, c.req.url);
+  const slug = c.req.param('slug');
+  const html = await buildRoutePage(c.env, slug, origin);
+  if (!html) {
+    // транслитный слаг витринной пары («varshava-keln») — постоянный редирект,
+    // иначе у одного направления два адреса и вес делится пополам
+    const canonical = await resolveRouteAlias(c.env, slug);
+    if (canonical) return c.redirect(`/r/${canonical}`, 301);
+    return c.notFound();
+  }
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
+  return c.html(html);
+});
+
+app.get('/routes', async (c) => {
+  const html = await buildRoutesIndexPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
+  return c.html(html);
+});
+
+app.get('/gorod', async (c) => {
+  const html = await buildCitiesIndexPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
+  return c.html(html);
+});
+
+app.get('/gorod/:slug', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const html = await buildCityPage(c.env, c.req.param('slug'), origin);
   if (!html) return c.notFound();
   c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
   return c.html(html);
 });
 
-app.get('/routes', (c) => {
-  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
-  return c.html(buildRoutesIndexPage(siteOrigin(c.env, c.req.url)));
-});
-
-/* Динамическая карта сайта: главная, страницы маршрутов, активные объявления. */
+/* Карта сайта: /sitemap.xml — индекс из трёх файлов (страницы, маршруты,
+   объявления). Разбивка нужна, потому что объявления меняются каждый час,
+   а витрина маршрутов — раз в день. */
 app.get('/sitemap.xml', async (c) => {
   const xml = await buildSitemapXml(c.env, siteOrigin(c.env, c.req.url));
   return new Response(xml, {
     headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
   });
+});
+
+app.get('/sitemap-pages.xml', (c) => {
+  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso());
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
+  });
+});
+
+app.get('/sitemap-routes.xml', async (c) => {
+  const xml = await buildRoutesSitemap(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=1800' },
+  });
+});
+
+app.get('/sitemap-items.xml', async (c) => {
+  const xml = await buildItemsSitemap(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=1800' },
+  });
+});
+
+/* OG-картинка маршрута или города: /og-route/varshava-minsk.png */
+app.get('/og-route/:slug', async (c) => {
+  const slug = (c.req.param('slug') ?? '').replace(/\.png$/, '');
+  const route = await resolveRoute(c.env, slug);
+  const city = route ? null : await resolveCity(c.env, slug);
+  if (!route && !city) return c.redirect('/og-cover.png');
+  try {
+    const png = route
+      ? await renderRouteOg(routeOgSpec(route), c.env)
+      : await renderRouteOg(cityOgSpec(city!.city, city!.stat), c.env);
+    return new Response(png.buffer as ArrayBuffer, {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' },
+    });
+  } catch (e) {
+    console.error('og route render failed', e);
+    return c.redirect('/og-cover.png');
+  }
 });
 
 /* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере

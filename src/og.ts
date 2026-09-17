@@ -69,6 +69,26 @@ function fitLine(text: string, maxWidth: number, size: number, bold = false): st
   return text.length <= max ? text : text.slice(0, Math.max(1, max - 1)).trimEnd() + '…';
 }
 
+/**
+ * Подбирает кегль для строки «A → B» и, если не влезает, урезает оба города
+ * симметрично. Общая для карточки объявления и для карточек маршрутов.
+ */
+function fitRoutePair(from: string, to: string, maxSize = 118): { from: string; to: string; size: number } {
+  const len = from.length + to.length + 3;
+  let size = Math.min(maxSize, len <= 16 ? 118 : len <= 22 ? 98 : len <= 30 ? 80 : len <= 42 ? 62 : 50);
+  const fits = (sz: number) => len * sz * BOLD_W <= AREA;
+  while (!fits(size) && size > 40) size -= 4;
+  let f = from;
+  let t = to;
+  if (!fits(size)) {
+    const total = Math.floor(AREA / (size * BOLD_W)) - 3;
+    const budget = Math.max(4, Math.floor((total - 2) / 2));
+    f = fitLine(f, budget * size * BOLD_W, size, true);
+    t = fitLine(t, budget * size * BOLD_W, size, true);
+  }
+  return { from: f, to: t, size };
+}
+
 function buildSvg(l: Listing): string {
   const typeLabel = l.type === 'offer' ? 'водитель везёт' : 'нужно передать';
 
@@ -81,19 +101,10 @@ function buildSvg(l: Listing): string {
   const meta = fitLine(metaRaw, AREA, 38);
 
   // Маршрут: кегль от длины, при сверхдлинных городах — мельче и с «…»
-  const routeLen = l.fromCity.length + l.toCity.length + 3;
-  let routeSize = routeLen <= 16 ? 118 : routeLen <= 22 ? 98 : routeLen <= 30 ? 80 : routeLen <= 42 ? 62 : 50;
-  const routeFits = (sz: number) => routeLen * sz * BOLD_W <= AREA;
-  while (!routeFits(routeSize) && routeSize > 40) routeSize -= 4;
-  let fromTxt = l.fromCity;
-  let toTxt = l.toCity;
-  if (!routeFits(routeSize)) {
-    // не влезает даже мелким — урезаем оба города до симметричного бюджета
-    const total = Math.floor(AREA / (routeSize * BOLD_W)) - 3;
-    const budget = Math.max(4, Math.floor((total - 2) / 2));
-    fromTxt = fitLine(fromTxt, budget * routeSize * BOLD_W, routeSize, true);
-    toTxt = fitLine(toTxt, budget * routeSize * BOLD_W, routeSize, true);
-  }
+  const route = fitRoutePair(l.fromCity, l.toCity);
+  const routeSize = route.size;
+  const fromTxt = route.from;
+  const toTxt = route.to;
 
   // Описание: до двух строк, с «…» на второй
   let desc = (l.description ?? '').replace(/\s+/g, ' ').trim();
@@ -143,6 +154,73 @@ function buildSvg(l: Listing): string {
 export async function renderOgImage(listing: Listing, env: Env): Promise<Uint8Array> {
   const fontBuffers = await lazyInit(env);
   const resvg = new Resvg(buildSvg(listing), {
+    font: {
+      fontBuffers,
+      loadSystemFonts: false,
+      defaultFontFamily: 'DejaVu Serif',
+      serifFamily: 'DejaVu Serif',
+    },
+    fitTo: { mode: 'original' },
+  });
+  return resvg.render().asPng();
+}
+
+/* ------------------------------------------------------------------ */
+/* Карточки маршрутов и городов (/og-route/:slug.png)                   */
+/* ------------------------------------------------------------------ */
+
+export interface OgCardSpec {
+  /** основной заголовок: город отправления или сам город */
+  from: string;
+  /** город назначения — пусто для карточки города */
+  to?: string;
+  /** текст в плашке под заголовком */
+  badge?: string;
+  /** строка под плашкой (страны, число заявок) */
+  meta?: string;
+  /** нижняя подпись */
+  note?: string;
+}
+
+function buildCardSvg(spec: OgCardSpec): string {
+  const to = (spec.to ?? '').trim();
+  const head = fitRoutePair(spec.from, to, to ? 118 : 132);
+  const title = to
+    ? `${escapeHtml(head.from)} <tspan fill="#a43a10">→</tspan> ${escapeHtml(head.to)}`
+    : escapeHtml(fitLine(spec.from, AREA, head.size, true));
+
+  const badge = spec.badge ? fitLine(spec.badge, AREA - 60, 32) : null;
+  const badgeW = badge ? badge.length * 20 + 72 : 0;
+  const meta = spec.meta ? fitLine(spec.meta, AREA, 36) : null;
+  const note = spec.note ? fitLine(spec.note, AREA, 30) : null;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
+  <rect width="${WIDTH}" height="${HEIGHT}" fill="#f2eee5"/>
+
+  <!-- лейбл сверху -->
+  <text x="80" y="128" font-family="DejaVu Serif" font-size="64" font-weight="bold" fill="#201d17">попутка<tspan fill="#a43a10">.</tspan></text>
+  <line x1="80" y1="170" x2="${WIDTH - 80}" y2="170" stroke="#a99e85" stroke-width="2"/>
+
+  <!-- маршрут или город -->
+  <text x="${WIDTH / 2}" y="${to ? 320 : 330}" text-anchor="middle" font-family="DejaVu Serif" font-size="${head.size}" font-weight="bold" fill="#201d17">${title}</text>
+
+  ${badge ? `<!-- плашка -->
+  <rect x="${(WIDTH - badgeW) / 2}" y="380" width="${badgeW}" height="66" fill="none" stroke="#201d17" stroke-width="3"/>
+  <text x="${WIDTH / 2}" y="425" text-anchor="middle" font-family="DejaVu Serif" font-size="32" fill="#201d17">${escapeHtml(badge)}</text>` : ''}
+
+  ${meta ? `<text x="${WIDTH / 2}" y="500" text-anchor="middle" font-family="DejaVu Serif" font-size="36" fill="#47423a">${escapeHtml(meta)}</text>` : ''}
+
+  ${note ? `<text x="${WIDTH / 2}" y="552" text-anchor="middle" font-family="DejaVu Serif" font-size="30" fill="#6f675a">${escapeHtml(note)}</text>` : ''}
+
+  <!-- домен -->
+  <text x="${WIDTH - 80}" y="${HEIGHT - 40}" text-anchor="end" font-family="DejaVu Serif" font-size="26" fill="#a99e85">pop-utka.app</text>
+</svg>`;
+}
+
+/** OG-картинка страницы маршрута или города. */
+export async function renderRouteOg(spec: OgCardSpec, env: Env): Promise<Uint8Array> {
+  const fontBuffers = await lazyInit(env);
+  const resvg = new Resvg(buildCardSvg(spec), {
     font: {
       fontBuffers,
       loadSystemFonts: false,

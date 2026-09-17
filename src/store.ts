@@ -711,3 +711,113 @@ export async function deleteListings(env: Env, ids: string[]): Promise<number> {
   }
   return deleted;
 }
+
+/* ------------------------------------------------------------------ */
+/* Для SEO-страниц: пары городов, города, ссылки для sitemap            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Что вообще видно на сайте: опубликованные заявки с не прошедшей датой
+ * и архив (месяц после даты выезда, потом cron удаляет). Тот же набор,
+ * что показывают доска и /api/listings — иначе страницы маршрутов
+ * появлялись бы и исчезали каждый день.
+ */
+const VISIBLE_WHERE = `(
+    (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')))
+    OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-30 days'))
+  )`;
+
+/** Активная заявка: на доске прямо сейчас (не архив). */
+const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')) THEN 1 ELSE 0 END`;
+
+export interface RoutePair {
+  fromCity: string;
+  toCity: string;
+  /** сколько заявок видно на сайте (активные + архив месяца) */
+  total: number;
+  /** сколько из них на доске прямо сейчас */
+  active: number;
+  /** когда последний раз публиковали — для lastmod в sitemap */
+  lastmod: string;
+}
+
+/**
+ * Пары городов, которые реально встречаются в заявках.
+ * Страница маршрута создаётся, только если есть хотя бы одна активная заявка:
+ * пустые страницы — это тонкий контент, который поисковик не любит.
+ */
+export async function listRoutePairs(env: Env, limit = 500): Promise<RoutePair[]> {
+  const res = await env.DB.prepare(
+    `SELECT from_city, to_city,
+            COUNT(*) AS total,
+            SUM(${ACTIVE_EXPR}) AS active,
+            MAX(COALESCE(published_at, created_at)) AS lastmod
+       FROM listings
+      WHERE ${VISIBLE_WHERE}
+      GROUP BY from_city, to_city
+     HAVING active >= 1
+      ORDER BY active DESC, total DESC, from_city
+      LIMIT ?`
+  ).bind(Math.min(1000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    fromCity: String(r.from_city),
+    toCity: String(r.to_city),
+    total: Number(r.total ?? 0),
+    active: Number(r.active ?? 0),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
+
+export interface CityStat {
+  city: string;
+  /** заявок, где город — точка отправления или назначения */
+  count: number;
+  active: number;
+  lastmod: string;
+}
+
+/** Города, которые встречаются в заявках (откуда или куда). */
+export async function listCityStats(env: Env, limit = 300): Promise<CityStat[]> {
+  const res = await env.DB.prepare(
+    `SELECT city, COUNT(*) AS count, SUM(active) AS active, MAX(lastmod) AS lastmod
+       FROM (
+         SELECT from_city AS city, ${ACTIVE_EXPR} AS active, COALESCE(published_at, created_at) AS lastmod
+           FROM listings WHERE ${VISIBLE_WHERE}
+         UNION ALL
+         SELECT to_city AS city, ${ACTIVE_EXPR} AS active, COALESCE(published_at, created_at) AS lastmod
+           FROM listings WHERE ${VISIBLE_WHERE}
+       )
+      GROUP BY city
+      ORDER BY active DESC, count DESC, city
+      LIMIT ?`
+  ).bind(Math.min(1000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    city: String(r.city),
+    count: Number(r.count ?? 0),
+    active: Number(r.active ?? 0),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
+
+export interface SitemapItem {
+  id: string;
+  lastmod: string;
+}
+
+/** Объявления для sitemap: те же, что видны на сайте, последними изменениями вперёд. */
+export async function listSitemapItems(env: Env, limit = 5000): Promise<SitemapItem[]> {
+  const res = await env.DB.prepare(
+    `SELECT id, COALESCE(published_at, created_at) AS lastmod
+       FROM listings
+      WHERE ${VISIBLE_WHERE}
+      ORDER BY lastmod DESC
+      LIMIT ?`
+  ).bind(Math.min(20000, Math.max(1, limit))).all();
+
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    lastmod: String(r.lastmod ?? '').slice(0, 10),
+  }));
+}
