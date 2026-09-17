@@ -241,7 +241,7 @@ const SEARCH_MONTHS = [
 function searchLine(env: Env, l: Listing, today: string): string {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const route = site
-    ? `<a href="${site}/#/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
+    ? `<a href="${site}/item/${l.id}">${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}</a>`
     : `${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`;
   const bits: string[] = [];
   if (l.departureDate) {
@@ -1148,7 +1148,7 @@ function repeatReply(repeats: Repeat[]): string {
 /** Короткая заметка модератору: пришёл повтор, дубль не создан. */
 export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string): Promise<void> {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
-  const link = site ? ` — <a href="${site}/#/item/${listing.id}">открыть</a>` : '';
+  const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
   const refreshed = listing.status === 'published' ? ' Освежил: заявка снова вверху доски.' : '';
   for (const adminId of admins(env)) {
     await sendText(env, Number(adminId),

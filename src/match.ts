@@ -347,7 +347,7 @@ export function formatMatchDigest(opts: {
   const lines = opts.pairs.slice(0, max).map((p, i) => {
     const contacts = (l: Listing) => uniqueContacts(l.telegram, l.phone)[0] ?? 'нет контакта';
     const links = site
-      ? `\n   <a href="${site}/#/item/${p.offer.id}">водитель</a> · <a href="${site}/#/item/${p.request.id}">заявка</a>`
+      ? `\n   <a href="${site}/item/${p.offer.id}">водитель</a> · <a href="${site}/item/${p.request.id}">заявка</a>`
       : '';
     return `${i + 1}. 🚗 ${escapeHtml(p.offer.fromCity)} → ${escapeHtml(p.offer.toCity)}, ${day(p.offer.departureDate ?? null)}, ${escapeHtml(contacts(p.offer))}\n` +
       `   📦 ${escapeHtml(p.request.fromCity)} → ${escapeHtml(p.request.toCity)}, ${day(p.request.departureDate ?? null)}, ${escapeHtml(contacts(p.request))}\n` +

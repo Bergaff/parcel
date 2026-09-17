@@ -550,3 +550,25 @@ button { font-family: inherit; }
 .match-note { font-size: 12.5px; color: var(--muted); }
 @media (max-width: 640px) { .match-form .row2 { grid-template-columns: 1fr; } }
 .admin-actions { display: flex; gap: 18px; align-items: center; margin-top: 20px; }
+
+/* ---------- служебные страницы: маршруты, города, карточка, 404 ---------- */
+/* Кнопки в ряд и блоки ссылок «смотрите также» */
+.cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0 10px; }
+.related { margin-top: 26px; }
+.related a { display: inline-block; margin: 0 14px 8px 0; }
+.route-cities { font-size: 15px; color: var(--muted); margin: 4px 0 26px; }
+.seo-page .lead { font-size: 19px; line-height: 1.55; }
+.seo-page .row { margin-bottom: 14px; }
+
+/* Хлебные крошки: доска → маршрут → объявление */
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 14px;
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+.crumbs a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.crumb-sep { color: var(--line-strong); }

@@ -246,24 +246,16 @@ function pageShell(opts: {
   <meta property="og:image" content="${opts.origin}/og-cover.png?v=3" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2eee5'/><text x='50' y='68' font-size='52' font-family='Georgia' text-anchor='middle' fill='%23201d17'>п</text></svg>" />
   <link rel="stylesheet" href="/styles.css" />
-  <style>
-    .lead { font-size: 19px; line-height: 1.55; color: var(--ink-soft); }
-    .route-cities { font-size: 15px; color: var(--muted); margin: 4px 0 26px; }
-    .seo-page .row { margin-bottom: 14px; }
-    .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0 10px; }
-    .related { margin-top: 34px; }
-    .related a { display: inline-block; margin: 0 14px 8px 0; }
-  </style>
 </head>
 <body>
   <header class="masthead">
     <div class="wrap masthead-grid">
       <a class="wordmark" href="/">попутка<span class="wordmark-dot">.</span></a>
       <nav class="topnav wrap" style="padding:0">
-        <a href="/#/">Доска</a>
-        <a href="/#/how">Как это работает</a>
+        <a href="/">Доска</a>
+        <a href="/how">Как это работает</a>
         <a href="/routes">Маршруты</a>
-        <a href="/#/new" class="btn btn-ink nav-cta">+ разместить</a>
+        <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
       </nav>
     </div>
   </header>
@@ -271,7 +263,7 @@ function pageShell(opts: {
 ${opts.body}
   </main>
   <footer class="colophon-foot wrap">
-    <p class="foot-meta">попутка. — личная доска без посредников · <a href="/#/terms">условия</a> · <a href="/#/privacy">приватность</a></p>
+    <p class="foot-meta">попутка. — личная доска без посредников · <a href="/terms">условия</a> · <a href="/privacy">приватность</a></p>
   </footer>
 </body>
 </html>`;
@@ -290,7 +282,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
 
   const reverseRoute = SEO_ROUTES.find((x) => x.from === r.to && x.to === r.from) ?? null;
   const related = SEO_ROUTES.filter((x) => x.slug !== r.slug && (x.from === r.from || x.to === r.to)).slice(0, 6);
-  const boardUrl = `/?from=${encodeURIComponent(r.from)}&to=${encodeURIComponent(r.to)}#/`;
+  const boardUrl = `/?from=${encodeURIComponent(r.from)}&to=${encodeURIComponent(r.to)}`;
 
   const title = `Передать посылку ${r.from} → ${r.to} — заявки водителей | попутка.`;
   const description = `Нужно передать посылку ${r.from} → ${r.to}? Водители берут посылки попутно: даты выезда, вес, цена и контакт — напрямую, без посредников и комиссий. Обновляется каждый день.`;
@@ -321,7 +313,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     <p class="lead">${introText(r, seed)}</p>
 
     <div class="cta-row">
-      <a class="btn btn-ink btn-lg" href="/#/new">Разместить объявление</a>
+      <a class="btn btn-ink btn-lg" href="/new">Разместить объявление</a>
       <a class="btn btn-line btn-lg" href="${boardUrl}">Открыть на доске</a>
     </div>
 
@@ -345,7 +337,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
 
     ${relatedHtml}
 
-    <p class="colophon">Не нашли рейс на нужную дату? Разместите просьбу — это бесплатно и занимает минуту: <a href="/#/new">форма на сайте</a> или бот в Telegram.</p>`;
+    <p class="colophon">Не нашли рейс на нужную дату? Разместите просьбу — это бесплатно и занимает минуту: <a href="/new">форма на сайте</a> или бот в Telegram.</p>`;
 
   return pageShell({ title, description, canonical: `${origin}/r/${r.slug}`, origin, body });
 }
@@ -375,7 +367,7 @@ export function buildRoutesIndexPage(origin: string): string {
     <h1 class="page-title">Популярные маршруты</h1>
     <p class="lead">Выберите направление — на странице маршрута собраны живые заявки водителей и просьбы передать посылку, а также подробности: что обычно везут, сколько это стоит и как не нарваться на мошенника.</p>
 ${list}
-    <p class="colophon">Нет нужного маршрута? Откройте <a href="/#/">доску</a> и впишите города в поиск — заявки фильтруются по любому направлению.</p>`,
+    <p class="colophon">Нет нужного маршрута? Откройте <a href="/">доску</a> и впишите города в поиск — заявки фильтруются по любому направлению.</p>`,
   });
 }
 
@@ -410,6 +402,12 @@ export function footRoutes(limit = 9): SeoRoute[] {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+/** Есть ли страница маршрута у этой пары городов (для ссылок и хлебных крошек). */
+export function routePathFor(from: string, to: string): string | null {
+  const r = SEO_ROUTES.find((x) => x.from === from && x.to === to);
+  return r ? `/r/${r.slug}` : null;
 }
 
 export { findRoute };

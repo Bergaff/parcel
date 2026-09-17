@@ -185,9 +185,10 @@ const byId = (id: string): HTMLElement => {
   return node as HTMLElement;
 };
 const text = (id: string) => byId(id).textContent || '';
-/** Переход по хешу: jsdom применяет смену адреса асинхронно, поэтому ждём. */
-async function goto(hash: string, ms = 60) {
-  win.location.hash = hash;
+/** Переход по адресу: как кнопка «назад» в браузере (pushState + popstate). */
+async function goto(path: string, ms = 60) {
+  win.history.pushState(null, '', path);
+  win.dispatchEvent(new win.Event('popstate'));
   await settle(ms);
 }
 const rows = () => Array.from(win.document.querySelectorAll('#list article.row')) as HTMLElement[];
@@ -199,7 +200,7 @@ beforeAll(async () => {
     if (!/Not implemented/.test(e.message)) pageErrors.push(e.message);
   });
   dom = new JSDOM(htmlSource, {
-    url: 'http://localhost/#/',
+    url: 'http://localhost/',
     runScripts: 'outside-only',
     pretendToBeVisual: true,
     virtualConsole: vc,
@@ -221,7 +222,7 @@ describe('доска: строка объявления', () => {
     const row = rows()[0]!;
     const link = row.querySelector('a.row-link') as HTMLAnchorElement | null;
     expect(link, 'в строке должна быть растянутая ссылка .row-link').not.toBeNull();
-    expect(link!.getAttribute('href')).toBe(`#/item/${ID}`);
+    expect(link!.getAttribute('href')).toBe(`/item/${ID}`);
     expect(link!.getAttribute('aria-label')).toContain('Варшава → Минск');
     // никаких костылей для «кликабельного div»: переход делает браузер
     expect(row.hasAttribute('tabindex')).toBe(false);
@@ -260,7 +261,7 @@ describe('доска: строка объявления', () => {
 
 describe('карточка: отклик на нажатие (INP)', () => {
   it('нажатие и наведение на строку не дёргают API — просмотры не накручиваются', async () => {
-    await goto('#/');
+    await goto('/');
     calls.length = 0;
     const row = rows()[0]!;
     const link = row.querySelector('a.row-link') as HTMLAnchorElement;
@@ -281,7 +282,7 @@ describe('карточка: отклик на нажатие (INP)', () => {
     link.click();
     await settle(20); // jsdom применяет переход по якорю асинхронно
 
-    expect(win.location.hash, 'переход по ссылке должен сработать без JS-обработчика').toBe(`#/item/${ID}`);
+    expect(win.location.pathname, 'переход по ссылке работает штатно, без перезагрузки').toBe(`/item/${ID}`);
     const detail = byId('item-detail');
     expect(byId('view-item').hidden).toBe(false);
     expect(detail.textContent, 'карточка нарисована сразу, из данных строки').toContain(BOARD_DESC);
@@ -300,7 +301,7 @@ describe('карточка: отклик на нажатие (INP)', () => {
 
   it('по прямой ссылке (кэша нет) честно пишет «достаю карточку…»', async () => {
     server.detailDelayMs = 200;
-    await goto(`#/item/${COLD}`, 30);
+    await goto(`/item/${COLD}`, 30);
     expect(byId('item-detail').textContent, 'без кэша честно показываем ожидание').toContain('достаю карточку');
     await settle(300);
     const t = byId('item-detail').textContent || '';
@@ -311,19 +312,19 @@ describe('карточка: отклик на нажатие (INP)', () => {
 
   it('несуществующее объявление — понятная заглушка и путь назад', async () => {
     server.detailDelayMs = 0;
-    await goto('#/item/nope-0000');
+    await goto('/item/nope-0000');
     const t = byId('item-detail').textContent || '';
     expect(t).toContain('Такого объявления нет');
-    expect(byId('item-detail').querySelector('a[href="#/"]'), 'ссылка «← к доске»').not.toBeNull();
+    expect(byId('item-detail').querySelector('a[href="/"]'), 'ссылка «← к доске»').not.toBeNull();
   });
 
   it('«пожаловаться» в строке не уводит с доски', async () => {
-    await goto('#/');
+    await goto('/');
     win.prompt = () => 'спам';
     calls.length = 0;
     (rows()[0]!.querySelector('a.report-link') as HTMLElement).click();
     await settle(60);
-    expect(win.location.hash, 'hash не должен меняться').toBe('#/');
+    expect(win.location.pathname, 'адрес не должен меняться').toBe('/');
     expect(calls).toContain(`POST /api/listings/${ID}/report`);
     expect(server.reports).toContain('спам');
     expect(text('toast')).toContain('Жалоба принята');
@@ -347,7 +348,7 @@ describe('CSS строки', () => {
 
 describe('админка', () => {
   it('без ключа показывает форму входа', async () => {
-    await goto('#/admin');
+    await goto('/admin');
     expect(byId('admin-login').hidden).toBe(false);
     expect(byId('admin-panel').hidden).toBe(true);
   });
@@ -363,7 +364,7 @@ describe('админка', () => {
     expect(warn, 'у повтора должен быть бейдж').not.toBeNull();
     expect(warn!.textContent).toContain('Это повтор');
     expect(warn!.textContent).toContain('тот же маршрут и даты');
-    expect((warn!.querySelector('a') as HTMLAnchorElement).getAttribute('href')).toBe(`#/item/${ID}`);
+    expect((warn!.querySelector('a') as HTMLAnchorElement).getAttribute('href')).toBe(`/item/${ID}`);
   });
 
   it('одобрение дубля предупреждает, что такая заявка уже на доске', async () => {

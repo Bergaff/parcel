@@ -175,10 +175,10 @@ async function copyListingLink(l) {
 /* ---------- роутинг ---------- */
 
 function showView(name) {
-  for (const v of ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy', 'admin']) {
+  for (const v of VIEWS) {
     $(`#view-${v}`).hidden = v !== name;
   }
-  const navOn = name === 'how' ? '#/how' : name === 'bot' ? '#/bot' : name === 'list' || name === 'item' ? '#/' : null;
+  const navOn = name === 'how' ? '/how' : name === 'bot' ? '/bot' : name === 'list' || name === 'item' ? '/' : null;
   $$('.topnav a').forEach((a) => {
     a.classList.toggle('on', a.getAttribute('href') === navOn);
   });
@@ -192,24 +192,79 @@ function showView(name) {
     item: 'попутка. объявление',
     admin: 'попутка. админ',
   };
-  document.title = titles[name] ?? titles.list;
+  // На первой странице заголовок уже поставил воркер (он полнее и нужен поиску) —
+  // не затираем его, свои короткие ставим только при переходах внутри сайта
+  if (!window.__SSR__ || !initialRoute) document.title = titles[name] ?? titles.list;
   window.scrollTo({ top: 0 });
 }
 
-function parseHash() {
-  const parts = location.hash.replace(/^#\/?/, '').split('/');
-  if (parts[0] === 'new') return { view: 'new' };
-  if (parts[0] === 'item' && parts[1]) return { view: 'item', id: parts[1] };
-  if (parts[0] === 'how') return { view: 'how' };
-  if (parts[0] === 'bot') return { view: 'bot' };
-  if (parts[0] === 'terms') return { view: 'terms' };
-  if (parts[0] === 'privacy') return { view: 'privacy' };
-  if (parts[0] === 'admin') return { view: 'admin' };
+/* Нормальные адреса вместо #/…: для поисковика всё после «#» — не URL, поэтому
+   страницы «как это работает», «условия», «приватность» и карточки объявлений
+   в индексе не существовали. Старые хеш-ссылки (их много в Telegram) на лету
+   превращаются в пути — без перезагрузки и без потери контента. */
+
+const VIEWS = ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy', 'admin'];
+const APP_PATHS = ['/', '/new', '/how', '/bot', '/terms', '/privacy', '/admin'];
+
+function isAppPath(pathname) {
+  const p = pathname.replace(/\/+$/, '') || '/';
+  return APP_PATHS.includes(p) || p.startsWith('/item/');
+}
+
+function parsePath(pathname = location.pathname) {
+  const p = pathname.replace(/\/+$/, '') || '/';
+  const m = /^\/item\/([^/]+)$/.exec(p);
+  if (m) return { view: 'item', id: decodeURIComponent(m[1]) };
+  const bare = p.slice(1);
+  if (['new', 'how', 'bot', 'terms', 'privacy', 'admin'].includes(bare)) return { view: bare };
   return { view: 'list' };
 }
 
+/** '#/item/x' → '/item/x', '#/how' → '/how', '#/' → '/' */
+function hashToPath(hash) {
+  const raw = String(hash || '').replace(/^#\/?/, '').replace(/^\/+/, '');
+  return raw ? `/${raw}` : '/';
+}
+
+function readFilters() {
+  const q = new URLSearchParams(location.search);
+  return {
+    from: q.get('from') || '',
+    to: q.get('to') || '',
+    date: q.get('date') || '',
+    type: q.get('type') || '',
+    archive: q.get('archive') === '1',
+  };
+}
+
+/** Фильтры доски — в адрес (replaceState: история не засоряется, ссылкой можно поделиться). */
+function syncFiltersToUrl() {
+  const q = new URLSearchParams();
+  if (state.from) q.set('from', state.from);
+  if (state.to) q.set('to', state.to);
+  if (state.date) q.set('date', state.date);
+  if (state.type) q.set('type', state.type);
+  if (state.archive) q.set('archive', '1');
+  const search = q.toString();
+  const url = `/${search ? `?${search}` : ''}`;
+  if (url !== location.pathname + location.search) history.replaceState(null, '', url);
+}
+
+function navTo(url, opts = {}) {
+  if (opts.replace) history.replaceState(null, '', url);
+  else history.pushState(null, '', url);
+  route();
+}
+
+let initialRoute = true; // первый route() работает по HTML, который прислал воркер
+
 async function route() {
-  const r = parseHash();
+  // старая хеш-ссылка в адресе — сразу превращаем её в путь
+  if (location.hash && location.hash !== '#') {
+    const path = hashToPath(location.hash);
+    history.replaceState(null, '', path === '/' ? `/${location.search}` : path);
+  }
+  const r = parsePath();
   if (r.view === 'new') showView('new');
   else if (r.view === 'how') showView('how');
   else if (r.view === 'bot') showView('bot');
@@ -217,10 +272,47 @@ async function route() {
   else if (r.view === 'privacy') showView('privacy');
   else if (r.view === 'admin') { showView('admin'); await loadAdmin(); }
   else if (r.view === 'item') { showView('item'); await loadDetail(r.id); }
-  else { showView('list'); await loadList(true); }
+  else {
+    showView('list');
+    Object.assign(state, readFilters());
+    $('#f-from').value = state.from;
+    $('#f-to').value = state.to;
+    $('#f-date').value = state.date;
+    $$('.tab').forEach((t) => {
+      t.classList.toggle('on', state.archive ? t.dataset.type === 'archive' : t.dataset.type === state.type);
+    });
+    await loadList(true);
+  }
+  initialRoute = false;
 }
 
+window.addEventListener('popstate', route);
 window.addEventListener('hashchange', route);
+
+/* Клик по внутренней ссылке — переход без перезагрузки, но href настоящий:
+   работают средняя кнопка, «открыть в новой вкладке» и краулеры. Служебные
+   страницы (/r/…, /routes, /gorod/…, /itogi) грузятся обычным переходом.
+   Здесь же — кнопки, нарисованные сервером (data-report / data-copy). */
+document.addEventListener('click', (e) => {
+  const hit = e.target.closest ? e.target.closest('[data-report], [data-copy], a[href]') : null;
+  if (!hit) return;
+
+  if (hit.dataset && hit.dataset.report) { e.preventDefault(); openReport(hit.dataset.report); return; }
+  if (hit.dataset && hit.dataset.copy) {
+    e.preventDefault();
+    copyListingLink(listingCache.get(hit.dataset.copy) || { id: hit.dataset.copy });
+    return;
+  }
+
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const href = hit.getAttribute('href');
+  if (!href || href.startsWith('#')) return;
+  let url;
+  try { url = new URL(href, location.href); } catch { return; }
+  if (url.origin !== location.origin || !isAppPath(url.pathname)) return;
+  e.preventDefault();
+  navTo(url.pathname + url.search);
+});
 
 /* ---------- доска ---------- */
 
@@ -233,7 +325,7 @@ function buildRow(l) {
     // так рисуется мгновенно из кэша, а GET карточки засчитывает просмотр.
     el('a', {
       class: 'row-link',
-      href: `#/item/${l.id}`,
+      href: `/item/${l.id}`,
       'aria-label': `${l.fromCity} → ${l.toCity}: открыть объявление`,
     }),
     el('div', { class: 'row-main' }, [
@@ -262,7 +354,7 @@ function buildRow(l) {
       el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
       el('a', {
         class: 'write-link report-link',
-        href: `#/item/${l.id}`,
+        href: `/item/${l.id}`,
         text: 'пожаловаться',
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); openReport(l.id); },
       }),
@@ -275,6 +367,7 @@ function buildRow(l) {
 
 async function loadList(reset = false) {
   if (reset) state.page = 1;
+  syncFiltersToUrl();
   const params = new URLSearchParams();
   if (state.archive) params.set('archive', '1');
   if (state.type) params.set('type', state.type);
@@ -283,7 +376,10 @@ async function loadList(reset = false) {
   if (state.date) params.set('date', state.date);
   params.set('page', String(state.page));
 
-  if (state.page === 1) $('#list').replaceChildren(el('p', { class: 'empty-note', text: 'смотрю доску…' }));
+  // Сервер уже нарисовал строки (SSR) — не мигаем заглушкой, дождавшись данных
+  if (state.page === 1 && !$('#list').dataset.ssr) {
+    $('#list').replaceChildren(el('p', { class: 'empty-note', text: 'смотрю доску…' }));
+  }
 
   try {
     const res = await api(`/api/listings?${params}`);
@@ -294,6 +390,7 @@ async function loadList(reset = false) {
 
     cacheListings(data.items);
     const listEl = $('#list');
+    listEl.removeAttribute('data-ssr');
     if (state.page === 1) listEl.replaceChildren();
     if (data.items.length === 0 && state.page === 1) listEl.replaceChildren();
     // Один фрагмент вместо N вставок: меньше перерасчётов макета при прокрутке
@@ -417,7 +514,7 @@ async function loadDetail(id) {
   } else if (!cached) {
     box.replaceChildren(
       el('p', { class: 'empty-note', text: 'Такого объявления нет. Возможно, его сняли после жалоб.' }),
-      el('a', { class: 'back', href: '#/', text: '← к доске' }),
+      el('a', { class: 'back', href: '/', text: '← к доске' }),
     );
   }
 }
@@ -445,7 +542,7 @@ function renderDetail(l) {
   actions.push(
     el('a', {
       class: 'link-btn',
-      href: `#/item/${l.id}`,
+      href: `/item/${l.id}`,
       onclick: (e) => { e.preventDefault(); openReport(l.id); },
       text: 'пожаловаться',
     })
@@ -588,10 +685,9 @@ function bindForm() {
       toast(data.message || 'Ушло на проверку.');
       e.target.reset();
       if (dupeId) {
-        location.hash = `#/item/${dupeId}`; // вторая заявка не нужна — показываем ту, что уже есть
+        navTo(`/item/${dupeId}`); // вторая заявка не нужна — показываем ту, что уже есть
       } else {
-        location.hash = '#/';
-        await loadList(true);
+        navTo('/');
       }
     } catch (ex) {
       err.textContent = ex.message;
@@ -629,7 +725,7 @@ function duplicateNote(l) {
   return el('p', { class: `dup-warn dup-${d.kind}` }, [
     el('b', { text: d.kind === 'duplicate' ? '♻️ Это повтор — ' : '⚠️ Похоже на дубль — ' }),
     `такая заявка ${where}: `,
-    el('a', { href: `#/item/${d.id}`, text: `№ ${d.id.slice(0, 8)}` }),
+    el('a', { href: `/item/${d.id}`, text: `№ ${d.id.slice(0, 8)}` }),
     ` · ${d.fromCity} → ${d.toCity}${d.departureDate ? ` · ${fmtDate(d.departureDate)}` : ''}`,
     el('span', { class: 'dup-why', text: d.why }),
   ]);
@@ -975,8 +1071,8 @@ function matchMessage(p) {
     `🚗 водитель везёт: ${side(p.offer)}`,
     `📦 нужно передать: ${side(p.request)}`,
     '',
-    `${site}#/item/${p.offer.id}`,
-    `${site}#/item/${p.request.id}`,
+    `${site}/item/${p.offer.id}`,
+    `${site}/item/${p.request.id}`,
     '',
     'Напишите друг другу и договоритесь о деталях — доска только знакомит.',
   ].join('\n');
@@ -1012,8 +1108,8 @@ function matchPairCard(p, i) {
     matchSide(p.offer, '🚗'),
     matchSide(p.request, '📦'),
     el('div', { class: 'admin-card-actions' }, [
-      el('a', { class: 'btn btn-line btn-sm', href: `#/item/${p.offer.id}`, text: 'водитель' }),
-      el('a', { class: 'btn btn-line btn-sm', href: `#/item/${p.request.id}`, text: 'заявка' }),
+      el('a', { class: 'btn btn-line btn-sm', href: `/item/${p.offer.id}`, text: 'водитель' }),
+      el('a', { class: 'btn btn-line btn-sm', href: `/item/${p.request.id}`, text: 'заявка' }),
       el('button', {
         class: 'btn btn-line btn-sm', type: 'button', text: 'скопировать сообщение',
         onclick: () => copyText(matchMessage(p)),
@@ -1233,7 +1329,7 @@ function dupeLine(l, isKeep) {
   const contact = contactInfo(l);
   return el('div', { class: `dupe-line${isKeep ? ' dupe-keep' : ''}` }, [
     el('span', { class: 'dupe-tag', text: isKeep ? 'оставить' : 'копия' }),
-    el('a', { class: 'dupe-route', href: `#/item/${l.id}`, text: `${l.fromCity} → ${l.toCity}` }),
+    el('a', { class: 'dupe-route', href: `/item/${l.id}`, text: `${l.fromCity} → ${l.toCity}` }),
     el('span', { text: l.departureDate ? fmtDate(l.departureDate) : 'без даты' }),
     l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     el('span', { text: contact ? contact.label : 'нет контакта' }),
@@ -1415,14 +1511,18 @@ async function init() {
   bindForm();
   bindAdmin();
 
-  // Глубокая ссылка с SEO-страницы маршрута: /?from=Варшава&to=Львов#/
-  try {
-    const qp = new URLSearchParams(location.search);
-    const from = qp.get('from');
-    const to = qp.get('to');
-    if (from) { state.from = from; $('#f-from').value = from; }
-    if (to) { state.to = to; $('#f-to').value = to; }
-  } catch { /* ничего страшного */ }
+  // Сервер вставил объявления и карточку прямо в HTML (src/ssr.ts) и передал
+  // данные сюда: кладём их в кэш, чтобы первый же клик открыл карточку без
+  // запроса, и показываем счётчик, не дожидаясь API.
+  const ssr = window.__SSR__;
+  if (ssr) {
+    if (Array.isArray(ssr.items)) cacheListings(ssr.items);
+    if (ssr.item) cacheListings([ssr.item]);
+    if (typeof ssr.total === 'number') {
+      state.total = ssr.total;
+      $('#total-count').textContent = `${ssr.total} ${plural(ssr.total, 'объявление', 'объявления', 'объявлений')}`;
+    }
+  }
 
   try {
     const res = await api('/api/config');
@@ -1441,7 +1541,7 @@ async function init() {
     $('#foot-bot').href = config.botLink;
     $('#foot-bot').target = '_blank';
   } else {
-    $('#bot-link').href = '#/bot';
+    $('#bot-link').href = '/bot';
   }
 
   await route();

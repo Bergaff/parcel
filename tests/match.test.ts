@@ -229,7 +229,8 @@ describe('formatMatchDigest: сводка в Telegram', () => {
     });
     expect(digest).toContain('Подбор пар');
     expect(digest).toContain('Варшава — Минск');
-    expect(digest).toContain('https://pop-utka.app/#/item/');
+    // ссылки — на настоящие адреса карточек (без «#»: его поисковики не видят)
+    expect(digest).toContain('https://pop-utka.app/item/');
     expect(digest).toContain('Пар: <b>1</b>');
   });
 

@@ -7,7 +7,8 @@ import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
 import { renderOgImage } from './og';
-import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml } from './seo-routes';
+import { buildRoutePage, buildRoutesIndexPage, buildSitemapXml, routePathFor } from './seo-routes';
+import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, siteOrigin, STATIC_PAGES } from './pages';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -222,60 +223,57 @@ app.post('/api/listings/:id/report', async (c) => {
   return c.json({ ok: true, message: res.autoRejected ? 'Объявление скрыто модерацией.' : 'Жалоба принята, спасибо.' });
 });
 
-/* ---------------- Страница объявления для превью (OG) ---------------- */
-/* Мессенджеры (Telegram, WhatsApp, VK и др.) не исполняют JS и не видят
-   hash-роутинг SPA, поэтому для ссылок вида /item/:id отдаём статичный HTML
-   с og-разметкой из базы. Живому человеку страница мгновенно делает
-   redirect на SPA #/item/:id — см. wrangler.toml: run_worker_first. */
+/* ---------------------- Страницы сайта (SSR) ---------------------- */
+/* Доска — SPA, но отдаёт её воркер уже с контентом в HTML: строки на главной,
+   карточка объявления, текстовые разделы. Без этого поисковик видит пустой
+   <div id="list"> и страницы за «#», которых для него не существует. */
 
+app.get('/', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildHomePage(c.env, origin, new URL(c.req.url));
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
+
+/* «Как это работает», бот, условия, приватность, форма, админка */
+for (const path of Object.keys(STATIC_PAGES)) {
+  app.get(path, async (c) => {
+    const origin = siteOrigin(c.env, c.req.url);
+    const page = await buildStaticPage(c.env, origin, path);
+    if (!page) return c.notFound();
+    c.header('Cache-Control', page.cacheControl ?? 'no-store');
+    return c.html(page.html);
+  });
+}
+
+/* Карточка объявления: контент целиком в HTML (раньше — пустышка с мгновенным
+   location.replace на #/item/…), свои title/description/canonical, OG-картинка
+   и JSON-LD. Снятые и непубликованные заявки — честный 404 вместо 302 на главную
+   (soft-404 и утечка ссылочного веса). Просмотр засчитывает API-запрос клиента. */
 app.get('/item/:id', async (c) => {
-  const id = c.req.param('id');
-  const listing = await getListingById(c.env, id);
-  const origin = new URL(c.req.url).origin;
-
-  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
-    return c.redirect('/');
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildItemPage(c.env, origin, c.req.param('id'), {
+    routePath: (from, to) => routePathFor(from, to),
+  });
+  if (!page) {
+    const nf = await buildNotFoundPage(c.env, origin, 'Объявление снято с доски или удалено: заявки живут месяц после даты выезда, а потом удаляются.');
+    c.status(404);
+    c.header('Cache-Control', nf.cacheControl ?? 'no-store');
+    return c.html(nf.html);
   }
-  // Отметка «архив» для заявок с прошедшей датой — видна и в превью-ссылке
-  const archived =
-    listing.status === 'expired' ||
-    (listing.departureDate != null && listing.departureDate < mskTodayIso());
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
 
-  const typeLabel = listing.type === 'offer' ? 'водитель везёт' : 'нужно передать';
-  const title = `${listing.fromCity} → ${listing.toCity} · ${typeLabel}${archived ? ' · архив' : ''}`;
-  const bits = [
-    listing.departureDate ? `выезд ${listing.departureDate}` : null,
-    listing.weightKg != null ? `${String(listing.weightKg).replace('.', ',')} кг` : null,
-    listing.price,
-  ].filter(Boolean).join(' · ');
-  const description = [bits, listing.description.slice(0, 180)].filter(Boolean).join('. ');
-  const image = `${origin}/og/${encodeURIComponent(listing.id)}.png`;
-
-  return c.html(`<!DOCTYPE html>
-<html lang="ru">
-<head>
-  <meta charset="UTF-8" />
-  <title>${escapeHtml(title)} — попутка.</title>
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="попутка." />
-  <meta property="og:title" content="${escapeHtml(title)}" />
-  <meta property="og:description" content="${escapeHtml(description)}" />
-  <meta property="og:url" content="${origin}/item/${encodeURIComponent(listing.id)}" />
-  <meta property="og:image" content="${image}" />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="${escapeHtml(title)}" />
-  <meta name="twitter:description" content="${escapeHtml(description)}" />
-  <meta name="twitter:image" content="${image}" />
-  <script>location.replace('/#/item/${encodeURIComponent(listing.id)}');</script>
-</head>
-<body style="font-family:Georgia,serif;background:#f2eee5;color:#201d17;margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh">
-  <div style="max-width:560px;padding:40px;text-align:center">
-    <div style="font-size:44px;font-weight:700">${escapeHtml(listing.fromCity)} <span style="color:#a43a10">→</span> ${escapeHtml(listing.toCity)}</div>
-    <p style="color:#6f675a">${escapeHtml(description)}</p>
-    <p style="font-size:14px"><a href="/#/item/${encodeURIComponent(listing.id)}" style="color:#201d17">открыть на доске попутка. →</a></p>
-  </div>
-</body>
-</html>`);
+/* Неизвестный адрес: своя страница 404 со ссылками на доску и маршруты,
+   для API — JSON. Дефолтная заглушка Cloudflare человеку ничего не предлагает. */
+app.notFound(async (c) => {
+  if (c.req.path.startsWith('/api/')) return c.json({ error: 'not_found' }, 404);
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildNotFoundPage(c.env, origin);
+  c.status(404);
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
 });
 
 /* ---------------- SEO-страницы маршрутов ---------------- */
@@ -284,18 +282,22 @@ app.get('/item/:id', async (c) => {
 app.get('/r/:slug', async (c) => {
   const origin = new URL(c.req.url).origin;
   const html = await buildRoutePage(c.env, c.req.param('slug'), origin);
-  if (!html) return c.redirect('/');
+  if (!html) return c.notFound();
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
   return c.html(html);
 });
 
 app.get('/routes', (c) => {
-  return c.html(buildRoutesIndexPage(new URL(c.req.url).origin));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=3600');
+  return c.html(buildRoutesIndexPage(siteOrigin(c.env, c.req.url)));
 });
 
 /* Динамическая карта сайта: главная, страницы маршрутов, активные объявления. */
 app.get('/sitemap.xml', async (c) => {
-  const xml = await buildSitemapXml(c.env, new URL(c.req.url).origin);
-  return new Response(xml, { headers: { 'Content-Type': 'application/xml; charset=utf-8' } });
+  const xml = await buildSitemapXml(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(xml, {
+    headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
+  });
 });
 
 /* Динамическая OG-картинка объявления: 1200×630, рисуется на воркере

@@ -3,25 +3,34 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>попутка. доска попутных передач</title>
-  <meta name="description" content="Водители междугородних и международных рейсов берут посылки. Договариваетесь напрямую, без посредников." />
   <meta name="theme-color" content="#f2eee5" />
+  <!-- Заголовок, описание, canonical, OG и JSON-LD. Воркер подставляет сюда
+       данные конкретной страницы (src/ssr.ts); ниже — значения для главной,
+       чтобы страница работала и без воркера. -->
+  <!--SEO:START-->
+  <title>попутка. доска попутных передач</title>
+  <meta name="description" content="Водители междугородних и международных рейсов берут посылки. Польша, Беларусь, Украина, Европа. Договариваетесь напрямую, без посредников и комиссий." />
   <link rel="canonical" href="https://pop-utka.app/" />
-  <!-- Open Graph: превью при отправке ссылки главной страницы -->
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="попутка." />
+  <meta property="og:locale" content="ru_RU" />
   <meta property="og:title" content="попутка. доска попутных передач" />
-  <meta property="og:description" content="Водители междугородних и международных рейсов берут посылки. Польша, Украина, Европа. Договариваетесь напрямую, без посредников." />
+  <meta property="og:description" content="Водители междугородних и международных рейсов берут посылки. Польша, Беларусь, Украина, Европа. Договариваетесь напрямую, без посредников." />
   <meta property="og:url" content="https://pop-utka.app/" />
   <meta property="og:image" content="https://pop-utka.app/og-cover.png?v=3" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="попутка. — доска попутных передач" />
   <meta name="twitter:card" content="summary_large_image" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"попутка.","alternateName":"попутка — доска попутных передач","url":"https://pop-utka.app/","inLanguage":"ru","publisher":{"@type":"Organization","name":"попутка.","url":"https://pop-utka.app/"}}</script>
+  <!--SEO:END-->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%23f2eee5'/><text x='50' y='68' font-size='52' font-family='Georgia' text-anchor='middle' fill='%23201d17'>п</text></svg>" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="masthead">
     <div class="wrap masthead-grid">
-      <a class="wordmark" href="#/">попутка<span class="wordmark-dot">.</span></a>
+      <a class="wordmark" href="/">попутка<span class="wordmark-dot">.</span></a>
       <p class="masthead-meta">
         <span id="today"></span>
         <span class="dot-sep">·</span>
@@ -29,10 +38,10 @@
       </p>
     </div>
     <nav class="topnav wrap">
-      <a href="#/" id="nav-list">Доска</a>
-      <a href="#/how">Как это работает</a>
-      <a href="#/bot" id="nav-bot" hidden>Бот</a>
-      <a href="#/new" class="btn btn-ink nav-cta">+ разместить</a>
+      <a href="/" id="nav-list">Доска</a>
+      <a href="/how">Как это работает</a>
+      <a href="/bot" id="nav-bot" hidden>Бот</a>
+      <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
     </nav>
   </header>
 
@@ -59,9 +68,9 @@
 
       <p class="quick-routes">
         часто ищут:
-        <a href="#" data-from="Варшава" data-to="Львов">Варшава → Львов</a> ·
-        <a href="#" data-from="Краков" data-to="Киев">Краков → Киев</a> ·
-        <a href="#" data-from="Гданьск" data-to="Вроцлав">Гданьск → Вроцлав</a>
+        <a href="/?from=Варшава&amp;to=Львов" data-from="Варшава" data-to="Львов">Варшава → Львов</a> ·
+        <a href="/?from=Краков&amp;to=Киев" data-from="Краков" data-to="Киев">Краков → Киев</a> ·
+        <a href="/?from=Гданьск&amp;to=Вроцлав" data-from="Гданьск" data-to="Вроцлав">Гданьск → Вроцлав</a>
       </p>
 
       <div class="tabs" role="tablist">
@@ -77,14 +86,14 @@
         <button id="load-more" class="btn btn-line" hidden>показать ещё</button>
         <p id="list-empty" class="empty-note" hidden>
           По такому маршруту пока пусто. Если вы за рулём, разместите рейс, это занимает
-          минуту. Если что-то нужно, напишите в <a href="#/bot">бота</a>, он тоже публикует сюда.
+          минуту. Если что-то нужно, напишите в <a href="/bot">бота</a>, он тоже публикует сюда.
         </p>
       </div>
     </section>
 
     <!-- КАРТОЧКА -->
     <section id="view-item" class="wrap" hidden>
-      <a href="#/" class="back">← к доске</a>
+      <a href="/" class="back">← к доске</a>
       <article id="item-detail"></article>
     </section>
 
@@ -415,9 +424,9 @@
         Правила работы и обработка данных описаны в «Условиях» и «Приватности».
       </p>
       <nav class="foot-links">
-        <a href="#/terms">условия</a>
-        <a href="#/privacy">приватность</a>
-        <a id="foot-bot" href="#">бот</a>
+        <a href="/terms">условия</a>
+        <a href="/privacy">приватность</a>
+        <a id="foot-bot" href="/bot">бот</a>
       </nav>
     </div>
     <nav class="foot-routes" aria-label="Популярные маршруты">
@@ -432,6 +441,19 @@
       <a href="/r/varshava-berlin">Варшава → Берлин</a>
       <a href="/r/minsk-kiev">Минск → Киев</a>
       <a href="/routes">все маршруты →</a>
+    </nav>
+    <nav class="foot-routes" aria-label="Города и итоги">
+      <b>Города:</b>
+      <a href="/gorod/varshava">Варшава</a>
+      <a href="/gorod/minsk">Минск</a>
+      <a href="/gorod/kiev">Киев</a>
+      <a href="/gorod/krakov">Краков</a>
+      <a href="/gorod/lvov">Львов</a>
+      <a href="/gorod/grodno">Гродно</a>
+      <a href="/gorod/brest">Брест</a>
+      <a href="/gorod/vilnyus">Вильнюс</a>
+      <a href="/gorod/berlin">Берлин</a>
+      <a href="/itogi">итоги месяца →</a>
     </nav>
     <p class="foot-meta">сборка 15.09.2026 · нашли фейк, жалоба из карточки объявления</p>
   </footer>

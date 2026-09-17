@@ -1,0 +1,320 @@
+/**
+ * Серверные страницы сайта: главная с живой доской, карточка объявления и
+ * текстовые разделы («как это работает», «условия», «приватность», бот).
+ *
+ * Всё это отдаёт воркер (см. run_worker_first в wrangler.toml): HTML приходит
+ * готовым, а public/app.js подхватывает состояние и дальше работает как SPA.
+ * Смысл — в индексе: раньше главная была пустым <div id="list">, а разделы
+ * жили за «#», которого для поисковика не существует.
+ */
+import type { Env, Listing } from './types';
+import { getCounts, getListingById, listListings, getChatLinks } from './store';
+import { normalizeCity } from './parser';
+import { escapeHtml } from './util';
+import { plural, fmtDayShort } from './format';
+import { breadcrumbsLd, itemListLd, listingLd, webSiteLd, faqPageLd, SITE_NAME } from './seo';
+import { isArchived, renderDetailHtml, renderRowsHtml, renderShell, readShellTemplate, type View } from './ssr';
+
+export interface PageResult {
+  html: string;
+  status?: number;
+  cacheControl?: string;
+}
+
+/** Основной домен сайта: SITE_URL из переменных, иначе — origin запроса. */
+export function siteOrigin(env: Env, requestUrl: string): string {
+  const configured = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  if (configured) return configured;
+  return new URL(requestUrl).origin;
+}
+
+/* ------------------------------------------------------------------ */
+/* Текстовые разделы                                                   */
+/* ------------------------------------------------------------------ */
+
+interface StaticPage {
+  view: View;
+  title: string;
+  description: string;
+  robots?: string;
+  /** брать ли вопросы-ответы из разметки раздела для JSON-LD FAQPage */
+  faq?: boolean;
+}
+
+export const STATIC_PAGES: Record<string, StaticPage> = {
+  '/how': {
+    view: 'how',
+    title: 'Как передать посылку с попуткой — правила доски | попутка.',
+    description:
+      'Как работает доска попутных передач: водитель публикует рейс, вы находите маршрут и договариваетесь напрямую. Кто проверяет объявления, что нельзя передавать и почему нет рейтинга.',
+    faq: true,
+  },
+  '/bot': {
+    view: 'bot',
+    title: 'Телеграм-бот попутка: объявления из чатов и свои заявки | попутка.',
+    description:
+      'Бот читает телеграм-чаты попутных перевозок, разбирает объявления и публикует их на доске после проверки. Команды бота: своя заявка, подбор пар, поиск по городу, жалобы.',
+  },
+  '/terms': {
+    view: 'terms',
+    title: 'Условия использования доски попутка.',
+    description:
+      'Правила доски попутных передач: что можно и нельзя публиковать, как работает модерация, жалобы и снятие объявлений, кто отвечает за содержимое и передачу посылок.',
+  },
+  '/privacy': {
+    view: 'privacy',
+    title: 'Политика приватности — попутка.',
+    description:
+      'Какие данные собирает доска попутных передач: объявления, контакты, жалобы и логи. Где хранится, сколько живёт, кому передаётся и как удалить своё объявление.',
+  },
+  '/new': {
+    view: 'new',
+    title: 'Разместить объявление: передать посылку или взять груз | попутка.',
+    description:
+      'Бесплатная форма объявления: маршрут, дата выезда, вес, цена и контакт. Заявка попадает на доску после проверки модератором — обычно в течение пары часов.',
+  },
+  '/admin': {
+    view: 'admin',
+    title: 'Админ — попутка.',
+    description: 'Модерация объявлений: очередь, доска, чаты, подбор пар и повторы.',
+    robots: 'noindex, nofollow',
+  },
+};
+
+function stripTags(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Вопросы-ответы раздела (<details class="qa">) — для JSON-LD FAQPage. */
+export function extractFaq(html: string, view: View): Array<[string, string]> {
+  const section = new RegExp(`<section id="view-${view}"[^>]*>([\\s\\S]*?)</section>`).exec(html);
+  if (!section?.[1]) return [];
+  const out: Array<[string, string]> = [];
+  const re = /<details class="qa">\s*<summary>([\s\S]*?)<\/summary>\s*<p>([\s\S]*?)<\/p>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(section[1])) !== null) {
+    const q = stripTags(m[1] ?? '');
+    const a = stripTags(m[2] ?? '');
+    if (q && a) out.push([q, a]);
+  }
+  return out;
+}
+
+/** Текстовый раздел: тот же index.html, нужная секция видима, свои meta-теги. */
+export async function buildStaticPage(env: Env, origin: string, path: string): Promise<PageResult | null> {
+  const page = STATIC_PAGES[path];
+  if (!page) return null;
+  const template = await readShellTemplate(env);
+  const faq = page.faq ? extractFaq(template, page.view) : [];
+
+  const html = await renderShell(env, {
+    view: page.view,
+    title: page.title,
+    description: page.description,
+    canonical: `${origin}${path}`,
+    origin,
+    robots: page.robots,
+    jsonLd: [
+      webSiteLd(origin),
+      breadcrumbsLd(origin, [
+        { name: 'Доска', path: '/' },
+        { name: stripTags(page.title.replace(/\s*\|\s*попутка\.$/, '')) },
+      ]),
+      faq.length ? faqPageLd(faq) : null,
+    ],
+  });
+  return { html, cacheControl: 'public, max-age=300, s-maxage=3600' };
+}
+
+/* ------------------------------------------------------------------ */
+/* Главная и фильтры доски                                             */
+/* ------------------------------------------------------------------ */
+
+export interface BoardQuery {
+  from?: string;
+  to?: string;
+  type?: 'offer' | 'request';
+  date?: string;
+  archive?: boolean;
+}
+
+export function parseBoardQuery(url: URL): BoardQuery {
+  const typeRaw = url.searchParams.get('type');
+  const fromRaw = url.searchParams.get('from');
+  const toRaw = url.searchParams.get('to');
+  return {
+    // Поиск понимает и латиницу: «warsaw» → «Варшава» (как в /api/listings)
+    from: fromRaw ? normalizeCity(fromRaw).trim() || undefined : undefined,
+    to: toRaw ? normalizeCity(toRaw).trim() || undefined : undefined,
+    type: typeRaw === 'offer' || typeRaw === 'request' ? typeRaw : undefined,
+    date: url.searchParams.get('date') ?? undefined,
+    archive: url.searchParams.get('archive') === '1',
+  };
+}
+
+const HOME_TITLE = `${SITE_NAME} доска попутных передач — кто куда едет и что может передать`;
+const HOME_DESCRIPTION =
+  'Живая доска попутных передач: водители междугородних и международных рейсов берут посылки попутно. Польша, Беларусь, Украина, Европа. Маршрут, дата выезда, вес, цена и контакт — напрямую, без посредников и комиссий.';
+
+/**
+ * Главная (и фильтры доски): первые 20 заявок прямо в HTML.
+ * Фильтрованные адреса — noindex с canonical на главную: под такие запросы
+ * есть отдельные страницы маршрутов /r/:slug, дубли не нужны.
+ */
+export async function buildHomePage(env: Env, origin: string, url: URL): Promise<PageResult> {
+  const f = parseBoardQuery(url);
+  const filtered = Boolean(f.from || f.to || f.date || f.type || f.archive);
+  const search = url.searchParams.toString();
+
+  const [{ items }, counts, chatLinks] = await Promise.all([
+    listListings(env, {
+      from: f.from, to: f.to, type: f.type, date: f.date, archive: f.archive, page: 1, perPage: 20,
+    }),
+    getCounts(env, { from: f.from, to: f.to, date: f.date, archive: f.archive }),
+    getChatLinks(env).catch(() => ({} as Record<string, string>)),
+  ]);
+  const total = counts.offer + counts.request;
+
+  const title = filtered
+    ? `${f.from ?? 'Доска'}${f.from && f.to ? ' → ' + f.to : f.to ? ' → ' + f.to : ''} — заявки на доске | ${SITE_NAME}`
+    : HOME_TITLE;
+  const description = filtered
+    ? `Заявки по направлению ${f.from ?? '—'} → ${f.to ?? '—'} на доске попутных передач: даты выезда, вес, цена и контакты водителей. Обновлено ${fmtDayShort(new Date().toISOString().slice(0, 10))}.`
+    : HOME_DESCRIPTION;
+
+  const html = await renderShell(env, {
+    view: 'list',
+    title,
+    description,
+    canonical: filtered ? `${origin}/` : `${origin}/`,
+    origin,
+    // фильтры — не самостоятельная страница: canonical на главную, в индекс не пускаем
+    robots: filtered ? 'noindex, follow' : undefined,
+    total,
+    counts,
+    listHtml: items.length > 0 ? renderRowsHtml(items, { chatLinks }) : '',
+    listData: items,
+    jsonLd: [
+      webSiteLd(origin),
+      itemListLd(origin, filtered ? `Заявки: ${f.from ?? ''} → ${f.to ?? ''}` : 'Заявки на доске', items.map((l) => ({
+        path: `/item/${encodeURIComponent(l.id)}`,
+        name: `${l.fromCity} → ${l.toCity}${l.departureDate ? `, выезд ${fmtDayShort(l.departureDate)}` : ''}`,
+      }))),
+    ],
+  });
+
+  return {
+    html,
+    // главная живая: надолго не кэшируем
+    cacheControl: filtered ? 'no-store' : 'public, max-age=0, s-maxage=60, stale-while-revalidate=300',
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Карточка объявления                                                 */
+/* ------------------------------------------------------------------ */
+
+export function itemTitle(l: Listing, archived: boolean): string {
+  const typeLabel = l.type === 'offer' ? 'водитель везёт' : 'нужно передать';
+  return `${l.fromCity} → ${l.toCity} · ${typeLabel}${archived ? ' · архив' : ''} | ${SITE_NAME}`;
+}
+
+export function itemDescription(l: Listing): string {
+  const bits = [
+    l.departureDate ? `выезд ${fmtDayShort(l.departureDate)}` : null,
+    l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
+    l.price,
+  ].filter(Boolean).join(' · ');
+  return [bits, l.description.replace(/\s+/g, ' ').trim().slice(0, 180)].filter(Boolean).join('. ');
+}
+
+/**
+ * Страница объявления: весь контент в HTML (раньше — пустышка с мгновенным
+ * location.replace на #/item/…, то есть для краулера страницы не существовало).
+ * null — объявление не найдено или не опубликовано: отдаём 404.
+ */
+export async function buildItemPage(
+  env: Env,
+  origin: string,
+  id: string,
+  opts: { routePath?: (from: string, to: string) => string | null } = {}
+): Promise<PageResult | null> {
+  const listing = await getListingById(env, id);
+  if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) return null;
+
+  const archived = isArchived(listing);
+  const routePath = opts.routePath ? opts.routePath(listing.fromCity, listing.toCity) : null;
+  const chatLinks = await getChatLinks(env).catch(() => ({} as Record<string, string>));
+
+  // соседние заявки того же маршрута: и человеку полезно, и перелинковка
+  const { items: same } = await listListings(env, {
+    from: listing.fromCity, to: listing.toCity, perPage: 6,
+  });
+  const related = same.filter((x) => x.id !== listing.id).slice(0, 5);
+
+  const html = await renderShell(env, {
+    view: 'item',
+    title: itemTitle(listing, archived),
+    description: itemDescription(listing),
+    canonical: `${origin}/item/${encodeURIComponent(listing.id)}`,
+    origin,
+    // архив живёт месяц и всё равно снимется: в индекс его пускать незачем
+    robots: archived ? 'noindex, follow' : undefined,
+    image: `${origin}/og/${encodeURIComponent(listing.id)}.png`,
+    imageAlt: `${listing.fromCity} → ${listing.toCity}: ${listing.type === 'offer' ? 'водитель везёт' : 'нужно передать'}`,
+    detailHtml: renderDetailHtml(listing, { origin, routePath, chatLinks, related }),
+    detailData: listing,
+    jsonLd: [
+      breadcrumbsLd(origin, [
+        { name: 'Доска', path: '/' },
+        ...(routePath ? [{ name: `${listing.fromCity} → ${listing.toCity}`, path: routePath }] : []),
+        { name: `№ ${listing.id.slice(0, 8)}` },
+      ]),
+      listingLd(origin, listing),
+      itemListLd(origin, `Ещё ${listing.fromCity} → ${listing.toCity}`, related.map((l) => ({
+        path: `/item/${encodeURIComponent(l.id)}`,
+        name: `${l.fromCity} → ${l.toCity}${l.departureDate ? `, выезд ${fmtDayShort(l.departureDate)}` : ''}`,
+      }))),
+    ],
+  });
+
+  return { html, cacheControl: archived ? 'no-store' : 'public, max-age=0, s-maxage=300' };
+}
+
+/* ------------------------------------------------------------------ */
+/* 404                                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Страница «не найдено»: свой HTML со ссылками, а не дефолтная заглушка Cloudflare. */
+export async function buildNotFoundPage(env: Env, origin: string, message?: string): Promise<PageResult> {
+  let page = '';
+  try {
+    page = await (await env.ASSETS.fetch(new Request('https://assets/404.html'))).text();
+  } catch {
+    page = '';
+  }
+  if (!page) {
+    page = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Не найдено — ${escapeHtml(SITE_NAME)}</title></head><body><h1>404</h1><p>${escapeHtml(message ?? 'Страница не найдена.')}</p><p><a href="/">на доску</a></p></body></html>`;
+  }
+  page = page
+    .replace('<!--404_MESSAGE-->', message ? `<p class="empty-note">${escapeHtml(message)}</p>` : '')
+    .replace(/<!--404_CANONICAL-->/g, origin);
+  return { html: page, status: 404, cacheControl: 'public, max-age=0, s-maxage=60' };
+}
+
+/** Сколько всего объявлений на доске (подпись в шапке, итоги месяца). */
+export async function boardTotal(env: Env): Promise<number> {
+  const counts = await getCounts(env, {});
+  return counts.offer + counts.request;
+}
+
+export { plural };
