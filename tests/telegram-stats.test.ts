@@ -168,9 +168,18 @@ describe('/статистика', () => {
     expect(text).toContain('Пока считать нечего');
   });
 
-  it('рядом приходит ссылка на публичную страницу итогов', async () => {
+  it('рядом — кликабельная ссылка на страницу месяца', async () => {
     const text = await send('/статистика');
-    expect(text).toContain('https://pop-utka.app/itogi');
+    expect(text).toContain('<a href="https://pop-utka.app/itogi/2026-09">итоги сентября 2026 на сайте</a>');
+    expect(text).toContain('ссылка уже в конце поста');
+    // та же ссылка — простым текстом в конце самого поста
+    expect(text).toContain('Направления и подробности месяца: https://pop-utka.app/itogi/2026-09');
+  });
+
+  it('«прошлый» — ссылка на страницу закрытого месяца', async () => {
+    db.months = [month(), month({ month: '2026-08', total: 20, offers: 12, requests: 8 })];
+    const text = await send('/статистика прошлый');
+    expect(text).toContain('<a href="https://pop-utka.app/itogi/2026-08">итоги августа 2026 на сайте</a>');
   });
 
   it('команду знают и по коротким названиям', async () => {

@@ -152,6 +152,13 @@ describe('текст для поста', () => {
     expect(statsPostText(stat, { site: 'https://example.com' })).toContain('https://example.com');
   });
 
+  it('в конце поста — ссылка на страницу этого месяца', () => {
+    const text = statsPostText(stat, { site: 'https://example.com' });
+    expect(text).toContain('Направления и подробности месяца: https://example.com/itogi/2026-09');
+    // обычная ссылка без слэша на конце — для «передать посылку»
+    expect(text).toContain('без посредников и комиссий: https://example.com');
+  });
+
   it('короткая строка для админки', () => {
     expect(statsSummaryLine(stat)).toContain('сентябрь 2026: 4 заявки');
     expect(statsSummaryLine(stat)).toContain('25 EUR');

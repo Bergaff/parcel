@@ -10,7 +10,7 @@ import {
   normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
 } from './util';
 import { aiExtractListing, type AiFields } from './ai';
-import { currentPeriod, fmtPeriod } from './format';
+import { currentPeriod, fmtPeriod, fmtPeriodGen } from './format';
 import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './stats';
 
 /* ------------------------------------------------------------------ */
@@ -589,9 +589,15 @@ async function cmdStats(env: Env, msg: TgMessage, args: string): Promise<void> {
   const notes: string[] = [];
   if (res) notes.push(`пересчитано месяцев: ${res.saved.length || 'ничего нового'}`);
   if (months.length > 1) notes.push(`всего месяцев в истории: ${months.length}`);
-  if (site) notes.push(`публичная страница: ${site}/itogi`);
-  if (notes.length) {
-    await sendText(env, chatId, notes.map((n) => `• ${escapeHtml(n)}`).join('\n')).catch(() => undefined);
+  const bullets = notes.map((n) => `• ${escapeHtml(n)}`);
+  if (site) {
+    // кликабельно для предпросмотра перед публикацией; ссылка уже в конце поста
+    bullets.push(
+      `• <a href="${site}/itogi/${stat.month}">итоги ${fmtPeriodGen(stat.month)} на сайте</a> — ссылка уже в конце поста`
+    );
+  }
+  if (bullets.length) {
+    await sendText(env, chatId, bullets.join('\n')).catch(() => undefined);
   }
 }
 

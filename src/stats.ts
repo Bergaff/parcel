@@ -364,7 +364,14 @@ export function statsPostText(stat: MonthStat, opts: { site?: string; month?: 'c
   if (withoutPrice > 0) tails.push(`${withoutPrice} цену не указали`);
   if (tails.length > 0) lines.push(`Ещё ${tails.join(', ')}.`);
 
-  lines.push('', 'Передать посылку попутно — без посредников и комиссий:', site);
+  // Ссылки — простым текстом: пост уходит в канал копированием, Telegram
+  // сам делает такие адреса кликабельными. Страница месяца даёт возвратный
+  // трафик из канала на сайт.
+  lines.push(
+    '',
+    `Направления и подробности месяца: ${site}/itogi/${stat.month}`,
+    `Передать посылку попутно — без посредников и комиссий: ${site}`
+  );
   return lines.join('\n');
 }
 
