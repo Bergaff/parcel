@@ -11,8 +11,9 @@ import type { MonthRow } from '../src/store';
 
 const db = vi.hoisted(() => ({
   rows: new Map<string, MonthRow[]>(),
-  snapshots: new Map<string, { total: number; payload: string }>(),
+  snapshots: new Map<string, { total: number; payload: string; summary?: string | null }>(),
   saves: [] as string[],
+  summarySaves: [] as string[],
 }));
 
 vi.mock('../src/store', () => ({
@@ -20,15 +21,26 @@ vi.mock('../src/store', () => ({
   listMonthRows: async (_env: unknown, month: string) => db.rows.get(month) ?? [],
   listMonthsPresent: async () => [...db.rows.keys()].sort().reverse(),
   loadStatsSnapshots: async () => [...db.snapshots.entries()].map(([month, s]) => ({
-    month, total: s.total, payload: s.payload, updatedAt: '2026-09-17 10:00:00',
+    month, total: s.total, payload: s.payload, summary: s.summary ?? null, updatedAt: '2026-09-17 10:00:00',
   })),
-  saveStatsSnapshot: async (_env: unknown, month: string, total: number, payload: unknown) => {
-    db.snapshots.set(month, { total, payload: JSON.stringify(payload) });
+  getMonthSnapshot: async (_env: unknown, month: string) => {
+    const s = db.snapshots.get(month);
+    return s ? { month, total: s.total, payload: s.payload, summary: s.summary ?? null, updatedAt: '2026-09-17 10:00:00' } : null;
+  },
+  saveStatsSnapshot: async (_env: unknown, month: string, total: number, payload: unknown, summary?: string | null) => {
+    db.snapshots.set(month, { total, payload: JSON.stringify(payload), summary: summary ?? db.snapshots.get(month)?.summary ?? null });
     db.saves.push(month);
+  },
+  saveMonthSummary: async (_env: unknown, month: string, summary: string) => {
+    const s = db.snapshots.get(month);
+    if (!s) return false;
+    s.summary = summary;
+    db.summarySaves.push(month);
+    return true;
   },
 }));
 
-import { aggregateMonth, computeMonthStat, listMonthStats, refreshStats, statsPostText, statsSummaryLine } from '../src/stats';
+import { aggregateMonth, computeMonthStat, fallbackSummary, listMonthStats, refreshStats, statsPostText, statsSummaryLine } from '../src/stats';
 
 const env = {} as Env;
 
@@ -204,5 +216,52 @@ describe('снимки итогов', () => {
     await refreshStats(env, { now: new Date('2026-09-17T12:00:00Z') });
     const months = await listMonthStats(env);
     expect(months.map((m) => m.month)).toEqual(['2026-09', '2026-08', '2026-07']);
+  });
+});
+
+describe('аналитическая заметка месяца', () => {
+  const stat: import('../src/stats').MonthStat = {
+    month: '2026-09', offers: 30, requests: 12, total: 42, cities: 18, directions: 25,
+    topDirections: [
+      { pair: 'Варшава → Минск', from: 'Варшава', to: 'Минск', count: 15 },
+      { pair: 'Краков → Киев', from: 'Краков', to: 'Киев', count: 4 },
+    ],
+    fromChats: 35, fromSite: 7, priced: 20, free: 3,
+    prices: [{ currency: 'EUR', count: 8, avg: 25, min: 10, max: 40 }],
+    updatedAt: '2026-10-01T00:00:00Z',
+  };
+
+  it('шаблон говорит о направлениях и частоте, не выдумывая цифр', () => {
+    const text = fallbackSummary(stat);
+    expect(text).toContain('42');
+    expect(text).toContain('Варшава → Минск');
+    expect(text).toContain('36%');   // 15 из 42 — ядро месяца
+    expect(text).toContain('Водителей на доске заметно больше');
+    expect(text).toContain('бесплатно');
+    // без markdown, живые абзацы
+    expect(text).not.toMatch(/[*#]/);
+    expect(text.split(/\n{2,}/).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('сравнение с прошлым месяцем — проценты и тренд', () => {
+    const text = fallbackSummary(stat, { ...stat, month: '2026-08', total: 30, directions: 20 });
+    expect(text).toContain('выросло на 40%');
+    expect(text).toContain('август 2026');
+  });
+
+  it('refreshStats закрывает месяц заметкой (ИИ нет — шаблон), текущий не трогает', async () => {
+    // август закрыт и без заметки, сентябрь ещё идёт
+    db.rows.set('2026-08', [row(), row({ id: 'r2', fromCity: 'Краков', toCity: 'Киев' })]);
+    db.rows.set('2026-09', [row(), row({ id: 'r3' }), row({ id: 'r4' })]);
+    db.snapshots.set('2026-08', { total: 2, payload: JSON.stringify({ total: 2 }) });
+    db.snapshots.set('2026-09', { total: 3, payload: JSON.stringify({ total: 3 }) });
+    db.summarySaves = [];
+
+    const res = await refreshStats(env, { now: new Date('2026-09-20T12:00:00Z') });
+    expect(res.summaries).toEqual(['2026-08']);
+    expect(db.summarySaves).toEqual(['2026-08']);
+    // заметка сохранилась и не перезаписывается при следующем прогоне
+    const again = await refreshStats(env, { now: new Date('2026-09-21T12:00:00Z') });
+    expect(again.summaries).toEqual([]);
   });
 });

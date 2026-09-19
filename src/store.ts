@@ -446,6 +446,7 @@ let recurringColumnReady: Promise<void> | null = null;
 export function resetSearchColumnsCache(): void {
   searchColumnsReady = null;
   recurringColumnReady = null;
+  statsSummaryReady = null;
 }
 
 /**
@@ -1048,6 +1049,30 @@ export async function ensureStatsTable(env: Env): Promise<void> {
        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      )`
   ).run();
+  await ensureStatsSummaryColumn(env);
+}
+
+let statsSummaryReady: Promise<void> | null = null;
+
+/**
+ * Колонка summary (аналитическое «мнение» месяца для страницы /itogi/…) —
+ * тот же сценарий, что у recurring и *_lc: ALTER делает сам воркер,
+ * отдельная миграция не нужна и не мешает порядку «миграции → деплой».
+ */
+export function ensureStatsSummaryColumn(env: Env): Promise<void> {
+  if (!statsSummaryReady) {
+    statsSummaryReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(stats_months)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('summary')) {
+        await env.DB.prepare(`ALTER TABLE stats_months ADD COLUMN summary TEXT`).run();
+      }
+    })();
+    statsSummaryReady.catch(() => { statsSummaryReady = null; });
+  }
+  return statsSummaryReady;
 }
 
 export interface MonthRow {
@@ -1098,6 +1123,8 @@ export interface StatsSnapshot {
   total: number;
   /** итог месяца целиком (см. MonthStat в src/stats.ts) */
   payload: string;
+  /** аналитическая заметка месяца (ИИ или шаблон) — для страницы /itogi/… */
+  summary: string | null;
   updatedAt: string;
 }
 
@@ -1105,25 +1132,61 @@ export interface StatsSnapshot {
 export async function loadStatsSnapshots(env: Env): Promise<StatsSnapshot[]> {
   await ensureStatsTable(env);
   const res = await env.DB.prepare(
-    `SELECT month, total, payload, updated_at FROM stats_months ORDER BY month DESC LIMIT 60`
+    `SELECT month, total, payload, summary, updated_at FROM stats_months ORDER BY month DESC LIMIT 60`
   ).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
     month: String(r.month),
     total: Number(r.total ?? 0),
     payload: String(r.payload ?? '{}'),
+    summary: r.summary ? String(r.summary) : null,
     updatedAt: String(r.updated_at ?? ''),
   }));
 }
 
-/** Сохранить итог месяца. */
-export async function saveStatsSnapshot(env: Env, month: string, total: number, payload: unknown): Promise<void> {
+/** Один снимок месяца (страница /itogi/:month) или null. */
+export async function getMonthSnapshot(env: Env, month: string): Promise<StatsSnapshot | null> {
+  await ensureStatsTable(env);
+  const row = (await env.DB.prepare(
+    `SELECT month, total, payload, summary, updated_at FROM stats_months WHERE month = ?`
+  ).bind(month).first()) as Record<string, unknown> | null;
+  if (!row) return null;
+  return {
+    month: String(row.month),
+    total: Number(row.total ?? 0),
+    payload: String(row.payload ?? '{}'),
+    summary: row.summary ? String(row.summary) : null,
+    updatedAt: String(row.updated_at ?? ''),
+  };
+}
+
+/** Сохранить итог месяца. summary передан — перезаписываем, нет — не трогаем
+ *  (снимок пересчитывается ежедневно, а текст живёт своим сроком). */
+export async function saveStatsSnapshot(
+  env: Env,
+  month: string,
+  total: number,
+  payload: unknown,
+  summary?: string | null
+): Promise<void> {
   await ensureStatsTable(env);
   await env.DB.prepare(
-    `INSERT INTO stats_months (month, total, payload, updated_at)
-     VALUES (?, ?, ?, datetime('now'))
+    `INSERT INTO stats_months (month, total, payload, summary, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
      ON CONFLICT(month) DO UPDATE SET
        total = excluded.total,
        payload = excluded.payload,
+       summary = COALESCE(excluded.summary, stats_months.summary),
        updated_at = excluded.updated_at`
-  ).bind(month, total, JSON.stringify(payload)).run();
+  ).bind(month, total, JSON.stringify(payload), summary ?? null).run();
 }
+
+/** Сохранить только аналитическую заметку месяца (кнопка в админке, ИИ). */
+export async function saveMonthSummary(env: Env, month: string, summary: string): Promise<boolean> {
+  await ensureStatsTable(env);
+  const res = await env.DB.prepare(
+    'UPDATE stats_months SET summary = ? WHERE month = ?'
+  ).bind(summary, month).run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
+/* (сохранение снимков — saveStatsSnapshot выше, рядом с StatsSnapshot) */

@@ -11,13 +11,13 @@ import type { Env, Listing } from './types';
 import { getCounts, getListingById, listListings, getChatLinks, relatedListings } from './store';
 import { normalizeCity } from './parser';
 import { escapeHtml } from './util';
-import { plural, fmtDayShort } from './format';
+import { plural, fmtDayShort, fmtPeriod, fmtPeriodGen, currentPeriod } from './format';
 import { breadcrumbsLd, itemListLd, listingLd, webSiteLd, faqPageLd, SITE_NAME } from './seo';
 import { isArchived, renderDetailHtml, renderRowsHtml, renderShell, readShellTemplate, type View } from './ssr';
 import { seoPageShell, routePathFor } from './seo-routes';
-import { listMonthStats, refreshStats, type MonthStat } from './stats';
+import { listMonthStats, refreshStats, parseMonthPayload, fallbackSummary, type MonthStat } from './stats';
+import { getMonthSnapshot } from './store';
 import { fmtAmount, CURRENCY_LABEL } from './price';
-import { fmtPeriod } from './format';
 
 export interface PageResult {
   html: string;
@@ -363,7 +363,7 @@ function monthRowHtml(stat: MonthStat): string {
   const main = stat.prices.find((b) => b.currency !== 'none');
   const price = main ? `${fmtAmount(main.avg)} ${main.currency}` : (stat.prices.length ? 'без валюты' : '—');
   return `        <tr>
-          <th scope="row">${escapeHtml(fmtPeriod(stat.month))}</th>
+          <th scope="row"><a href="/itogi/${stat.month}">${escapeHtml(fmtPeriod(stat.month))}</a></th>
           <td class="mono">${stat.total}</td>
           <td class="mono">${stat.offers}</td>
           <td class="mono">${stat.requests}</td>
@@ -449,6 +449,123 @@ ${months.map(monthRowHtml).join('\n')}
     body,
   });
   return { html, cacheControl: 'public, max-age=0, s-maxage=1800' };
+}
+
+/**
+ * Страница одного месяца /itogi/2026-09: цифры + аналитическая заметка
+ * (DeepSeek, без ключа — уверенный шаблон из цифр). Каждый месяц —
+ * отдельная страница: таких страниц по одной в месяц, они не устаревают
+ * и собирают запросы про статистику направлений.
+ * null — месяц не существует: честный 404.
+ */
+export async function buildMonthStatsPage(env: Env, origin: string, month: string): Promise<PageResult | null> {
+  if (!/^\d{4}-\d{2}$/.test(month)) return null;
+  const snapshot = await getMonthSnapshot(env, month);
+  if (!snapshot) return null;
+  const stat = parseMonthPayload(snapshot.payload, month);
+  if (!stat) return null;
+
+  const months = await listMonthStats(env);
+  const idx = months.findIndex((m) => m.month === month);
+  // список свежими вперёд: сосед снизу — месяц старше, сверху — новее
+  const older = idx >= 0 && idx + 1 < months.length ? months[idx + 1]! : null;
+  const newer = idx > 0 ? months[idx - 1]! : null;
+
+  const isCurrent = month === currentPeriod();
+  // у закрывшегося месяца заметка сохранена в снимке; текущий месяц живой —
+  // показываем шаблон, пересчитанный при каждом заходе
+  const summary = snapshot.summary ?? fallbackSummary(stat, older);
+
+  const figures = [
+    [stat.total, 'объявлений за месяц'],
+    [stat.offers, '«водитель везёт»'],
+    [stat.requests, '«нужно передать»'],
+    [stat.cities, plural(stat.cities, 'город', 'города', 'городов')],
+  ] as Array<[number, string]>;
+
+  const directions = stat.topDirections.length > 0
+    ? await Promise.all(stat.topDirections.map(async (d) => {
+        const path = d.from && d.to ? await routePath(env, d.from, d.to) : null;
+        const label = `${escapeHtml(d.pair)} <span class="mono">${d.count}</span>`;
+        return path ? `<a href="${escapeHtml(path)}">${label}</a>` : `<span>${label}</span>`;
+      }))
+    : [];
+
+  const summaryHtml = summary
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => `    <p>${escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+
+  const nav: string[] = [];
+  if (older) nav.push(`<a href="/itogi/${older.month}">← ${escapeHtml(fmtPeriod(older.month))}</a>`);
+  nav.push('<a href="/itogi">все итоги</a>');
+  if (newer) nav.push(`<a href="/itogi/${newer.month}">${escapeHtml(fmtPeriod(newer.month))} →</a>`);
+
+  const desc = summary.replace(/\s+/g, ' ').trim().slice(0, 175).trimEnd();
+  const publishedDay = `${month}-01`;
+
+  const body = `    <nav class="crumbs" aria-label="Хлебные крошки"><a href="/">Доска</a> <span class="crumb-sep">›</span> <a href="/itogi">Итоги</a> <span class="crumb-sep">›</span> <span>${escapeHtml(fmtPeriod(month))}</span></nav>
+    <p class="doc-date">${isCurrent ? 'месяц ещё идёт, цифры растут' : `цифры закрытого месяца · обновлено ${escapeHtml(fmtDayShort(snapshot.updatedAt.slice(0, 10)))}`}</p>
+    <h1 class="page-title">Итоги ${escapeHtml(fmtPeriodGen(month))}</h1>
+    <p class="route-cities">${stat.total} ${plural(stat.total, 'объявление', 'объявления', 'объявлений')} · ${stat.directions} ${plural(stat.directions, 'направление', 'направления', 'направлений')} · ${stat.cities} ${plural(stat.cities, 'город', 'города', 'городов')}</p>
+
+    <p class="lead">Сколько объявлений прошло через доску и по чём договаривались: водители междугородних рейсов и те, кому нужно передать посылку. Цену берём ту, что человек написал сам, поэтому среднее считаем отдельно по каждой валюте.</p>
+
+    <div class="stats-figures">
+${figures.map(([n, label]) => `      <div class="stats-fig"><b>${n}</b><span>${escapeHtml(label)}</span></div>`).join('\n')}
+    </div>
+
+    <h2 class="rule-head">Средняя цена передачи</h2>
+    ${priceRowsHtml(stat)}
+
+${directions.length > 0 ? `    <h2 class="rule-head">Куда везли чаще всего</h2>
+    <p class="related">${directions.join('')}</p>` : ''}
+
+    <h2 class="rule-head">Как читается этот месяц</h2>
+${summaryHtml}
+
+    <p class="foot-note">${stat.fromChats + stat.fromSite > 0
+      ? `Из телеграм-чатов — ${stat.fromChats}, с сайта — ${stat.fromSite}. Итоги не меняются, даже когда объявления уходят в архив и удаляются: цифры сохраняются снимком.`
+      : 'Итоги не меняются, даже когда объявления уходят в архив и удаляются: цифры сохраняются снимком.'}</p>
+
+    <p class="related">${nav.join(' · ')}</p>
+
+    <p class="colophon">Хотите передать посылку? Откройте <a href="/">доску</a> или <a href="/routes">список маршрутов</a> — там живые заявки водителей.</p>`;
+
+  const articleLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Article',
+    headline: `Итоги ${fmtPeriodGen(month)} на доске «попутка.»`,
+    description: desc,
+    datePublished: publishedDay,
+    ...(snapshot.updatedAt ? { dateModified: snapshot.updatedAt.slice(0, 10) } : {}),
+    author: { '@type': 'Organization', name: SITE_NAME, url: origin },
+    publisher: { '@type': 'Organization', name: SITE_NAME, url: origin },
+    mainEntityOfPage: `${origin}/itogi/${month}`,
+  };
+
+  const html = seoPageShell({
+    title: `Итоги ${fmtPeriodGen(month)}: ${stat.total} ${plural(stat.total, 'объявление', 'объявления', 'объявлений')}, направления и цены | ${SITE_NAME}`,
+    description: desc || `Итоги ${fmtPeriodGen(month)} на доске попутных передач: ${stat.total} объявлений, ${stat.directions} направлений и средние цены.`,
+    canonical: `${origin}/itogi/${month}`,
+    origin,
+    jsonLd: [
+      breadcrumbsLd(origin, [
+        { name: 'Доска', path: '/' },
+        { name: 'Итоги', path: '/itogi' },
+        { name: fmtPeriod(month) },
+      ]),
+      articleLd,
+    ],
+    body,
+  });
+  return {
+    html,
+    // закрытый месяц не меняется совсем, текущий — растёт каждый день
+    cacheControl: isCurrent ? 'public, max-age=0, s-maxage=1800' : 'public, max-age=0, s-maxage=86400',
+  };
 }
 
 /** Сколько всего объявлений на доске (подпись в шапке, итоги месяца). */

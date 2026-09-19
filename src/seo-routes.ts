@@ -838,8 +838,12 @@ function sitemapIndex(entries: Array<{ loc: string; lastmod?: string }>): string
     .join('\n')}\n</sitemapindex>\n`;
 }
 
-/** Постоянные страницы сайта. */
-export function buildPagesSitemap(origin: string, lastmod: string): string {
+/** Постоянные страницы сайта + по странице на каждый закрытый месяц итогов. */
+export function buildPagesSitemap(
+  origin: string,
+  lastmod: string,
+  months: Array<{ month: string; updatedAt?: string | null }> = []
+): string {
   const pages: Array<[string, string, string]> = [
     ['/', 'hourly', '1.0'],
     ['/routes', 'daily', '0.9'],
@@ -851,8 +855,17 @@ export function buildPagesSitemap(origin: string, lastmod: string): string {
     ['/privacy', 'yearly', '0.3'],
     ['/itogi', 'monthly', '0.7'],
   ];
-  return urlset(pages.map(([path, changefreq, priority]) =>
-    urlEntry(`${origin}${path}`, { lastmod, changefreq, priority })));
+  const entries = pages.map(([path, changefreq, priority]) =>
+    urlEntry(`${origin}${path}`, { lastmod, changefreq, priority }));
+  // /itogi/2026-09: страница живёт вечно, обновляется раз в месяц
+  for (const m of months) {
+    entries.push(urlEntry(`${origin}/itogi/${m.month}`, {
+      lastmod: m.updatedAt ? m.updatedAt.slice(0, 10) : lastmod,
+      changefreq: 'monthly',
+      priority: '0.6',
+    }));
+  }
+  return urlset(entries);
 }
 
 /** Маршруты и города — с lastmod из базы. */

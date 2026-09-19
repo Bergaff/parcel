@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
-import { parseAiListings, trimDescription, validateAiListing } from '../src/ai';
+import { describe, expect, it, vi } from 'vitest';
+import type { Env } from '../src/types';
+import { aiMonthSummary, cleanMonthSummary, monthSummaryFacts, parseAiListings, trimDescription, validateAiListing } from '../src/ai';
 
 const NOW = new Date('2026-09-14T12:00:00+03:00');
 const TEXT = 'Завтра везу посылку Крокодилово — Бегемотово, 5 кг, 100 zł, @driver77';
@@ -197,3 +198,60 @@ describe('trimDescription — обрезка по предложению, а н�
     expect(out).not.toMatch(/\s…/);
   });
 });
+
+describe('аналитическая заметка месяца', () => {
+  const stat: import('../src/stats').MonthStat = {
+    month: '2026-09', offers: 30, requests: 12, total: 42, cities: 18, directions: 25,
+    topDirections: [{ pair: 'Варшава → Минск', from: 'Варшава', to: 'Минск', count: 11 }],
+    fromChats: 35, fromSite: 7, priced: 20, free: 2,
+    prices: [{ currency: 'EUR', count: 8, avg: 25, min: 10, max: 40 }],
+    updatedAt: '2026-10-01T00:00:00Z',
+  };
+
+  it('monthSummaryFacts собирает цифры без воды', () => {
+    const facts = monthSummaryFacts(stat, { ...stat, month: '2026-08', total: 30, directions: 20 });
+    expect(facts).toContain('Месяц: 2026-09');
+    expect(facts).toContain('Всего объявлений: 42');
+    expect(facts).toContain('Варшава → Минск — 11');
+    expect(facts).toContain('прошлый месяц (2026-08)');
+  });
+
+  it('cleanMonthSummary выкидывает markdown и мусор, короткий текст бракует', () => {
+    expect(cleanMonthSummary('**Жирный** месяц\n\n\n# Заголовок\nи текст ' + 'а'.repeat(200))).toContain('Жирный месяц');
+    expect(cleanMonthSummary('**Жирный** месяц\n\n\n# Заголовок\nи текст ' + 'а'.repeat(200))).not.toContain('**');
+    expect(cleanMonthSummary('коротко')).toBeNull();
+  });
+
+  it('aiMonthSummary зовёт DeepSeek и возвращает чистый текст', async () => {
+    const calls: Array<{ body: string }> = [];
+    const fetchMock = async (_url: unknown, init: { body: string }) => {
+      calls.push({ body: init.body });
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'Сентябрь на доске выдался живым: 42 объявления и 25 направлений. ' + 'о'.repeat(180) } },
+      ] }), { status: 200 });
+    };
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const env = { AI_API_KEY: 'k', AI_BASE_URL: 'http://ai.test', KV: kvStub() } as unknown as Env;
+      const out = await aiMonthSummary(env, stat, null);
+      expect(out).not.toBeNull();
+      expect(out!.length).toBeGreaterThan(100);
+      expect(calls[0]!.body).toContain('42'); // цифры месяца ушли в промпт
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('без ключа ИИ заметку не пишет — страница возьмёт шаблон', async () => {
+    expect(await aiMonthSummary({} as Env, stat)).toBeNull();
+  });
+});
+
+/** KV-заглушка: дневная квота ИИ пишет и читает счётчик. */
+function kvStub() {
+  const store = new Map<string, string>();
+  return {
+    get: async (k: string) => store.get(k) ?? null,
+    put: async (k: string, v: string) => { store.set(k, v); },
+  };
+}

@@ -12,10 +12,11 @@
 import type { Env } from './types';
 import {
   ensureStatsTable, listMonthRows, listMonthsPresent, loadStatsSnapshots, saveStatsSnapshot,
-  type MonthRow,
+  saveMonthSummary, type MonthRow,
 } from './store';
+import { aiMonthSummary } from './ai';
 import { CURRENCY_LABEL, CURRENCY_ORDER, fmtAmount, parsePrice, type Currency } from './price';
-import { fmtPeriod, fmtPeriodGen, plural } from './format';
+import { fmtPeriod, fmtPeriodGen, plural, prevPeriod } from './format';
 
 export interface PriceBucket {
   /** 'EUR'…'CZK' либо 'none' — число есть, валюта не названа */
@@ -135,7 +136,34 @@ export interface RefreshResult {
   saved: string[];
   /** месяцы, которые оставили как есть (история уже полная) */
   kept: string[];
+  /** месяцы, для которых в этом прогоне написали аналитическую заметку */
+  summaries: string[];
   months: MonthStat[];
+}
+
+/** Разобрать payload снимка в MonthStat. null — снимок побился. */
+export function parseMonthPayload(payload: string, fallbackMonth: string): MonthStat | null {
+  try {
+    const p = JSON.parse(payload) as Partial<MonthStat>;
+    if (!p || typeof p.total !== 'number') return null;
+    return {
+      month: p.month ?? fallbackMonth,
+      offers: Number(p.offers ?? 0),
+      requests: Number(p.requests ?? 0),
+      total: Number(p.total ?? 0),
+      cities: Number(p.cities ?? 0),
+      directions: Number(p.directions ?? 0),
+      topDirections: Array.isArray(p.topDirections) ? p.topDirections : [],
+      fromChats: Number(p.fromChats ?? 0),
+      fromSite: Number(p.fromSite ?? 0),
+      priced: Number(p.priced ?? 0),
+      free: Number(p.free ?? 0),
+      prices: Array.isArray(p.prices) ? p.prices : [],
+      updatedAt: String(p.updatedAt ?? ''),
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -168,7 +196,39 @@ export async function refreshStats(env: Env, opts: { force?: boolean; now?: Date
       kept.push(month);
     }
   }
-  return { saved, kept, months: await listMonthStats(env) };
+
+  // Месяц закрылся — пишем аналитическую заметку один раз (ИИ; без ключа —
+  // шаблон из цифр). За прогон не больше трёх: после деплоя догоняем
+  // накопившиеся месяцы, дальше каждый месяц закрывается сам собой.
+  const summaries: string[] = [];
+  const fresh = await loadStatsSnapshots(env);
+  for (const snap of fresh) {
+    if (summaries.length >= 3) break;
+    if (snap.month === currentMonth || snap.summary) continue;
+    const done = await regenerateMonthSummary(env, snap.month);
+    if (done) summaries.push(snap.month);
+  }
+
+  return { saved, kept, summaries, months: await listMonthStats(env) };
+}
+
+/**
+ * Написать (переписать) аналитическую заметку месяца: сначала DeepSeek,
+ * не вышло — уверенный шаблон из цифр. Страница /itogi/:month без текста
+ * не останется никогда. null — месяца нет в снимках.
+ */
+export async function regenerateMonthSummary(
+  env: Env,
+  month: string
+): Promise<{ summary: string; ai: boolean } | null> {
+  const months = await listMonthStats(env);
+  const stat = months.find((m) => m.month === month);
+  if (!stat) return null;
+  const prev = months.find((m) => m.month === prevPeriod(month)) ?? null;
+  const ai = await aiMonthSummary(env, stat, prev);
+  const summary = ai ?? fallbackSummary(stat, prev);
+  await saveMonthSummary(env, month, summary);
+  return { summary, ai: Boolean(ai) };
 }
 
 /** Сохранённые итоги, свежими вперёд. */
@@ -176,27 +236,9 @@ export async function listMonthStats(env: Env): Promise<MonthStat[]> {
   const snapshots = await loadStatsSnapshots(env);
   const out: MonthStat[] = [];
   for (const s of snapshots) {
-    try {
-      const parsed = JSON.parse(s.payload) as Partial<MonthStat>;
-      if (!parsed || typeof parsed.total !== 'number') continue;
-      out.push({
-        month: s.month,
-        offers: Number(parsed.offers ?? 0),
-        requests: Number(parsed.requests ?? 0),
-        total: Number(parsed.total ?? 0),
-        cities: Number(parsed.cities ?? 0),
-        directions: Number(parsed.directions ?? 0),
-        topDirections: Array.isArray(parsed.topDirections) ? parsed.topDirections : [],
-        fromChats: Number(parsed.fromChats ?? 0),
-        fromSite: Number(parsed.fromSite ?? 0),
-        priced: Number(parsed.priced ?? 0),
-        free: Number(parsed.free ?? 0),
-        prices: Array.isArray(parsed.prices) ? parsed.prices : [],
-        updatedAt: s.updatedAt || String(parsed.updatedAt ?? ''),
-      });
-    } catch {
-      // снимок побился — пропускаем, следующий пересчёт его перезапишет
-    }
+    const parsed = parseMonthPayload(s.payload, s.month);
+    if (!parsed) continue; // снимок побился — следующий пересчёт перезапишет
+    out.push({ ...parsed, month: s.month, updatedAt: s.updatedAt || parsed.updatedAt });
   }
   return out.sort((a, b) => (a.month < b.month ? 1 : -1));
 }
@@ -208,6 +250,68 @@ export async function listMonthStats(env: Env): Promise<MonthStat[]> {
 /** Подпись валюты в множественном числе: «евро», «злотых», «белорусских рублей». */
 export function currencyWord(code: Currency | 'none'): string {
   return CURRENCY_LABEL[code];
+}
+
+/**
+ * Шаблонное «мнение» месяца из одних цифр — без ИИ. Страница /itogi/:month
+ * показывает его, пока DeepSeek не задан или не справился: страница без
+ * текста не останется, а цифры врёт только последняя.
+ */
+export function fallbackSummary(stat: MonthStat, prev?: MonthStat | null): string {
+  const paragraphs: string[] = [];
+
+  const share = (n: number) => Math.round((n / Math.max(1, stat.total)) * 100);
+  paragraphs.push(
+    `${fmtPeriod(stat.month)}: ${stat.total} ${plural(stat.total, 'объявление', 'объявления', 'объявлений')} — `
+    + `${stat.offers} ${plural(stat.offers, 'водитель предлагал', 'водителя предлагали', 'водителей предлагало')} место `
+    + `и ${stat.requests} ${plural(stat.requests, 'человек искал', 'человека искали', 'человек искало')}, кому передать. `
+    + `География — ${stat.cities} ${plural(stat.cities, 'город', 'города', 'городов')} и ${stat.directions} `
+    + plural(stat.directions, 'направление', 'направления', 'направлений') + '.'
+  );
+
+  const opinion: string[] = [];
+  const top = stat.topDirections[0];
+  if (top) {
+    const dominance = share(top.count);
+    opinion.push(
+      dominance >= 25
+        ? `Направление ${top.pair} — ядро месяца (${dominance}% всех заявок): коридор живой, шансы найти попутную передачу там самые высокие.`
+        : `Даже самое частое направление, ${top.pair}, заняло лишь ${dominityWord(dominance)} заявок — доской пользуются на разных маршрутах, а не на одной магистрали.`
+    );
+  }
+  if (stat.offers > stat.requests * 1.5 && stat.requests > 0) {
+    opinion.push('Водителей на доске заметно больше, чем заявок на передачу: место в машине найти проще, чем попутчика для посылки — если нужно передать, месяц для этого подходил.');
+  } else if (stat.requests > stat.offers * 1.5 && stat.offers > 0) {
+    opinion.push('Заявок на передачу было больше, чем водителей: посылки копились в очереди, и каждый новый рейс был востребован.');
+  } else if (stat.offers > 0 && stat.requests > 0) {
+    opinion.push('Водителей и заявок на передачу примерно поровну — доска жила в обе стороны: и места искали пассажиры посылок, и посылки искали места.');
+  }
+  if (stat.prices.length > 0) {
+    const p = stat.prices.map((b) => `${fmtAmount(b.avg)} ${b.currency === 'none' ? 'у.е.' : CURRENCY_LABEL[b.currency]}`).join(', ');
+    opinion.push(`Средняя договорная цена — ${p} (считали отдельно по каждой валюте: смешивать евро со злотыми было бы бессмыслицей).`);
+  } else {
+    opinion.push('Цену в этом месяце почти никто не называл — договаривались в переписке, что для некоммерческой доски скорее норма.');
+  }
+  if (stat.free > 0) opinion.push(`${stat.free} ${plural(stat.free, 'человек предлагал', 'человека предлагали', 'человек предлагали')} передать бесплатно — просто по пути.`);
+  paragraphs.push(opinion.join(' '));
+
+  if (prev && prev.total > 0) {
+    const diff = Math.round(((stat.total - prev.total) / prev.total) * 100);
+    const trend = diff >= 10 ? `выросло на ${diff}%` : diff <= -10 ? `просело на ${Math.abs(diff)}%` : 'осталось примерно на том же уровне';
+    paragraphs.push(
+      `К ${fmtPeriod(prev.month)} поток ${trend}: ${prev.total} → ${stat.total} ${plural(stat.total, 'объявление', 'объявления', 'объявлений')}, `
+      + `направлений ${prev.directions} → ${stat.directions}. Живую картину по любому маршруту видно на доске — итоги лишь срез.`
+    );
+  }
+
+  return paragraphs.join('\n\n');
+}
+
+/** «треть»/«пятую часть» — доля в процентах словами без длинных дробей. */
+function dominityWord(percent: number): string {
+  if (percent >= 40) return 'почти половину';
+  if (percent >= 20) return 'около трети';
+  return `лишь ${percent}%`;
 }
 
 /**

@@ -9,6 +9,7 @@ import type { MonthStat } from '../src/stats';
 
 const db = vi.hoisted(() => ({
   snapshots: [] as MonthStat[],
+  summaries: {} as Record<string, string>,
   refreshes: 0,
   pairs: [] as Array<{ fromCity: string; toCity: string; total: number; active: number; lastmod: string }>,
   cities: [] as Array<{ city: string; count: number; active: number; lastmod: string }>,
@@ -17,6 +18,17 @@ const db = vi.hoisted(() => ({
 vi.mock('../src/store', () => ({
   // страница итогов сама объявлений не читает — только снимки и маршруты
   listRoutePairs: async () => db.pairs,
+  getMonthSnapshot: async (_env: unknown, month: string) => {
+    const found = db.snapshots.find((m) => m.month === month);
+    if (!found) return null;
+    return {
+      month: found.month,
+      total: found.total,
+      payload: JSON.stringify(found),
+      summary: db.summaries[found.month] ?? null,
+      updatedAt: '2026-09-17 10:00:00',
+    };
+  },
   listCityStats: async () => db.cities,
   listListings: async () => ({ items: [], hasMore: false }),
   listSitemapItems: async () => [],
@@ -34,7 +46,7 @@ vi.mock('../src/stats', async (importOriginal) => {
   };
 });
 
-import { buildStatsPage } from '../src/pages';
+import { buildMonthStatsPage, buildStatsPage } from '../src/pages';
 import { clearRouteIndexCache } from '../src/seo-routes';
 
 const ORIGIN = 'https://pop-utka.app';
@@ -68,6 +80,7 @@ function month(over: Partial<MonthStat> = {}): MonthStat {
 
 beforeEach(() => {
   clearRouteIndexCache();
+  db.summaries = {};
   db.refreshes = 0;
   db.snapshots = [month()];
   db.pairs = [{ fromCity: 'Варшава', toCity: 'Минск', total: 5, active: 4, lastmod: '2026-09-16' }];
@@ -112,7 +125,8 @@ describe('/itogi', () => {
     db.snapshots = [month(), month({ month: '2026-08', total: 20, offers: 12, requests: 8, cities: 9 })];
     const page = await buildStatsPage(env, ORIGIN);
     expect(page.html).toContain('Прошлые месяцы');
-    expect(page.html).toContain('<th scope="row">август 2026</th>');
+    // месяц в таблице — ссылка на свою страницу итогов
+    expect(page.html).toContain('<th scope="row"><a href="/itogi/2026-08">август 2026</a></th>');
     expect(page.html).toContain('не меняются, даже когда объявления уходят в архив');
   });
 
@@ -144,5 +158,41 @@ describe('/itogi', () => {
   it('кэшируется на полчаса', async () => {
     const page = await buildStatsPage(env, ORIGIN);
     expect(page.cacheControl).toContain('s-maxage=1800');
+  });
+});
+
+describe('/itogi/:month — страница одного месяца', () => {
+  it('заголовок, canonical, цифры и мнение месяца', async () => {
+    db.summaries['2026-09'] = 'Сентябрь выдался живым. Направление Варшава — Минск стало ядром месяца.\n\nВодителей было больше, чем заявок.';
+    const page = await buildMonthStatsPage(env, ORIGIN, '2026-09');
+    expect(page).not.toBeNull();
+    expect(page!.html).toContain('<title>Итоги сентября 2026: 11 объявлений');
+    expect(page!.html).toContain(`<link rel="canonical" href="${ORIGIN}/itogi/2026-09" />`);
+    expect(page!.html).toContain('<b>11</b><span>объявлений за месяц</span>');
+    // сохранённое мнение показывается абзацами
+    expect(page!.html).toContain('<p>Сентябрь выдался живым.');
+    expect(page!.html).toContain('<p>Водителей было больше, чем заявок.</p>');
+    expect(page!.html).toContain('"@type":"Article"');
+    expect(page!.html).toContain('mainEntityOfPage":"https://pop-utka.app/itogi/2026-09"');
+  });
+
+  it('без сохранённого мнения — шаблон из цифр (страница не пустая)', async () => {
+    const page = await buildMonthStatsPage(env, ORIGIN, '2026-09');
+    expect(page).not.toBeNull();
+    expect(page!.html).toContain('Как читается этот месяц');
+    expect(page!.html).toContain('Варшава → Минск'); // топ-направление в тексте
+  });
+
+  it('соседние месяцы и «все итоги» — навигация', async () => {
+    db.snapshots = [month(), month({ month: '2026-08', total: 20, offers: 12, requests: 8, cities: 9 })];
+    const page = await buildMonthStatsPage(env, ORIGIN, '2026-08');
+    expect(page!.html).toContain('href="/itogi/2026-09"');
+    expect(page!.html).toContain('href="/itogi"');
+  });
+
+  it('неизвестный месяц и мусорный адрес — 404 (null)', async () => {
+    expect(await buildMonthStatsPage(env, ORIGIN, '2020-01')).toBeNull();
+    expect(await buildMonthStatsPage(env, ORIGIN, 'сентябрь')).toBeNull();
+    expect(await buildMonthStatsPage(env, ORIGIN, '2026-13')).toBeNull();
   });
 });

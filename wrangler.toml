@@ -47,6 +47,7 @@ run_worker_first = [
   "/gorod/*",
   "/routes",
   "/itogi",
+  "/itogi/*",
   "/sitemap.xml",
   "/sitemap-pages.xml",
   "/sitemap-routes.xml",

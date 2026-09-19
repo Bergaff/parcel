@@ -281,6 +281,18 @@ describe('карта сайта', () => {
     expect(xml).not.toContain('/admin');
   });
 
+  it('страницы месяцев итогов попадают в карту — по одной на месяц', () => {
+    const xml = buildPagesSitemap(ORIGIN, '2026-09-17', [
+      { month: '2026-09', updatedAt: '2026-10-01 00:10:00' },
+      { month: '2026-08', updatedAt: '2026-09-01 00:10:00' },
+    ]);
+    expect(xml).toContain(`<loc>${ORIGIN}/itogi/2026-09</loc>`);
+    expect(xml).toContain(`<loc>${ORIGIN}/itogi/2026-08</loc>`);
+    expect(xml).toContain('<lastmod>2026-10-01</lastmod>');
+    // без месяцев карта не ломается
+    expect(buildPagesSitemap(ORIGIN, '2026-09-17')).toContain(`<loc>${ORIGIN}/itogi</loc>`);
+  });
+
   it('карта маршрутов: витрина, живые пары и города с заявками, все с lastmod', async () => {
     const xml = await buildRoutesSitemap(env, ORIGIN);
     expect(xml).toContain(`${ORIGIN}/r/varshava-minsk`);

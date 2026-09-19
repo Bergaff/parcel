@@ -1590,7 +1590,46 @@ async function renderAdminStats() {
     },
   }, 'пересчитать');
 
-  listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn]));
+  // страница месяца и аналитическая заметка (текст на /itogi/YYYY-MM)
+  const pageLink = el('a', {
+    class: 'btn btn-line',
+    href: stat.path || `/itogi/${stat.month}`,
+    target: '_blank',
+    rel: 'noopener',
+  }, 'страница месяца');
+  const summaryBtn = el('button', {
+    class: 'btn btn-line',
+    type: 'button',
+    onclick: async () => {
+      summaryBtn.disabled = true;
+      summaryBtn.textContent = 'пишу…';
+      try {
+        const res = await adminApi('/api/admin/stats/summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ month: stat.month }),
+        });
+        if (!res.ok) throw new Error('network');
+        const fresh = await res.json();
+        toast(fresh.ai ? 'Мнение месяца написал ИИ — страница обновится через минуту.' : 'ИИ недоступен, вставил шаблонное мнение из цифр.');
+        await renderAdminStats();
+      } catch {
+        toast('Не получилось написать мнение. Попробуйте ещё раз.');
+        summaryBtn.disabled = false;
+        summaryBtn.textContent = 'написать мнение';
+      }
+    },
+  }, 'написать мнение');
+
+  listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn, pageLink, summaryBtn]));
+
+  // аналитическая заметка месяца — то, что видно на его странице
+  if (stat.summary) {
+    const summary = el('textarea', { class: 'stats-post', rows: '8', readonly: true, spellcheck: 'false' });
+    summary.value = stat.summary;
+    listEl.append(el('p', { class: 'admin-hint', text: 'Мнение месяца на странице /itogi/' + stat.month + ':' }));
+    listEl.append(summary);
+  }
 
   // готовый текст поста
   const post = el('textarea', { class: 'stats-post', rows: '16', readonly: true, spellcheck: 'false' });

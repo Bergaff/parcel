@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, loadStatsSnapshots, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
@@ -12,9 +12,9 @@ import {
   buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
   cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
 } from './seo-routes';
-import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, siteOrigin, STATIC_PAGES } from './pages';
+import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, buildMonthStatsPage, siteOrigin, STATIC_PAGES } from './pages';
 import { currentPeriod } from './format';
-import { listMonthStats, refreshStats, statsPostText } from './stats';
+import { listMonthStats, refreshStats, regenerateMonthSummary, statsPostText } from './stats';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -341,6 +341,22 @@ app.get('/itogi', async (c) => {
   return c.html(page.html);
 });
 
+/* Итоги одного месяца /itogi/2026-09: цифры + аналитическая заметка.
+   Каждый месяц — отдельная страница: набираем контент по запросам
+   про статистику направлений, страница не устаревает никогда. */
+app.get('/itogi/:month', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const page = await buildMonthStatsPage(c.env, origin, c.req.param('month'));
+  if (!page) {
+    const nf = await buildNotFoundPage(c.env, origin, 'Итогов за этот месяц нет: на доске тогда не было опубликованных объявлений.');
+    c.status(404);
+    c.header('Cache-Control', nf.cacheControl ?? 'no-store');
+    return c.html(nf.html);
+  }
+  c.header('Cache-Control', page.cacheControl ?? 'no-store');
+  return c.html(page.html);
+});
+
 app.get('/gorod/:slug', async (c) => {
   const origin = siteOrigin(c.env, c.req.url);
   const html = await buildCityPage(c.env, c.req.param('slug'), origin);
@@ -359,8 +375,10 @@ app.get('/sitemap.xml', async (c) => {
   });
 });
 
-app.get('/sitemap-pages.xml', (c) => {
-  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso());
+app.get('/sitemap-pages.xml', async (c) => {
+  // страницы месяцев итогов появляются по одному на каждый месяц
+  const months = await listMonthStats(c.env).catch(() => []);
+  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso(), months);
   return new Response(xml, {
     headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
   });
@@ -738,10 +756,14 @@ app.get('/api/admin/match', async (c) => {
  */
 async function statsPayload(env: Env, origin: string) {
   const months = await listMonthStats(env);
+  const snapshots = await loadStatsSnapshots(env);
+  const summaryByMonth = new Map(snapshots.map((s) => [s.month, s.summary]));
   const current = currentPeriod();
   const withPosts = months.map((m) => ({
     ...m,
     post: statsPostText(m, { site: origin, month: m.month === current ? 'current' : 'past' }),
+    path: `/itogi/${m.month}`,
+    summary: summaryByMonth.get(m.month) ?? null,
   }));
   const headline = withPosts.find((m) => m.month === current) ?? withPosts[0] ?? null;
   return {
@@ -761,7 +783,18 @@ app.post('/api/admin/stats/refresh', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { force?: boolean };
   const res = await refreshStats(c.env, { force: body.force === true });
   const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
-  return c.json({ ...payload, saved: res.saved, kept: res.kept });
+  return c.json({ ...payload, saved: res.saved, kept: res.kept, summaries: res.summaries });
+});
+
+/* Перегенерировать аналитическую заметку месяца (кнопка на вкладке «итоги»):
+   сначала DeepSeek, не задан или не справился — шаблон из цифр. */
+app.post('/api/admin/stats/summary', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { month?: string } | null;
+  const month = body?.month ?? '';
+  if (!/^\d{4}-\d{2}$/.test(month)) return c.json({ error: 'month в формате YYYY-MM' }, 400);
+  const res = await regenerateMonthSummary(c.env, month);
+  if (!res) return c.json({ error: 'not_found' }, 404);
+  return c.json({ ok: true, month, ai: res.ai, summary: res.summary });
 });
 
 /** GET /api/admin/match/:id — прогон с парами. Пары хранятся снимками заявок,
@@ -788,7 +821,7 @@ const worker = {
     // не должны «съедать» цифры месяца, который уже закрыт.
     try {
       const stats = await refreshStats(env);
-      console.log('refreshStats:', JSON.stringify({ saved: stats.saved, kept: stats.kept.length }));
+      console.log('refreshStats:', JSON.stringify({ saved: stats.saved, kept: stats.kept.length, summaries: stats.summaries }));
     } catch (e) {
       console.error('refreshStats failed', e);
     }

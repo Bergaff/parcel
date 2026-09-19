@@ -15,6 +15,7 @@
  * AI_MODEL — модель (по умолчанию deepseek-chat), AI_BASE_URL — для тестов.
  */
 import type { Env, ListingType } from './types';
+import type { MonthStat } from './stats';
 import { normalizeCity, parseRecurring } from './parser';
 import { dedupeDescription, isRussianCity, normalizeContacts } from './util';
 
@@ -218,4 +219,90 @@ export async function aiExtractListing(env: Env, text: string): Promise<AiFields
     console.error('deepseek call failed', e);
     return [];
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Аналитическая заметка месяца (страница /itogi/…)                    */
+/* ------------------------------------------------------------------ */
+
+/** Компактная выжимка цифр месяца для промпта — чистая функция для тестов. */
+export function monthSummaryFacts(stat: MonthStat, prev?: MonthStat | null): string {
+  const lines = [
+    `Месяц: ${stat.month}`,
+    `Всего объявлений: ${stat.total} (водители везут: ${stat.offers}, нужно передать: ${stat.requests})`,
+    `Разных городов: ${stat.cities}, разных направлений: ${stat.directions}`,
+    `Из телеграм-чатов: ${stat.fromChats}, с сайта: ${stat.fromSite}`,
+  ];
+  if (stat.topDirections.length > 0) {
+    lines.push(`Топ-направления: ${stat.topDirections.map((d) => `${d.pair} — ${d.count}`).join('; ')}`);
+  }
+  if (stat.prices.length > 0) {
+    lines.push(`Цены (среднее по валютам): ${stat.prices.map((b) => `${b.currency} ${b.avg} (${b.count} объявлений, от ${b.min} до ${b.max})`).join('; ')}`);
+  }
+  if (stat.free > 0) lines.push(`Передать бесплатно предлагали: ${stat.free}`);
+  if (prev) {
+    lines.push(`Для сравнения, прошлый месяц (${prev.month}): всего ${prev.total}, направлений ${prev.directions}`);
+  }
+  return lines.join('\n');
+}
+
+const SUMMARY_SYSTEM_PROMPT = `Ты — редактор доски объявлений «попутка.», где водители междугородних рейсов предлагают передать посылки, а люди ищут, кто передаст.
+Напиши короткую аналитическую заметку по итогам месяца для страницы сайта: 2–3 абзаца, 120–220 слов, по-русски.
+Первый абзац — выжимка: чем месяц запомнился в цифрах. Дальше — мнение о направлениях и частоте: что говорит концентрация по главным маршрутам, широкий или узкий разброс городов, водителей больше или заявок (кого на доске ждали), что цены говорят о спросе.
+Правила:
+- Используй ТОЛЬКО данные из сообщения, никаких выдуманных цифр и городов.
+- Обычные абзацы текста: без заголовков, списков, markdown, эмодзи и ссылок.
+- Не повторяй одни и те же цифры дважды, не начинай с «В этом месяце».
+- Живой человеческий тон, без канцелярита и без обещаний («мы обязательно…»).`;
+
+/**
+ * Сгенерировать заметку месяца через DeepSeek. null — ИИ не задан,
+ * исчерпана квота или ответ не похож на живой текст (тогда страница
+ * покажет шаблонное мнение из fallbackSummary).
+ */
+export async function aiMonthSummary(env: Env, stat: MonthStat, prev?: MonthStat | null): Promise<string | null> {
+  if (!env.AI_API_KEY) return null;
+  if (!(await aiQuotaOk(env))) return null;
+
+  const base = (env.AI_BASE_URL ?? 'https://api.deepseek.com').replace(/\/+$/, '');
+  try {
+    const res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${env.AI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: env.AI_MODEL ?? 'deepseek-chat',
+        temperature: 0.7,
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+          { role: 'user', content: monthSummaryFacts(stat, prev) },
+        ],
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      console.error('deepseek summary http error', res.status);
+      return null;
+    }
+    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    return cleanMonthSummary(json.choices?.[0]?.message?.content ?? '');
+  } catch (e) {
+    console.error('deepseek summary failed', e);
+    return null;
+  }
+}
+
+/** Причесать ответ ИИ: без markdown, без лишних переносов, в разумных пределах. */
+export function cleanMonthSummary(raw: string): string | null {
+  let s = raw
+    .replace(/```[\s\S]*?```/g, '')   // вдруг завернул в код-блок
+    .replace(/[*#>`_]+/g, '')         // markdown-разметка нам не нужна
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (s.length < 200 || s.length > 4000) return null;
+  return s;
 }
