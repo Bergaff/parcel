@@ -230,6 +230,115 @@ const WEEKDAYS: Record<string, number> = {
   'пятница': 5, 'пятницу': 5, 'суббота': 6, 'субботу': 6, 'воскресенье': 0, 'воскресенья': 0,
 };
 
+/* ------------------------------------------------------------------ */
+/* Регулярные рейсы: «каждый четверг», «по вторникам», «ежедневно»     */
+/* ------------------------------------------------------------------ */
+
+/** Канонические подписи дней: что показывать в карточке и на доске.
+ *  Сокращения (пн, вт, чт…) — с явными границами: \b в JS не работает
+ *  с кириллицей (см. WEEKDAYS выше). Текст приходит уже в нижнем регистре, ё→е. */
+const WEEKDAY_LABELS: Array<[RegExp, string, number]> = [
+  [/понедельни|(?:^|[^а-я\d])пн(?![а-я\d])/, 'понедельникам', 1],
+  [/вторник|вторникам|(?:^|[^а-я\d])вт(?![а-я\d])/, 'вторникам', 2],
+  [/сред[ауы]|средам|(?:^|[^а-я\d])ср(?![а-я\d])/, 'средам', 3],
+  [/четверг|четвергам|(?:^|[^а-я\d])чт(?![а-я\d])/, 'четвергам', 4],
+  [/пятниц|пятницам|(?:^|[^а-я\d])пт(?![а-я\d])/, 'пятницам', 5],
+  [/суббот|субботам|(?:^|[^а-я\d])сб(?![а-я\d])/, 'субботам', 6],
+  [/воскресень|(?:^|[^а-я\d])вс(?![а-я\d])/, 'воскресеньям', 0],
+];
+
+/** «каждый четверг» / «каждую пятницу» — согласуем «каждый» с днём. */
+const WEEKDAY_EVERY: string[] = [
+  'каждое воскресенье', 'каждый понедельник', 'каждый вторник',
+  'каждую среду', 'каждый четверг', 'каждую пятницу', 'каждую субботу',
+];
+
+/**
+ * Расписание регулярного рейса из текста сообщения: «каждый четверг»,
+ * «по вторникам и пятницам», «ежедневно», «по будням», «раз в неделю».
+ * Разовый рейс — null. Возвращает короткую каноническую подпись,
+ * которую видно и в карточке Telegram, и на доске: сразу ясно,
+ * что заявка не «на один раз», а возит постоянно.
+ */
+export function parseRecurring(text: string): string | null {
+  const lower = text.toLowerCase().replace(/ё/g, 'е');
+  // Пускаем дальше только тексты про повторяемость: «кажд…», «ежедн…»,
+  // «по будням», «раз в неделю», «по пн/вт/чт…», «пн-пт», «сб-вс».
+  // Остальное — разовый рейс.
+  if (!/(кажд|ежедн|еженедел|по будням|раз в недел|по\s+(пн|вт|ср|чт|пт|сб|вс|понедел|вторник|сред|четверг|пятниц|суббот|воскрес)|(?:^|\s)(пн|вт|ср|чт|пт|сб|вс)\s*[-–—])/.test(lower)) {
+    return null;
+  }
+
+  // Порядок важен: «пн-пт» — это будни, а не «понедельник и пятница»
+  if (/ежедн|кажд[а-я]*\s*день(?![а-я])/.test(lower)) return 'ежедневно';
+  if (/по будням|пн\s*[-–—]\s*пт/.test(lower)) return 'по будням';
+
+  // «каждый четверг», «каждую пятницу», «по вторникам», «вт и чт», «сб-вс»
+  const days: number[] = [];
+  for (const [re, , weekday] of WEEKDAY_LABELS) {
+    if (re.test(lower)) days.push(weekday);
+  }
+  if (days.length > 0) {
+    days.sort((a, b) => a - b);
+    if (days.length === 1) return WEEKDAY_EVERY[days[0]!]!;
+    const labels = days.map((d) => WEEKDAY_LABELS.find(([, , w]) => w === d)![1]!);
+    return `по ${labels.slice(0, -1).join(', ')} и ${labels[labels.length - 1]}`;
+  }
+
+  if (/кажд[а-я]*\s*недел|раз в недел|еженедел/.test(lower)) return 'раз в неделю';
+  return null;
+}
+
+function utcIso(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Ближайшая будущая дата регулярного рейса: cron каждый день катит
+ * departure_date вперёд, чтобы водитель «каждый четверг» не падал
+ * в архив в пятницу утром. after — дата, СТРОГО после которой ищем.
+ */
+export function nextRecurringDate(recurring: string, after: string): string | null {
+  const m = /^(20\d\d)-(\d\d)-(\d\d)$/.exec(after);
+  if (!m) return null;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  if (Number.isNaN(d.getTime())) return null;
+  const label = recurring.toLowerCase().replace(/ё/g, 'е');
+
+  if (label === 'ежедневно') {
+    d.setUTCDate(d.getUTCDate() + 1);
+    return utcIso(d);
+  }
+  if (label === 'по будням') {
+    for (let i = 1; i <= 7; i++) {
+      const day = new Date(d);
+      day.setUTCDate(day.getUTCDate() + i);
+      const wd = day.getUTCDay();
+      if (wd >= 1 && wd <= 5) return utcIso(day);
+    }
+    return null;
+  }
+
+  // Конкретные дни: «каждый четверг», «по вторникам и пятницам»
+  const days: number[] = [];
+  for (const [re, , weekday] of WEEKDAY_LABELS) {
+    if (re.test(label)) days.push(weekday);
+  }
+  if (days.length > 0) {
+    for (let i = 1; i <= 7; i++) {
+      const day = new Date(d);
+      day.setUTCDate(day.getUTCDate() + i);
+      if (days.includes(day.getUTCDay())) return utcIso(day);
+    }
+    return null;
+  }
+
+  // «раз в неделю» и нераспознанное расписание — катим на неделю вперёд:
+  // лучше живая регулярная заявка, чем упавшая в архив раньше времени
+  d.setUTCDate(d.getUTCDate() + 7);
+  return utcIso(d);
+}
+
 /** Названия месяцев (рус./укр.) по префиксу: «15 сентября», «5 жовтня». */
 const MONTHS: Array<[string, number]> = [
   ['январ', 1], ['феврал', 2], ['март', 3], ['апрел', 4], ['ма[йея]', 5],
@@ -506,6 +615,8 @@ export function parseTelegramMessage(text: string, now: Date = new Date()): Pars
     fromCity: route?.from ?? null,
     toCity: route?.to ?? null,
     departureDate: parseDate(text, now),
+    // «каждый четверг» — заявка не разовая; дата при этом = ближайший заезд
+    recurring: parseRecurring(text),
     weightKg: extractWeight(text),
     price: extractPrice(text),
     telegram: extractTelegram(text),

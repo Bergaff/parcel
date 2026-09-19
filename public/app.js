@@ -349,7 +349,9 @@ function buildRow(l) {
       el('p', { class: 'desc', text: l.description }),
       el('div', { class: 'meta-line' }, [
         el('span', { text: ago(l.publishedAt || l.createdAt) }),
-        l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : el('span', { text: 'дата не указана' }),
+        l.recurring
+          ? el('span', { text: `↻ ${l.recurring}${l.departureDate ? `, ближайший ${fmtDate(l.departureDate)}` : ''}` })
+          : l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : el('span', { text: 'дата не указана' }),
         l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
         l.price ? el('span', { class: 'mono', text: l.price }) : null,
         el('span', { class: 'src' }, [sourceContent(l)]),
@@ -357,7 +359,9 @@ function buildRow(l) {
     ]),
     el('div', { class: 'row-side' }, [
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
-      (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso()))
+      l.recurring ? el('span', { class: 'stamp stamp-recur', text: 'регулярно' }) : null,
+      // Регулярный рейс архивом не помечаем: дату катит cron (archiveExpired)
+      (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso() && !l.recurring))
         ? el('span', { class: 'stamp stamp-expired', text: 'архив' })
         : null,
       contact
@@ -562,10 +566,11 @@ function renderDetail(l, meta) {
   if (box.dataset.ssr === '1' && box.dataset.id === l.id) return;
   box.removeAttribute('data-ssr');
   box.removeAttribute('data-id');
-  // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется)
+  // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется).
+  // Регулярный рейс — не архив: дата показывает ближайший заезд, cron катит её вперёд.
   const archived =
     l.status === 'expired' ||
-    (l.departureDate != null && l.departureDate < mskTodayIso());
+    (l.departureDate != null && l.departureDate < mskTodayIso() && !l.recurring);
 
   const contact = contactInfo(l);
   const actions = [];
@@ -599,13 +604,19 @@ function renderDetail(l, meta) {
   const cells = [];
   if (l.departureDate) {
     cells.push(el('div', { class: 'cell' }, [
-      el('span', { class: 'label', text: 'выезд' }),
+      el('span', { class: 'label', text: l.recurring ? 'ближайший выезд' : 'выезд' }),
       el('span', { class: 'value', text: fmtFullDate(l.departureDate) }),
     ]));
   } else {
     cells.push(el('div', { class: 'cell' }, [
       el('span', { class: 'label', text: 'выезд' }),
-      el('span', { class: 'value', text: 'дата не указана' }),
+      el('span', { class: 'value', text: l.recurring ? l.recurring : 'дата не указана' }),
+    ]));
+  }
+  if (l.recurring) {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'регулярно' }),
+      el('span', { class: 'value', text: l.recurring }),
     ]));
   }
   if (l.weightKg != null) {
@@ -647,6 +658,7 @@ function renderDetail(l, meta) {
         el('span', { class: 'r-to', text: l.toCity }),
       ]),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      ...(l.recurring ? [el('span', { class: 'stamp stamp-recur', text: 'регулярно' })] : []),
       ...(archived ? [el('span', { class: 'stamp stamp-expired', text: 'архив' })] : []),
     ]),
     el('div', { class: 'd-meta' }, cells),
@@ -713,6 +725,7 @@ function bindForm() {
       fromCity: fd.get('fromCity'),
       toCity: fd.get('toCity'),
       departureDate: fd.get('departureDate') || null,
+      recurring: fd.get('recurring') || null,
       weightKg: fd.get('weightKg') ? Number(fd.get('weightKg')) : null,
       price: fd.get('price') || null,
       description: fd.get('description'),
@@ -822,7 +835,7 @@ function adminCard(l, mode = 'pending') {
           const c = contactInfo(x); // контакт без дублей: номер из поля telegram тоже покажется номером
           return el('p', {
             class: 'admin-contact',
-            text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${c ? ` · ${c.label}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
+            text: `${x.fromCity} → ${x.toCity}${x.departureDate ? ` · выезд ${fmtDate(x.departureDate)}` : ''}${x.recurring ? ` · ↻ ${x.recurring}` : ''}${c ? ` · ${c.label}` : ''} · ${x.status === 'pending' ? 'на модерации' : x.status === 'expired' ? 'архив' : 'на доске'} · № ${x.id.slice(0, 8)}`,
           });
         };
         const parts = [];
@@ -891,6 +904,7 @@ function adminEditForm(l) {
         el('option', { value: 'request', ...(l.type === 'request' ? { selected: true } : {}), text: 'нужно передать' }),
       ])),
       field('Дата выезда', input('departureDate', l.departureDate ?? '', { type: 'date' })),
+      field('Регулярно (расписание)', input('recurring', l.recurring ?? '', { placeholder: 'каждый четверг / по будням' })),
     ]),
     el('div', { class: 'row2' }, [
       field('Откуда', input('fromCity', l.fromCity)),
@@ -923,6 +937,7 @@ function adminEditForm(l) {
       fromCity: fd.get('fromCity'),
       toCity: fd.get('toCity'),
       departureDate: fd.get('departureDate') || null,
+      recurring: fd.get('recurring') || null,
       weightKg: fd.get('weightKg') ? Number(fd.get('weightKg')) : null,
       price: fd.get('price') || null,
       description: fd.get('description'),
@@ -1106,6 +1121,7 @@ function matchSide(s, icon) {
   const bits = [
     el('span', { class: 'match-route', text: `${s.fromCity} → ${s.toCity}` }),
     el('span', { text: s.departureDate ? `выезд ${fmtDate(s.departureDate)}` : 'дата не указана' }),
+    s.recurring ? el('span', { text: `↻ ${s.recurring}` }) : null,
     s.weightKg != null ? el('span', { class: 'mono', text: `${String(s.weightKg).replace('.', ',')} кг` }) : null,
     s.price ? el('span', { class: 'mono', text: s.price }) : null,
     s.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,

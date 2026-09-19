@@ -218,6 +218,30 @@ describe('оболочка сайта (renderShell)', () => {
   });
 });
 
+describe('регулярные рейсы в SSR', () => {
+  it('строка: расписание вместо «выезда» и штамп «регулярно»', () => {
+    const row = renderRowHtml(listing({ departureDate: '2026-09-24', recurring: 'каждый четверг' }));
+    expect(row).toContain('↻ каждый четверг, ближайший 24 сен');
+    expect(row).toContain('stamp-recur">регулярно');
+    expect(row).not.toContain('выезд 24 сен');
+  });
+
+  it('прошедшая дата не делает регулярный рейс архивом', () => {
+    const old = listing({ departureDate: '2026-09-10', recurring: 'каждый четверг' });
+    expect(isArchived(old)).toBe(false);
+    expect(renderRowHtml(old)).not.toContain('stamp-expired');
+    // разовый — как раньше, архив
+    expect(isArchived(listing({ departureDate: '2026-09-10' }))).toBe(true);
+  });
+
+  it('карточка: ячейка «регулярно» и подпись «ближайший выезд»', () => {
+    const html = renderDetailHtml(listing({ departureDate: '2026-09-24', recurring: 'каждый четверг' }), { origin: 'https://pop-utka.app' });
+    expect(html).toContain('ближайший выезд');
+    expect(html).toContain('24 сентября 2026');
+    expect(html).toContain(' class="label">регулярно</span><span class="value">каждый четверг</span>');
+  });
+});
+
 describe('строка доски в SSR', () => {
   it('ссылка ведёт на настоящий адрес карточки', () => {
     const row = renderRowHtml(listing());

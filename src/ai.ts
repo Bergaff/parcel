@@ -15,7 +15,7 @@
  * AI_MODEL — модель (по умолчанию deepseek-chat), AI_BASE_URL — для тестов.
  */
 import type { Env, ListingType } from './types';
-import { normalizeCity, } from './parser';
+import { normalizeCity, parseRecurring } from './parser';
 import { dedupeDescription, isRussianCity, normalizeContacts } from './util';
 
 /** Дневной лимит ИИ-вызовов — страховка от неожиданного счёта. */
@@ -26,6 +26,8 @@ export interface AiFields {
   fromCity: string;
   toCity: string;
   departureDate: string | null;
+  /** «каждый четверг», «ежедневно» — рейс регулярный, заявка не разовая. */
+  recurring: string | null;
   weightKg: number | null;
   price: string | null;
   telegram: string | null;
@@ -36,10 +38,11 @@ export interface AiFields {
 const SYSTEM_PROMPT = `Ты — строгий извлекатель данных из сообщений телеграм-чатов.
 Доска объявлений «попутка.» — ТОЛЬКО про передачу посылок и вещей попутными машинами.
 Верни ТОЛЬКО валидный JSON без пояснений и без markdown, по схеме:
-{"listings": [{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "departure_date": "YYYY-MM-DD", "weight_kg": 5, "price": "50 zl", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}]}
+{"listings": [{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "departure_date": "YYYY-MM-DD", "recurring": "каждый четверг", "weight_kg": 5, "price": "50 zl", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}]}
 
 Правила:
 - В одном сообщении может быть НЕСКОЛЬКО рейсов/направлений (туда и обратно, два маршрута, «18-19.9 туда, 20-21.9 обратно») — верни ОТДЕЛЬНЫЙ элемент listings на каждое направление (до 3), со своими городами и датой.
+- recurring — РЕГУЛЯРНОЕ расписание рейса, короткой фразой как в сообщении: «каждый четверг», «по вторникам и пятницам», «ежедневно», «по будням», «раз в неделю». Заполняй ТОЛЬКО если рейс повторяется («каждый четверг возим», «езжу по вторникам»), одноразовый рейс — null. Для регулярного departure_date — ближайшая будущая дата по этому расписанию.
 - type — по тому, КТО действует. "offer" — автор едет сам и может взять/передать посылку («возьму», «везу», «есть место», «рейс»). "request" — автор ИЩЕТ перевозчика и сам ничего не везёт: «нужно передать», «ищу водителя», «кто везёт завтра?», «кто-то занимается перевозом посылок?», «занимаетесь доставкой?».
 - is_passenger: true — если это поиск или предложение ПОЕЗДКИ пассажиром БЕЗ посылок (пассажир, подвезти до, места в машине). «Попутчики + посылки/передачи» — НЕ пассажирское.
 - Города — по-русски, кириллицей: Warsaw → Варшава. Сокращения раскрывай по смыслу: «Гр» → Гродно, «Мог» → Могилёв.
@@ -88,6 +91,15 @@ export function validateAiListing(
     weightKg = Math.round(b.weight_kg * 100) / 100;
   }
 
+  // Регулярное расписание: канонизируем знакомые формулировки («Каждый четверг»
+  // → «каждый четверг»), незнакомые берём как есть, но коротко и без мусора
+  let recurring: string | null = null;
+  if (typeof b.recurring === 'string' && b.recurring.trim().length >= 3) {
+    const label = b.recurring.trim().replace(/\s+/g, ' ').toLowerCase().slice(0, 40);
+    const looksLikeSchedule = /кажд|ежедн|еженедел|раз в недел|недел|день|дням|будн|числ|месяц/.test(label);
+    recurring = parseRecurring(label) ?? (looksLikeSchedule ? label : null);
+  }
+
   const price = (typeof b.price === 'string' && b.price.trim()) ? b.price.trim().slice(0, 40) : null;
 
   // ИИ часто возвращает юзернейм без @ ("KgRBPL"), телефон с префиксом
@@ -110,7 +122,7 @@ export function validateAiListing(
   ).slice(0, 300);
   if (description.length < 5) return null;
 
-  return { type, fromCity, toCity, departureDate, weightKg, price, telegram, phone, description };
+  return { type, fromCity, toCity, departureDate, recurring, weightKg, price, telegram, phone, description };
 }
 
 /** Разобрать ответ ИИ (массив listings или старый одиночный объект)

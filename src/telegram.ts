@@ -1,5 +1,5 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
-import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, normalizeCity, isPassengerOnly, worthAiCheck, findCities } from './parser';
+import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, parseRecurring, normalizeCity, isPassengerOnly, worthAiCheck, findCities } from './parser';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
@@ -100,6 +100,9 @@ export function formatListing(l: Listing, sourceNote = ''): string {
     `Маршрут: ${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}`,
   ];
   if (l.departureDate) parts.push(`Дата: ${escapeHtml(l.departureDate)}`);
+  // Регулярный рейс («каждый четверг») — отдельной строкой: сразу видно,
+  // что заявка не разовая, а дата показывает ближайший заезд
+  if (l.recurring) parts.push(`Регулярно: ${escapeHtml(l.recurring)}`);
   const extras: string[] = [];
   if (l.weightKg != null) extras.push(`вес ${l.weightKg} кг`);
   if (l.price) extras.push(`цена ${escapeHtml(l.price)}`);
@@ -147,6 +150,8 @@ interface WizardState {
     from?: string;
     to?: string;
     date?: string | null;
+    /** «каждый четверг» — если рейс регулярный, а не разовый. */
+    recurring?: string | null;
     details?: string;
     contact?: string;
   };
@@ -184,7 +189,7 @@ async function promptStep(env: Env, chatId: number, w: WizardState): Promise<voi
       await sendText(env, chatId, '<b>Куда?</b>\nНапишите город назначения — по-русски, например <i>Минск</i>.');
       break;
     case 'date':
-      await sendText(env, chatId, '<b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или просто минус, если дата не важна.');
+      await sendText(env, chatId, '<b>Когда?</b>\nНапример: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Если рейс регулярный — напишите расписание: <i>каждый четверг</i>, <i>по будням</i>, <i>ежедневно</i>. Или просто минус, если дата не важна.');
       break;
     case 'details':
       await sendText(env, chatId, '<b>Опишите посылку и условия</b>\nВес, что за груз, сколько мест, цена. Одним сообщением.');
@@ -215,10 +220,11 @@ function draftSummary(w: WizardState): string {
     `<b>Проверьте объявление:</b>`,
     `${typeLabel}`,
     `Маршрут: ${escapeHtml(d.from ?? '?')} → ${escapeHtml(d.to ?? '?')}`,
-    `Дата: ${d.date ? escapeHtml(d.date) : 'не указана'}`,
+    `Дата: ${d.date ? escapeHtml(d.date) : 'не указана'}${d.recurring ? ` (ближайшая — рейс регулярный, ${escapeHtml(d.recurring)})` : ''}`,
+    d.recurring ? `Регулярно: ${escapeHtml(d.recurring)}` : null,
     `Описание: ${escapeHtml((d.details ?? '').slice(0, 200))}`,
     `Контакты: ${escapeHtml(d.contact ?? '?')}`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 async function sendConfirmation(env: Env, chatId: number, w: WizardState): Promise<void> {
@@ -251,6 +257,7 @@ function searchLine(env: Env, l: Listing, today: string): string {
     if (m) bits.push(`${parseInt(m[3]!, 10)} ${SEARCH_MONTHS[parseInt(m[2]!, 10) - 1]}`);
     else bits.push(l.departureDate);
   }
+  if (l.recurring) bits.push(`↻ ${escapeHtml(l.recurring)}`);
   if (l.weightKg != null) bits.push(`${String(l.weightKg).replace('.', ',')} кг`);
   if (l.price) bits.push(escapeHtml(l.price));
   const contacts = uniqueContacts(l.telegram, l.phone);
@@ -430,6 +437,7 @@ function relatedDay(iso: string | null | undefined): string {
 function relatedLine(l: Listing): string {
   const bits = [
     relatedDay(l.departureDate),
+    l.recurring ? `↻ ${l.recurring}` : null,
     l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
     l.price,
     uniqueContacts(l.telegram, l.phone)[0] ?? null,
@@ -642,6 +650,7 @@ async function sendParseReport(env: Env, chatId: number, text: string): Promise<
     `Маршрут: ${escapeHtml(p.fromCity ?? '—')} → ${escapeHtml(p.toCity ?? '—')}\n` +
     `Тип: ${p.intent === 'offer' ? 'водитель везёт' : p.intent === 'request' ? 'нужно передать' : '—'}\n` +
     `Дата: ${p.departureDate ?? '—'}\n` +
+    `Регулярно: ${p.recurring ? escapeHtml(p.recurring) : '—'}\n` +
     `Вес: ${p.weightKg != null ? `${String(p.weightKg).replace('.', ',')} кг` : '—'}\n` +
     `Цена: ${p.price ? escapeHtml(p.price) : '—'}\n` +
     `Контакт: ${escapeHtml(uniqueContacts(p.telegram, p.phone)[0] ?? '—')}\n` +
@@ -666,6 +675,7 @@ function rulesFields(
     fromCity: parsed.fromCity ?? 'не указано',
     toCity: parsed.toCity ?? 'не указано',
     departureDate: parsed.departureDate,
+    recurring: parsed.recurring,
     weightKg: parsed.weightKg,
     price: parsed.price,
     telegram,
@@ -1000,10 +1010,13 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       break;
     }
     case 'date': {
-      if (text === '-' || /не важно|без даты/i.test(text)) draft.date = null;
+      if (text === '-' || /не важно|без даты/i.test(text)) { draft.date = null; draft.recurring = null; }
       else {
+        // «каждый четверг» / «по будням» — рейс регулярный: запоминаем
+        // расписание, датой ставим ближайший заезд
+        draft.recurring = parseRecurring(text);
         draft.date = parseDate(text);
-        if (!draft.date) { await sendText(env, chatId, 'Не понял дату. Формат: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Или <i>-</i>.'); return; }
+        if (!draft.date && !draft.recurring) { await sendText(env, chatId, 'Не понял дату. Формат: <i>завтра</i>, <i>пятница</i>, <i>15.09</i>. Для регулярного рейса: <i>каждый четверг</i>, <i>ежедневно</i>. Или <i>-</i>.'); return; }
       }
       w.step = 'details';
       break;
@@ -1063,6 +1076,7 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     fromCity: d.from,
     toCity: d.to,
     departureDate: d.date,
+    recurring: d.recurring ?? null,
     description: d.details,
     telegram: isTg ? contact : null,
     phone: isTg ? null : contact,

@@ -80,3 +80,14 @@ describe('карточка модератора — без дублей инфо
     expect(card).not.toMatch(/ИИ/);
   });
 });
+
+describe('карточка — регулярный рейс', () => {
+  it('расписание видно отдельной строкой, дата — ближайший заезд', () => {
+    const card = formatListing(listing({ departureDate: '2026-09-24', recurring: 'каждый четверг' }));
+    expect(card).toContain('Дата: 2026-09-24');
+    expect(card).toContain('Регулярно: каждый четверг');
+  });
+  it('у разового рейса строки «Регулярно» нет', () => {
+    expect(formatListing(listing({ recurring: null }))).not.toContain('Регулярно:');
+  });
+});

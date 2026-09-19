@@ -350,3 +350,32 @@ describe('groupDuplicates: разбор завалов, которые уже н
     expect(keepRank(existing({ telegram: '@driver' }))[1]).toBe(0);
   });
 });
+
+describe('регулярные рейсы — дубликаты по расписанию', () => {
+  it('тот же человек, тот же маршрут, оба регулярные — дубль даже с разной датой', () => {
+    // дата существующей прокатилась cron'ом, у новой пересылки — своя
+    const v = compareForDuplicate(
+      input({ departureDate: '2026-09-24', recurring: 'каждый четверг' }),
+      existing({ departureDate: '2026-09-17', recurring: 'каждый четверг' })
+    );
+    expect(v?.kind).toBe('duplicate');
+    expect(v?.why).toContain('регулярные');
+  });
+
+  it('разовые рейсы с далёкими датами — по-прежнему не дубль', () => {
+    expect(
+      compareForDuplicate(input({ departureDate: '2026-09-24' }), existing({ departureDate: '2026-09-17' }))
+    ).toBeNull();
+  });
+
+  it('регулярный и разовый не склеиваются', () => {
+    // дата далеко: у регулярного она катится cron'ом, у разового — своя.
+    // Это два разных рейса, дубликатом не считаем.
+    expect(
+      compareForDuplicate(
+        input({ departureDate: '2026-09-24', recurring: 'каждый четверг' }),
+        existing({ departureDate: '2026-09-30' })
+      )
+    ).toBeNull();
+  });
+});

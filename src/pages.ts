@@ -234,7 +234,8 @@ export function itemTitle(l: Listing, archived: boolean): string {
 
 export function itemDescription(l: Listing): string {
   const bits = [
-    l.departureDate ? `выезд ${fmtDayShort(l.departureDate)}` : null,
+    l.recurring ?? (l.departureDate ? `выезд ${fmtDayShort(l.departureDate)}` : null),
+    l.recurring && l.departureDate ? `ближайший рейс ${fmtDayShort(l.departureDate)}` : null,
     l.weightKg != null ? `${String(l.weightKg).replace('.', ',')} кг` : null,
     l.price,
   ].filter(Boolean).join(' · ');

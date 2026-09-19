@@ -155,3 +155,19 @@ describe('parseAiListings — несколько направлений из о�
     expect(parseAiListings(raw, opts)).toHaveLength(3);
   });
 });
+
+describe('recurring — регулярное расписание из ответа ИИ', () => {
+  it('знакомое расписание канонизируется', () => {
+    const f = validateAiListing(ok({ recurring: 'Каждый четверг' }), { now: NOW, originalText: TEXT });
+    expect(f?.recurring).toBe('каждый четверг');
+  });
+  it('незнакомая формулировка проходит как есть', () => {
+    const f = validateAiListing(ok({ recurring: 'по чётным неделям' }), { now: NOW, originalText: TEXT });
+    expect(f?.recurring).toBe('по чётным неделям');
+  });
+  it('мусор отбрасывается, отсутствие — null', () => {
+    expect(validateAiListing(ok({ recurring: 'да' }), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
+    expect(validateAiListing(ok({ recurring: 'что-то не то' }), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
+    expect(validateAiListing(ok(), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
+  });
+});

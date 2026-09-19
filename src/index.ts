@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
-import { normalizeCity } from './parser';
+import { normalizeCity, parseRecurring } from './parser';
 import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
@@ -67,6 +67,15 @@ app.post('/api/telegram/:secret', async (c) => {
 
 /* ------------------------- Listings API ----------------------- */
 
+/** Расписание регулярного рейса из формы («каждый четверг») — короткая
+ *  каноническая подпись или null, если поле пустое/мусорное. */
+function sanitizeRecurring(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const label = raw.trim().replace(/\s+/g, ' ').toLowerCase().slice(0, 40);
+  if (label.length < 3) return null;
+  return parseRecurring(label) ?? label;
+}
+
 /** Валидация входящего объявления с сайта/внешнего источника. */
 function validateListing(body: unknown): { input?: ListingInput; error?: string } {
   const b = (body ?? {}) as Record<string, unknown>;
@@ -110,6 +119,9 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
     ? b.price.trim().slice(0, 40)
     : null;
 
+  // «каждый четверг» — необязательное расписание регулярного рейса
+  const recurring = sanitizeRecurring(b.recurring);
+
   // Контакты раскладываем по полям: номер, вписанный в «Telegram», уедет в phone,
   // юзернейм из phone — в telegram, один и тот же контакт дважды не сохранится
   const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
@@ -120,6 +132,7 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
       fromCity,
       toCity,
       departureDate,
+      recurring,
       weightKg,
       price,
       description,
@@ -542,7 +555,7 @@ app.put('/api/admin/listings/:id', async (c) => {
   const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
 
   const item = await updateListing(c.env, c.req.param('id'), {
-    type, fromCity, toCity, departureDate, weightKg, price, description, telegram, phone,
+    type, fromCity, toCity, departureDate, recurring: sanitizeRecurring(b.recurring), weightKg, price, description, telegram, phone,
   });
   if (!item) return c.json({ error: 'not_found' }, 404);
   // Без контакта сохранить можно (у пересылок от людей со скрытым профилем контакта
@@ -606,10 +619,11 @@ app.get('/api/admin/listings/:id/related', async (c) => {
 });
 
 /* Ручной запуск архивации — то же самое cron делает раз в сутки:
-   просроченные заявки уходят в архив, старше 30 дней — удаляются. */
+   просроченные заявки уходят в архив, старше 30 дней — удаляются,
+   регулярные рейсы получают свежую дату ближайшего заезда. */
 app.post('/api/admin/archive', async (c) => {
   const res = await archiveExpired(c.env);
-  return c.json({ ok: true, archived: res.archived, deleted: res.deleted });
+  return c.json({ ok: true, archived: res.archived, deleted: res.deleted, rolled: res.rolled, pruned: res.pruned });
 });
 
 /* ------------------------------------------------------------------ */

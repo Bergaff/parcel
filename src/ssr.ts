@@ -29,7 +29,11 @@ export function isAppPath(pathname: string): boolean {
 }
 
 export function isArchived(l: Listing): boolean {
-  return l.status === 'expired' || (l.departureDate != null && l.departureDate < mskTodayIso());
+  // Регулярный рейс архивом не считается: дата выезда — ближайший заезд,
+  // cron катит её вперёд (archiveExpired в src/store.ts)
+  if (l.status === 'expired') return true;
+  if (l.recurring) return false;
+  return l.departureDate != null && l.departureDate < mskTodayIso();
 }
 
 /* --------------------------- подпись источника --------------------------- */
@@ -89,7 +93,9 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   const meta = [
     // «2 дн. назад»/«15 сен» — как в app.js, иначе строка меняется после гидрации
     `<span>${escapeHtml(agoText(l.publishedAt ?? l.createdAt))}</span>`,
-    l.departureDate ? `<span>выезд ${escapeHtml(fmtDayShort(l.departureDate))}</span>` : '<span>дата не указана</span>',
+    l.recurring
+      ? `<span>↻ ${escapeHtml(l.recurring)}${l.departureDate ? `, ближайший ${escapeHtml(fmtDayShort(l.departureDate))}` : ''}</span>`
+      : l.departureDate ? `<span>выезд ${escapeHtml(fmtDayShort(l.departureDate))}</span>` : '<span>дата не указана</span>',
     fmtWeight(l.weightKg) ? `<span class="mono">${escapeHtml(fmtWeight(l.weightKg)!)}</span>` : null,
     l.price ? `<span class="mono">${escapeHtml(l.price)}</span>` : null,
     `<span class="src">${sourceHtml(l, opts.chatLinks)}</span>`,
@@ -97,6 +103,7 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
 
   const side = [
     `<span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>`,
+    l.recurring ? '<span class="stamp stamp-recur">регулярно</span>' : null,
     archived ? '<span class="stamp stamp-expired">архив</span>' : null,
     contact
       ? `<a class="write-link" href="${escapeHtml(contact.href)}" target="_blank" rel="noopener">${contact.kind === 'phone' ? 'позвонить' : 'написать'}</a>`
@@ -147,7 +154,8 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
   const archived = isArchived(l);
 
   const cells = [
-    ['выезд', l.departureDate ? fmtDateWithYear(l.departureDate) : 'дата не указана'],
+    [l.recurring ? 'ближайший выезд' : 'выезд', l.departureDate ? fmtDateWithYear(l.departureDate) : (l.recurring ? l.recurring : 'дата не указана')],
+    ...(l.recurring ? [['регулярно', l.recurring]] : []),
     ...(fmtWeight(l.weightKg) ? [['вес', fmtWeight(l.weightKg)!]] : []),
     ...(l.price ? [['цена', l.price]] : []),
   ] as Array<[string, string]>;
@@ -180,6 +188,7 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
 <div class="d-head">
   <h1 class="d-route">${escapeHtml(l.fromCity)} <span class="r-arrow">→</span> ${escapeHtml(l.toCity)}</h1>
   <span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>
+  ${l.recurring ? `<span class="stamp stamp-recur">регулярно</span>` : ''}
   ${archived ? '<span class="stamp stamp-expired">архив</span>' : ''}
 </div>
 <div class="d-meta">${cellsHtml}<div class="cell"><span class="label">источник</span><span class="value">${sourceHtml(l, opts.chatLinks)}</span></div><div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDateWithYear((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>

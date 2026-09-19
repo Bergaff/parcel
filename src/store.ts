@@ -4,6 +4,7 @@ import { listingSnapshot, parseSnapshot } from './match';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
 import { normalizeContacts } from './util';
+import { nextRecurringDate } from './parser';
 
 function mapRow(row: Record<string, unknown>): Listing {
   return {
@@ -12,6 +13,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     fromCity: String(row.from_city),
     toCity: String(row.to_city),
     departureDate: row.departure_date ? String(row.departure_date) : null,
+    recurring: row.recurring ? String(row.recurring) : null,
     weightKg: row.weight_kg === null || row.weight_kg === undefined ? null : Number(row.weight_kg),
     price: row.price ? String(row.price) : null,
     description: String(row.description),
@@ -29,9 +31,10 @@ function mapRow(row: Record<string, unknown>): Listing {
 }
 
 export async function createListing(env: Env, input: ListingInput): Promise<Listing> {
-  // Колонки *_lc должны существовать до записи: на проде миграцию могут
-  // применить позже деплоя, а без них INSERT упадёт.
+  // Колонки *_lc и recurring должны существовать до записи: на проде миграцию
+  // могут применить позже деплоя, а без них INSERT упадёт.
   await ensureSearchColumns(env);
+  await ensureRecurringColumn(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
@@ -41,14 +44,14 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   const { telegram, phone } = normalizeContacts(input.telegram, input.phone);
   await env.DB.prepare(
     `INSERT INTO listings
-      (id, type, from_city, to_city, departure_date, weight_kg, price, description,
+      (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
        created_at, published_at, from_city_lc, to_city_lc, description_lc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
-      input.departureDate ?? null, input.weightKg ?? null, input.price ?? null,
+      input.departureDate ?? null, input.recurring ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
       input.sourceMessageId ?? null, now, publishedAt,
@@ -132,7 +135,7 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
      WHERE status IN ('published', 'expired')
        AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
-     ORDER BY (CASE WHEN status = 'expired' OR departure_date < date('now', '+3 hours') THEN 1 ELSE 0 END),
+     ORDER BY (CASE WHEN status = 'expired' OR (recurring IS NULL AND departure_date < date('now', '+3 hours')) THEN 1 ELSE 0 END),
               COALESCE(published_at, created_at) DESC
      LIMIT ?`
   ).bind(pattern, pattern, limit).all();
@@ -141,23 +144,72 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
 
 /**
  * Архивация по расписанию (cron, раз в сутки):
- * 1) опубликованные заявки с прошедшей датой выезда → статус 'expired' (архив):
+ * 1) регулярные рейсы («каждый четверг») не архивируются — дата выезда
+ *    катится на ближайший заезд по расписанию. Водитель возит постоянно,
+ *    заявка не «на один раз» и не должна пропадать в пятницу утром.
+ *    Живёт, пока её освежают (пересылки, touchListing); 45 дней тишины —
+ *    расписание считается закончившимся, заявка уходит в архив;
+ * 2) опубликованные заявки с прошедшей датой выезда → статус 'expired' (архив):
  *    они пропадают с доски, но месяц ещё доступны по ссылке и в /поиск;
- * 2) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE).
+ * 3) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE);
+ * 4) регулярные рейсы без обновлений 45 дней — удаляются (расписание умерло).
  */
-export async function archiveExpired(env: Env): Promise<{ archived: number; deleted: number }> {
+export async function archiveExpired(env: Env, now: Date = new Date()): Promise<{ archived: number; deleted: number; rolled: number; pruned: number }> {
+  await ensureRecurringColumn(env);
+
+  // 1) Катим дату регулярных рейсов на ближайший заезд — только живые
+  //    (освежённые за последние 45 дней), мёртвые трогать не нужно.
+  //    Катим с догоном: если cron простаивал, за один прогон догоняем сегодня.
+  const todayIso = new Date(now.getTime() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+  let rolled = 0;
+  const stale = await env.DB.prepare(
+    `SELECT id, recurring, departure_date FROM listings
+     WHERE status = 'published' AND recurring IS NOT NULL
+       AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')
+       AND COALESCE(published_at, created_at) > datetime('now', '-45 days')
+     LIMIT 200`
+  ).all();
+  for (const row of (stale.results ?? []) as unknown as Array<Record<string, unknown>>) {
+    const from = String(row.departure_date);
+    let next = from;
+    for (let i = 0; i < 8 && next < todayIso; i++) {
+      const step = nextRecurringDate(String(row.recurring), next);
+      if (!step || step === next) break;
+      next = step;
+    }
+    if (next !== from && next >= todayIso) {
+      await env.DB.prepare('UPDATE listings SET departure_date = ? WHERE id = ?')
+        .bind(next, String(row.id)).run();
+      rolled++;
+    }
+  }
+
+  // 2) Разовые заявки с прошедшей датой → архив (регулярные не трогаем:
+  //    живым уже катнут дату, мёртвые уйдут пунктом 4)
   const upd = await env.DB.prepare(
     `UPDATE listings SET status = 'expired'
      WHERE status = 'published'
        AND departure_date IS NOT NULL
+       AND recurring IS NULL
        AND departure_date < date('now', '+3 hours')`
   ).run();
+
+  // 3) Архив старше 30 дней с даты выезда — удаляем
   const del = await env.DB.prepare(
     `DELETE FROM listings
      WHERE departure_date IS NOT NULL
+       AND recurring IS NULL
        AND departure_date < date('now', '+3 hours', '-30 days')`
   ).run();
-  return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0 };
+
+  // 4) Мёртвые регулярные: 45 дней никто не пересылал и не освежал
+  const prune = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE recurring IS NOT NULL
+       AND COALESCE(published_at, created_at) < datetime('now', '-45 days')`
+  ).run();
+
+  return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0, rolled, pruned: prune.meta.changes ?? 0 };
 }
 
 /** Заявка по префиксу id (от 4 символов): «a1b2» из «№ A1B2» на сайте,
@@ -183,20 +235,21 @@ export async function updateListing(
   env: Env,
   id: string,
   patch: Partial<Pick<ListingInput,
-    'type' | 'fromCity' | 'toCity' | 'departureDate' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
+    'type' | 'fromCity' | 'toCity' | 'departureDate' | 'recurring' | 'weightKg' | 'price' | 'description' | 'telegram' | 'phone'>>
 ): Promise<Listing | null> {
   await ensureSearchColumns(env);
+  await ensureRecurringColumn(env);
   // Те же правила, что при создании: контакты без дублей и каждый в своём поле
   const { telegram, phone } = normalizeContacts(patch.telegram, patch.phone);
   const res = await env.DB.prepare(
     `UPDATE listings SET
-       type = ?, from_city = ?, to_city = ?, departure_date = ?, weight_kg = ?,
+       type = ?, from_city = ?, to_city = ?, departure_date = ?, recurring = ?, weight_kg = ?,
        price = ?, description = ?, telegram = ?, phone = ?,
        from_city_lc = ?, to_city_lc = ?, description_lc = ?
      WHERE id = ?`
   ).bind(
     patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
-    patch.departureDate ?? null, patch.weightKg ?? null, patch.price ?? null,
+    patch.departureDate ?? null, patch.recurring ?? null, patch.weightKg ?? null, patch.price ?? null,
     patch.description ?? '', telegram, phone,
     (patch.fromCity ?? '').toLowerCase(), (patch.toCity ?? '').toLowerCase(),
     (patch.description ?? '').toLowerCase(), id
@@ -387,10 +440,12 @@ export function likeContains(q: string): string {
 const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
 
 let searchColumnsReady: Promise<void> | null = null;
+let recurringColumnReady: Promise<void> | null = null;
 
 /** Сбросить отметку «колонки готовы» (тесты и смена базы). */
 export function resetSearchColumnsCache(): void {
   searchColumnsReady = null;
+  recurringColumnReady = null;
 }
 
 /**
@@ -427,6 +482,71 @@ export function ensureSearchColumns(env: Env): Promise<void> {
   return searchColumnsReady;
 }
 
+/**
+ * Колонка recurring (регулярные рейсы, «каждый четверг») на месте — тот же
+ * сценарий, что у *_lc: миграцию на проде могут применить позже деплоя,
+ * а INSERT/UPDATE без колонки упадут и заявка не сохранится.
+ */
+export function ensureRecurringColumn(env: Env): Promise<void> {
+  if (!recurringColumnReady) {
+    recurringColumnReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('recurring')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN recurring TEXT`).run();
+        // Одноразовый бэкфилл: только что добавленная колонка везде NULL, а в
+        // описаниях регулярные рейсы уже писали («возим каждый четверг»).
+        // description_lc — честный нижний регистр для кириллицы: встроенный
+        // lower() в SQLite знает только ASCII, «Каждый» он не понижает.
+        await env.DB.prepare(
+          `UPDATE listings SET recurring = CASE
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%ежедневн%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%каждый день%' THEN 'ежедневно'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%по будням%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%пн-пт%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%пн - пт%' THEN 'по будням'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%воскресен%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по воскресень%' THEN 'каждое воскресенье'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%понедельн%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по понедельн%' THEN 'каждый понедельник'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%вторник%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по вторник%' THEN 'каждый вторник'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%сред%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по средам%' THEN 'каждую среду'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%четверг%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по четверг%' THEN 'каждый четверг'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%пятниц%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по пятниц%' THEN 'каждую пятницу'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%суббот%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по суббот%' THEN 'каждую субботу'
+             WHEN COALESCE(description_lc, lower(description)) LIKE '%кажд%недел%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%раз в недел%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%еженедел%' THEN 'раз в неделю'
+             ELSE recurring
+           END
+           WHERE recurring IS NULL
+             AND (COALESCE(description_lc, lower(description)) LIKE '%кажд%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%ежедн%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%еженедел%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по будням%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%раз в недел%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по понедельн%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по вторник%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по средам%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по четверг%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по пятниц%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по суббот%'
+               OR COALESCE(description_lc, lower(description)) LIKE '%по воскресень%')`
+        ).run();
+      }
+    })();
+    recurringColumnReady.catch(() => { recurringColumnReady = null; });
+  }
+  return recurringColumnReady;
+}
+
 interface WhereClause { sql: string; params: (string | number)[] }
 
 function buildWhere(f: ListFilters): WhereClause {
@@ -435,14 +555,17 @@ function buildWhere(f: ListFilters): WhereClause {
   if (f.archive) {
     // Архив (вкладка на доске): помеченные cron'ом ('expired')
     // и ещё не помеченные просроченные ('published' с прошедшей датой).
-    sql = " WHERE (status = 'expired' OR (status = 'published' AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')))";
+    // Регулярные рейсы в архив не попадают: cron катит их дату вперёд.
+    sql = " WHERE (status = 'expired' OR (status = 'published' AND recurring IS NULL AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')))";
   } else {
     sql = ' WHERE status = ?';
     params.push(f.status ?? 'published');
     // Доска показывает только актуальные заявки: дата выезда не прошла
     // (или не указана). Просроченные живут в архиве — см. archiveExpired.
+    // Регулярные показываем и с прошедшей датой: расписание ещё живо,
+    // ближайший заезд cron посчитает.
     if ((f.status ?? 'published') === 'published') {
-      sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours'))";
+      sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL)";
     }
   }
   if (f.from) { sql += ` AND from_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
@@ -799,17 +922,18 @@ export async function deleteListings(env: Env, ids: string[]): Promise<number> {
 
 /**
  * Что вообще видно на сайте: опубликованные заявки с не прошедшей датой
- * и архив (месяц после даты выезда, потом cron удаляет). Тот же набор,
- * что показывают доска и /api/listings — иначе страницы маршрутов
- * появлялись бы и исчезали каждый день.
+ * и архив (месяц после даты выезда, потом cron удаляет). Регулярные рейсы
+ * («каждый четверг») видны всегда, пока cron катит их дату вперёд.
+ * Тот же набор, что показывают доска и /api/listings — иначе страницы
+ * маршрутов появлялись бы и исчезали каждый день.
  */
 const VISIBLE_WHERE = `(
-    (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')))
+    (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL))
     OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-30 days'))
   )`;
 
 /** Активная заявка: на доске прямо сейчас (не архив). */
-const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours')) THEN 1 ELSE 0 END`;
+const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL) THEN 1 ELSE 0 END`;
 
 export interface RoutePair {
   fromCity: string;

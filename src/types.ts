@@ -30,6 +30,9 @@ export interface ListingInput {
   fromCity: string;
   toCity: string;
   departureDate?: string | null;
+  /** «каждый четверг», «по будням», «ежедневно» — рейс повторяется, а не разовый.
+   *  Дата выезда при этом показывает ближайший заезд (cron катит её вперёд). */
+  recurring?: string | null;
   weightKg?: number | null;
   price?: string | null;
   description: string;
@@ -67,6 +70,8 @@ export interface ParsedMessage {
   fromCity: string | null;
   toCity: string | null;
   departureDate: string | null;
+  /** Расписание регулярного рейса («каждый четверг») или null у разового. */
+  recurring: string | null;
   weightKg: number | null;
   price: string | null;
   telegram: string | null;

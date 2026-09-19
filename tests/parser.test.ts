@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isMultiRoute, looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly, worthAiCheck } from '../src/parser';
+import { isMultiRoute, looksLikeListing, normalizeCity, parseDate, parseTelegramMessage, isPassengerOnly, worthAiCheck, parseRecurring, nextRecurringDate } from '../src/parser';
 import { isRussianCity } from '../src/util';
 
 const NOW = new Date('2026-09-06T12:00:00Z');
@@ -201,5 +201,72 @@ describe('isMultiRoute — несколько направлений в одно
   });
   it('одна дата и диапазон веса — одно направление', () => {
     expect(isMultiRoute('20.09 повезу посылки Варшава — Минск, возьму 5-10 кг')).toBe(false);
+  });
+});
+
+describe('parseRecurring — регулярные рейсы («каждый четверг»)', () => {
+  it('каждый/каждую + день недели', () => {
+    expect(parseRecurring('Каждый четверг возим посылки Варшава — Минск')).toBe('каждый четверг');
+    expect(parseRecurring('каждую пятницу езжу через границу')).toBe('каждую пятницу');
+    expect(parseRecurring('КАЖДУЮ СРЕДУ вожу передачи')).toBe('каждую среду');
+  });
+  it('по + дни недели в дательном падеже и сокращения', () => {
+    expect(parseRecurring('по вторникам вожу посылки')).toBe('каждый вторник');
+    expect(parseRecurring('по вторникам и пятницам есть места')).toBe('по вторникам и пятницам');
+    expect(parseRecurring('по вт и чт, доставка')).toBe('по вторникам и четвергам');
+    // сокращения без «по» — слишком похоже на обычный текст, пропускаем
+    expect(parseRecurring('вт и чт, доставка')).toBeNull();
+  });
+  it('ежедневно, будни, раз в неделю', () => {
+    expect(parseRecurring('ездим каждый день, беру посылки')).toBe('ежедневно');
+    expect(parseRecurring('ежедневные рейсы Минск — Варшава')).toBe('ежедневно');
+    expect(parseRecurring('по будням возьму передачку')).toBe('по будням');
+    expect(parseRecurring('пн-пт вожу посылки')).toBe('по будням');
+    expect(parseRecurring('раз в неделю стабильно езжу')).toBe('раз в неделю');
+    expect(parseRecurring('каждую неделю вожу')).toBe('раз в неделю');
+  });
+  it('разовый рейс — null', () => {
+    expect(parseRecurring('20 сентября повезу посылку Варшава — Минск')).toBeNull();
+    expect(parseRecurring('завтра еду, возьму 10 кг')).toBeNull();
+    expect(parseRecurring('по 20 zł за килограмм')).toBeNull();
+    // «вторник» без «каждый/по» — конкретный день, не расписание
+    expect(parseRecurring('во вторник повезу коробку')).toBeNull();
+  });
+
+  it('parseTelegramMessage помечает регулярный рейс, дата = ближайший заезд', () => {
+    const p = parseTelegramMessage('Варшава — Минск, каждый четверг возьму посылки, @driver77', NOW);
+    expect(p.recurring).toBe('каждый четверг');
+    // NOW = 2026-09-06 (воскресенье) → ближайший четверг 2026-09-10
+    expect(p.departureDate).toBe('2026-09-10');
+  });
+  it('разовое объявление не получает расписания', () => {
+    const p = parseTelegramMessage('Варшава — Львов, завтра, возьму посылку 10 кг, 100 zł, @driver77', NOW);
+    expect(p.recurring).toBeNull();
+  });
+});
+
+describe('nextRecurringDate — ближайший заезд по расписанию', () => {
+  // 2026-09-10 — четверг
+  it('каждый четверг после четверга — следующий четверг', () => {
+    expect(nextRecurringDate('каждый четверг', '2026-09-10')).toBe('2026-09-17');
+    // дата прошла в пятницу — ближайший снова четверг
+    expect(nextRecurringDate('каждый четверг', '2026-09-11')).toBe('2026-09-17');
+  });
+  it('по вторникам и пятницам — ближайший из дней', () => {
+    expect(nextRecurringDate('по вторникам и пятницам', '2026-09-08')).toBe('2026-09-11'); // вт → пт
+    expect(nextRecurringDate('по вторникам и пятницам', '2026-09-11')).toBe('2026-09-15'); // пт → вт
+  });
+  it('ежедневно — завтра, по будням — следующий будний день', () => {
+    expect(nextRecurringDate('ежедневно', '2026-09-10')).toBe('2026-09-11');
+    // 2026-09-11 — пятница → понедельник 14-го
+    expect(nextRecurringDate('по будням', '2026-09-11')).toBe('2026-09-14');
+  });
+  it('раз в неделю и нераспознанное расписание — плюс неделя', () => {
+    expect(nextRecurringDate('раз в неделю', '2026-09-10')).toBe('2026-09-17');
+    expect(nextRecurringDate('по чётным числам', '2026-09-10')).toBe('2026-09-17');
+  });
+  it('битая дата — null', () => {
+    expect(nextRecurringDate('каждый четверг', 'завтра')).toBeNull();
+    expect(nextRecurringDate('каждый четверг', '')).toBeNull();
   });
 });

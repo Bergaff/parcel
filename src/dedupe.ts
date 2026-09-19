@@ -25,6 +25,8 @@ export interface DedupeSubject {
   fromCity: string;
   toCity: string;
   departureDate?: string | null;
+  /** «каждый четверг» — регулярный рейс; дата может катиться вперёд. */
+  recurring?: string | null;
   weightKg?: number | null;
   telegram?: string | null;
   phone?: string | null;
@@ -198,8 +200,13 @@ export function compareForDuplicate(
   if (input.type !== existing.type) return null;
   if (!sameRoute(input, existing)) return null;
 
+  // Оба рейса регулярные («каждый четверг»): дата — ближайший заезд, она
+  // катится cron'ом и у новой пересылки может быть другой. Один и тот же
+  // человек на том же маршруте с расписанием — это одна заявка, не две.
+  const bothRecurring = Boolean(input.recurring) && Boolean(existing.recurring);
+
   const diff = dateDiffDays(input.departureDate, existing.departureDate);
-  if (diff != null && diff > 1) return null; // другой день — другой рейс
+  if (diff != null && diff > 1 && !bothRecurring) return null; // другой день — другой рейс
 
   const route = `${existing.fromCity} → ${existing.toCity}`;
   const sim = textSimilarity(input.description, existing.description);
@@ -208,7 +215,7 @@ export function compareForDuplicate(
   if (sameContact(input, existing)) {
     return {
       kind: 'duplicate',
-      why: `тот же человек (${whoLabel(existing)}), тот же маршрут ${route}, ${dateNote(input, existing)}`,
+      why: `тот же человек (${whoLabel(existing)}), тот же маршрут ${route}, ${bothRecurring ? `оба рейса регулярные (${existing.recurring})` : dateNote(input, existing)}`,
     };
   }
 

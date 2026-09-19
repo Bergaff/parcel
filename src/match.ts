@@ -271,6 +271,8 @@ export interface ListingSnapshot {
   fromCity: string;
   toCity: string;
   departureDate: string | null;
+  /** «каждый четверг» — регулярный рейс (показ в сводке /подбор). */
+  recurring?: string | null;
   weightKg: number | null;
   price: string | null;
   contacts: string[];
@@ -288,6 +290,7 @@ export function listingSnapshot(l: Listing): ListingSnapshot {
     fromCity: l.fromCity,
     toCity: l.toCity,
     departureDate: l.departureDate ?? null,
+    recurring: l.recurring ?? null,
     weightKg: l.weightKg ?? null,
     price: l.price ?? null,
     contacts: uniqueContacts(l.telegram, l.phone),
