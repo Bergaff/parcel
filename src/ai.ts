@@ -55,6 +55,21 @@ const SYSTEM_PROMPT = `Ты — строгий извлекатель данны
 - Сообщение не про поездку/передачу — верни {"listings": []}.`;
 
 /** Валидация ответа ИИ: чему не доверяем — то отбрасываем. Чистая, тестируется юнит-тестами. */
+
+/** Обрезка длинного описания по границе предложения, а не на полуслове:
+ *  раньше 300 символов резали посреди фразы и карточка заканчивалась
+ *  обрывком вроде «Даты 18.09-19.08 (вероятно». */
+export function trimDescription(raw: string, max = 300): string {
+  const s = raw.trim();
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  // последняя точка/вопрос/абзац в разумной части текста — режем там
+  const stop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf('\n'));
+  if (stop >= max * 0.5) return cut.slice(0, stop + 1).trim();
+  const sp = cut.lastIndexOf(' ');
+  return (sp >= max * 0.5 ? cut.slice(0, sp) : cut).trimEnd() + '…';
+}
+
 export function validateAiListing(
   raw: unknown,
   opts: { now: Date; originalText: string }
@@ -76,6 +91,9 @@ export function validateAiListing(
   const fromCity = normalizeCity(fromRaw);
   const toCity = normalizeCity(toRaw);
   if (!isRussianCity(fromCity) || !isRussianCity(toCity)) return null;
+  // «Тересполь → Тересполь»: ИИ иногда берёт один город за оба конца маршрута.
+  // Маршрута нет — заявка бессмысленная, пусть сообщение разбирают правила.
+  if (fromCity === toCity) return null;
 
   // Дата: YYYY-MM-DD, не дальше года вперёд и не старше 3 дней назад
   let departureDate: string | null = null;
@@ -116,10 +134,10 @@ export function validateAiListing(
   // Текст, который сочинил ИИ, чистим полностью: маршрут, дата, вес, «Водитель»
   // и контакты уже показаны отдельными полями карточки — дублировать их не нужно.
   // Исходный текст сообщения не калечим: из него убираем только контакты.
-  description = dedupeDescription(description, fromAi
+  description = trimDescription(dedupeDescription(description, fromAi
     ? { type, fromCity, toCity, departureDate, telegram, phone }
     : { telegram, phone, stripFields: false }
-  ).slice(0, 300);
+  ));
   if (description.length < 5) return null;
 
   return { type, fromCity, toCity, departureDate, recurring, weightKg, price, telegram, phone, description };

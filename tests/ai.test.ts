@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAiListings, validateAiListing } from '../src/ai';
+import { parseAiListings, trimDescription, validateAiListing } from '../src/ai';
 
 const NOW = new Date('2026-09-14T12:00:00+03:00');
 const TEXT = 'Завтра везу посылку Крокодилово — Бегемотово, 5 кг, 100 zł, @driver77';
@@ -169,5 +169,31 @@ describe('recurring — регулярное расписание из отве�
     expect(validateAiListing(ok({ recurring: 'да' }), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
     expect(validateAiListing(ok({ recurring: 'что-то не то' }), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
     expect(validateAiListing(ok(), { now: NOW, originalText: TEXT })?.recurring).toBeNull();
+  });
+});
+
+describe('recurring и защита от странностей ИИ', () => {
+  it('одинаковые города с двух сторон маршрута — не заявка', () => {
+    // «Возьму комплект колес... в Тересполе»: ИИ взял Тересполь за оба конца
+    expect(validateAiListing(ok({ from_city: 'Тересполь', to_city: 'Тересполе' }), { now: NOW, originalText: TEXT })).toBeNull();
+    expect(validateAiListing(ok({ from_city: 'Тересполь', to_city: 'Тересполь' }), { now: NOW, originalText: TEXT })).toBeNull();
+  });
+});
+
+describe('trimDescription — обрезка по предложению, а не на полуслове', () => {
+  it('короткий текст не трогает', () => {
+    expect(trimDescription('Возьму посылки до 10 кг. Без предоплаты.')).toBe('Возьму посылки до 10 кг. Без предоплаты.');
+  });
+  it('длинный режет по последней точке', () => {
+    const long = Array.from({ length: 8 }, () => 'Первое предложение достаточно длинное, чтобы всё поместилось целиком.').join(' ');
+    const out = trimDescription(long);
+    expect(out.length).toBeLessThanOrEqual(300);
+    expect(out.endsWith('.')).toBe(true);
+  });
+  it('без точек режет по слову и ставит многоточие', () => {
+    const out = trimDescription('а'.repeat(50) + ' слово '.repeat(60));
+    expect(out.length).toBeLessThanOrEqual(301);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out).not.toMatch(/\s…/);
   });
 });

@@ -751,10 +751,16 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         'Похоже, это пассажирская попутка. Доска «попутка.» — пока только про посылки и вещи.');
       return;
     }
-    const rl = await rateLimit(env, `fwd:${msg.from?.id ?? chatId}`, 30, 3600);
-    if (!rl.allowed) {
-      await sendText(env, chatId, 'Много пересылок подряд — подождите пару минут и продолжайте.');
-      return;
+    // Лимит пересылок защищает от флуда посторонних, но админы пересылают
+    // объявления пачками по 30–50 штук из чатов за раз — и на 31-й бот
+    // отказывался, объявления терялись. Администраторам лимит не мешает.
+    const isAdmin = admins(env).includes(String(msg.from?.id));
+    if (!isAdmin) {
+      const rl = await rateLimit(env, `fwd:${msg.from?.id ?? chatId}`, 30, 3600);
+      if (!rl.allowed) {
+        await sendText(env, chatId, 'Много пересылок подряд — подождите пару минут и продолжайте.');
+        return;
+      }
     }
     // Дедупликация: у пересылки поста из канала помним исходный чат+сообщение
     // (тот же ключ, что у обработки в самих чатах — дубль не создастся).
