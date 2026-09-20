@@ -444,7 +444,7 @@ button { font-family: inherit; }
 @media (max-width: 640px) {
   .wrap { width: calc(100% - 28px); }
   .masthead-meta { width: 100%; }
-  .topnav { gap: 14px; font-size: 13.5px; }
+  .topnav { flex-wrap: wrap; gap: 10px 14px; font-size: 13.5px; padding: 10px 0 8px; }
   .nav-cta { margin-left: 0; }
   .route-search { align-items: stretch; }
   .route-search .q, .q.date { flex: 1 1 100%; width: 100%; }
