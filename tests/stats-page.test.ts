@@ -121,10 +121,18 @@ describe('/itogi', () => {
     expect(page.html).toContain('<nav class="crumbs"');
   });
 
-  it('несколько месяцев — сводная таблица прошлых', async () => {
+  it('даже один месяц — таблица со ссылкой на его страницу', async () => {
+    const page = await buildStatsPage(env, ORIGIN);
+    expect(page.html).toContain('<h2 class="rule-head">Все месяцы</h2>');
+    expect(page.html).toContain('<th scope="row"><a href="/itogi/2026-09">сентябрь 2026</a></th>');
+    // месяц в шапке — тоже ссылка
+    expect(page.html).toContain('<a href="/itogi/2026-09">сентябрь 2026</a> · 11');
+  });
+
+  it('несколько месяцев — сводная таблица всех', async () => {
     db.snapshots = [month(), month({ month: '2026-08', total: 20, offers: 12, requests: 8, cities: 9 })];
     const page = await buildStatsPage(env, ORIGIN);
-    expect(page.html).toContain('Прошлые месяцы');
+    expect(page.html).toContain('Все месяцы');
     // месяц в таблице — ссылка на свою страницу итогов
     expect(page.html).toContain('<th scope="row"><a href="/itogi/2026-08">август 2026</a></th>');
     expect(page.html).toContain('не меняются, даже когда объявления уходят в архив');

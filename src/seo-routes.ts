@@ -279,6 +279,7 @@ export function seoPageShell(opts: {
         <a href="/how">Как это работает</a>
         <a href="/routes">Маршруты</a>
         <a href="/gorod">Города</a>
+        <a href="/itogi">Итоги</a>
         <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
       </nav>
     </div>

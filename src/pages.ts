@@ -412,7 +412,7 @@ export async function buildStatsPage(env: Env, origin: string): Promise<PageResu
     body = `    <nav class="crumbs" aria-label="Хлебные крошки"><a href="/">Доска</a> <span class="crumb-sep">›</span> <span>Итоги месяца</span></nav>
     <p class="doc-date">цифры доски</p>
     <h1 class="page-title">Итоги месяца</h1>
-    <p class="route-cities">${escapeHtml(fmtPeriod(current.month))} · ${current.total} ${plural(current.total, 'объявление', 'объявления', 'объявлений')} · направлений ${current.directions}</p>
+    <p class="route-cities"><a href="/itogi/${current.month}">${escapeHtml(fmtPeriod(current.month))}</a> · ${current.total} ${plural(current.total, 'объявление', 'объявления', 'объявлений')} · направлений ${current.directions}</p>
 
     <p class="lead">Сколько объявлений прошло через доску и по чём люди договаривались. Считаем по тем заявкам, что публиковались в этом месяце: водители и те, кому нужно передать. Цену берём ту, что человек написал сам, поэтому среднее — отдельно по каждой валюте.</p>
 
@@ -426,7 +426,7 @@ ${figures.map(([n, label]) => `      <div class="stats-fig"><b>${n}</b><span>${e
 ${directions.length > 0 ? `    <h2 class="rule-head">Куда везли чаще всего</h2>
     <p class="related">${directions.join('')}</p>` : ''}
 
-${months.length > 1 ? `    <h2 class="rule-head">Прошлые месяцы</h2>
+    <h2 class="rule-head">Все месяцы</h2>
     <table class="stats-table stats-table-wide">
       <thead>
         <tr><th>месяц</th><th>всего</th><th>везут</th><th>передать</th><th>городов</th><th>средняя цена</th></tr>
@@ -435,7 +435,7 @@ ${months.length > 1 ? `    <h2 class="rule-head">Прошлые месяцы</h2
 ${months.map(monthRowHtml).join('\n')}
       </tbody>
     </table>
-    <p class="foot-note">Итоги прошлых месяцев не меняются, даже когда объявления уходят в архив и удаляются: цифры сохраняются снимком.</p>` : ''}
+    <p class="foot-note">Закрытые месяцы не меняются, даже когда объявления уходят в архив и удаляются: цифры сохраняются снимком.</p>
 
     <p class="colophon">Хотите передать посылку по одному из направлений? Откройте <a href="/">доску</a> или <a href="/routes">список маршрутов</a> — там живые заявки водителей.</p>`;
   }

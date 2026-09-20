@@ -70,6 +70,10 @@ export async function listListings(
   env: Env,
   f: ListFilters
 ): Promise<{ items: Listing[]; hasMore: boolean }> {
+  // buildWhere упоминает recurring при фильтре «published» (регулярные рейсы
+  // показываем и с прошедшей датой) — на свежей базе колонку создаёт воркер,
+  // поэтому чтение тоже обязано её гарантировать, а не только запись.
+  await ensureRecurringColumn(env);
   if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   let fullSql = `SELECT * FROM listings${sql}`;
@@ -128,6 +132,8 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
  * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
  */
 export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
+  // ORDER BY ниже смотрит в recurring — гарантируем и его
+  await ensureRecurringColumn(env);
   await ensureSearchColumns(env);
   const pattern = likeContains(city);
   const res = await env.DB.prepare(
@@ -497,6 +503,10 @@ export function ensureRecurringColumn(env: Env): Promise<void> {
       );
       if (!names.has('recurring')) {
         await env.DB.prepare(`ALTER TABLE listings ADD COLUMN recurring TEXT`).run();
+        // Бэкфилл ниже читает description_lc, а на свежей базе *_lc может
+        // ещё не быть (их добавляет ensureSearchColumns) — просим заранее,
+        // иначе ALTER recurring проходит, а UPDATE падает.
+        await ensureSearchColumns(env);
         // Одноразовый бэкфилл: только что добавленная колонка везде NULL, а в
         // описаниях регулярные рейсы уже писали («возим каждый четверг»).
         // description_lc — честный нижний регистр для кириллицы: встроенный
@@ -582,6 +592,8 @@ function buildWhere(f: ListFilters): WhereClause {
 
 /** Количество объявлений по типам с учётом фильтров поиска (без учёта вкладки-типа). */
 export async function getCounts(env: Env, f: ListFilters): Promise<{ offer: number; request: number }> {
+  // тот же buildWhere, что у listListings: recurring нужен всегда
+  await ensureRecurringColumn(env);
   if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   const res = await env.DB.prepare(

@@ -105,11 +105,14 @@ describe('запросы к базе', () => {
     expect(query.params.slice(0, 2)).toEqual(['%ивано-франковск%', '%ивано-франковск%']);
   });
 
-  it('без фильтра городов колонки не трогаем и PRAGMA не дёргаем', async () => {
-    const { env, calls } = fakeDb();
+  it('без фильтра городов *_lc не трогаем, recurring проверяем одним PRAGMA', async () => {
+    const { env, calls } = fakeDb({
+      columns: ['id', 'type', 'from_city', 'to_city', 'description', 'status', 'recurring'],
+    });
     await listListings(env, {});
-    expect(calls.some((c) => /PRAGMA/.test(c.sql))).toBe(false);
-    expect(calls.some((c) => /ALTER TABLE/.test(c.sql))).toBe(false);
+    expect(calls.some((c) => c.sql.includes('ALTER TABLE'))).toBe(false);
+    expect(calls.some((c) => /ADD COLUMN \w+_lc/.test(c.sql))).toBe(false);
+    expect(calls.filter((c) => /PRAGMA/.test(c.sql)).length).toBe(1);
   });
 });
 
@@ -136,8 +139,14 @@ describe('колонки *_lc', () => {
   });
 
   it('повторный вызов в том же isolate не дёргает базу', async () => {
-    const { env, calls } = fakeDb();
+    const { env, calls } = fakeDb({
+      columns: [
+        'id', 'type', 'from_city', 'to_city', 'description', 'status', 'recurring',
+        'from_city_lc', 'to_city_lc', 'description_lc',
+      ],
+    });
     await ensureSearchColumns(env);
+    await listListings(env, {}); // закрепляет recurring и *_lc
     const first = calls.length;
     await ensureSearchColumns(env);
     await listListings(env, { from: 'Минск' });
@@ -152,5 +161,40 @@ describe('колонки *_lc', () => {
     await expect(ensureSearchColumns(broken)).rejects.toThrow('D1 down');
     await ensureSearchColumns(env);
     expect(calls.some((c) => /PRAGMA/.test(c.sql))).toBe(true);
+  });
+});
+
+describe('свежая база: чтение доски гарантирует recurring само', () => {
+  // Раньше колонку recurring создавали только пути записи (createListing),
+  // а чтение доски ссылается на неё в buildWhere — свежая база без единого
+  // объявления отдавала 500 на главной, пока бот что-нибудь не создаст.
+  it('listListings без фильтров добавляет recurring до SELECT', async () => {
+    const { env, calls } = fakeDb(); // колонок recurring и *_lc нет
+    await listListings(env, {});
+    const alter = calls.findIndex((c) => c.sql.includes('ADD COLUMN recurring'));
+    const select = calls.findIndex((c) => /^SELECT \* FROM listings/.test(c.sql));
+    expect(alter).toBeGreaterThanOrEqual(0);
+    expect(select).toBeGreaterThan(alter);
+  });
+
+  it('бэкфилл recurring идёт после *_lc — он читает description_lc', async () => {
+    const { env, calls } = fakeDb();
+    await listListings(env, {});
+    const lc = calls.findIndex((c) => c.sql.includes('ADD COLUMN description_lc'));
+    const backfill = calls.findIndex((c) => /UPDATE listings SET\s+recurring = CASE/.test(c.sql));
+    expect(lc).toBeGreaterThanOrEqual(0);
+    expect(backfill).toBeGreaterThan(lc);
+  });
+
+  it('getCounts (счётчик в шапке) тоже гарантирует recurring', async () => {
+    const { env, calls } = fakeDb();
+    await getCounts(env, {});
+    expect(calls.some((c) => c.sql.includes('ADD COLUMN recurring'))).toBe(true);
+  });
+
+  it('searchByCity (поиск бота) тоже гарантирует recurring', async () => {
+    const { env, calls } = fakeDb();
+    await searchByCity(env, 'Минск');
+    expect(calls.some((c) => c.sql.includes('ADD COLUMN recurring'))).toBe(true);
   });
 });
