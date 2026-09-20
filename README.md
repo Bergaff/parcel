@@ -60,7 +60,7 @@
 5. `/setjoingroups` → **Enable**.
 6. Быстро проверьте: нажмите Start у своего бота (это нужно и для того, чтобы бот мог писать вам личные сообщения).
 
-Ваш Telegram ID для модерации: напишите **@userinfobot** — он пришлёт `Id: 123456789`. Это `ADMIN_IDS`.
+Ваш Telegram ID для модерации: напишите **@userinfobot** — он пришлёт `Id: 123456789`. Это `ADMIN_IDS`. Админов может быть несколько: перечислите ID через запятую (`123456789,987654321`), пробелы не страшны.
 
 ---
 
@@ -106,7 +106,7 @@ id = "ВАШ_KV_ID"
 ```bash
 npx wrangler secret put BOT_TOKEN        # токен от @BotFather
 npx wrangler secret put BOT_SECRET       # любая длинная случайная строка (секрет в URL вебхука)
-npx wrangler secret put ADMIN_IDS        # ваш Telegram ID, напр. 123456789
+npx wrangler secret put ADMIN_IDS        # Telegram ID админов, напр. 123456789 или 123456789,987654321
 npx wrangler secret put ADMIN_API_TOKEN  # случайный токен для админ-API
 ```
 
