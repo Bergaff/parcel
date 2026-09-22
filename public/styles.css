@@ -275,6 +275,9 @@ button { font-family: inherit; }
 .stamp-request { color: var(--accent); border-color: var(--accent); }
 .stamp-expired { color: #8a8172; border-color: #8a8172; }
 .stamp-recur { color: #35507a; border-color: #35507a; }
+/* Происхождение заявки в очереди модерации: админ или посторонний человек */
+.stamp-admin { color: #35507a; border-color: #35507a; background: rgba(53, 80, 122, .08); }
+.stamp-origin { color: #6f675a; border-color: #6f675a; }
 
 .write-link {
   font-size: 13.5px;

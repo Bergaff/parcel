@@ -744,9 +744,13 @@ function bindForm() {
     btn.textContent = 'отправляю…';
 
     try {
+      // Если в этом браузере авторизована админка — прикладываем ключ: воркер
+      // пометит заявку как поданную админом (дубли сливаются как раньше).
+      const headers = { 'Content-Type': 'application/json' };
+      if (adminKey()) headers.Authorization = `Bearer ${adminKey()}`;
       const res = await api('/api/listings', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -785,6 +789,33 @@ async function adminApi(path, options = {}) {
     ...options,
     headers: { Authorization: `Bearer ${adminKey()}`, ...(options.headers || {}) },
   });
+}
+
+/* Штамп происхождения: заявку принёс админ или посторонний человек.
+   Синим — админские (свой Telegram боту, форма с ключом админки),
+   серым — все остальные источники. */
+function originStamp(l) {
+  if (l.byAdmin) return el('span', { class: 'stamp stamp-admin', text: 'от админа' });
+  const label = l.source === 'site' ? 'с сайта' : l.source === 'parser' ? 'из чата' : 'из бота';
+  return el('span', { class: 'stamp stamp-origin', text: label });
+}
+
+/* «Заменить старую»: человек (владелец) подал заявку сам, а похожая уже
+   висит — старую удаляем, эту публикуем. Одна кнопка вместо двух. */
+async function adminReplace(id, deleteId) {
+  try {
+    const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/replace`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deleteId }),
+    });
+    if (!res.ok) throw new Error();
+    toast('Старая удалена, новая на доске.');
+    dropAdminCard(id);
+    if (deleteId) dropAdminCard(deleteId);
+  } catch {
+    toast('Не получилось заменить. Попробуйте ещё раз.');
+  }
 }
 
 /* Предупреждение о дубле: одно и то же объявление пересылают каждый день,
@@ -852,6 +883,9 @@ function adminCard(l, mode = 'pending') {
   });
   const actions = mode === 'pending'
     ? [
+        l.duplicate && l.duplicate.id
+          ? el('button', { class: 'btn btn-ink btn-sm', text: 'заменить старую', onclick: () => adminReplace(l.id, l.duplicate.id) })
+          : null,
         el('button', { class: 'btn btn-ink btn-sm', text: 'одобрить', onclick: () => adminSetStatus(l.id, 'published') }),
         el('button', { class: 'btn btn-line btn-sm', text: 'отклонить', onclick: () => adminSetStatus(l.id, 'rejected') }),
         editBtn,
@@ -872,6 +906,7 @@ function adminCard(l, mode = 'pending') {
       el('span', { class: 'r-arrow', text: '→' }),
       el('span', { class: 'r-to', text: l.toCity }),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      originStamp(l),
       l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     ].filter(Boolean)),
     el('div', { class: 'meta-line' }, [

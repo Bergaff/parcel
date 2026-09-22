@@ -3,7 +3,7 @@ import type { MatchPair, ListingSnapshot } from './match';
 import { listingSnapshot, parseSnapshot } from './match';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
-import { normalizeContacts } from './util';
+import { admins, normalizeContacts } from './util';
 import { nextRecurringDate } from './parser';
 
 function mapRow(row: Record<string, unknown>): Listing {
@@ -24,6 +24,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     sourceChat: row.source_chat ? String(row.source_chat) : null,
     sourceChatId: row.source_chat_id ? String(row.source_chat_id) : null,
     sourceMessageId: row.source_message_id ? Number(row.source_message_id) : null,
+    byAdmin: Number(row.by_admin ?? 0) === 1,
     createdAt: String(row.created_at),
     publishedAt: row.published_at ? String(row.published_at) : null,
     views: Number(row.views ?? 0),
@@ -35,6 +36,7 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   // могут применить позже деплоя, а без них INSERT упадёт.
   await ensureSearchColumns(env);
   await ensureRecurringColumn(env);
+  await ensureByAdminColumn(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
@@ -46,15 +48,15 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       created_at, published_at, from_city_lc, to_city_lc, description_lc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       by_admin, created_at, published_at, from_city_lc, to_city_lc, description_lc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.recurring ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null, now, publishedAt,
+      input.sourceMessageId ?? null, input.byAdmin ? 1 : 0, now, publishedAt,
       // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
       input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
@@ -464,11 +466,13 @@ const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
 
 let searchColumnsReady: Promise<void> | null = null;
 let recurringColumnReady: Promise<void> | null = null;
+let byAdminColumnReady: Promise<void> | null = null;
 
 /** Сбросить отметку «колонки готовы» (тесты и смена базы). */
 export function resetSearchColumnsCache(): void {
   searchColumnsReady = null;
   recurringColumnReady = null;
+  byAdminColumnReady = null;
   statsSummaryReady = null;
 }
 
@@ -573,6 +577,41 @@ export function ensureRecurringColumn(env: Env): Promise<void> {
     recurringColumnReady.catch(() => { recurringColumnReady = null; });
   }
   return recurringColumnReady;
+}
+
+/**
+ * Колонка by_admin («заявку подал администратор») — тот же сценарий, что у
+ * recurring: ALTER делает сам воркер, миграция не нужна. Отделяет заявки,
+ * которые принёс сам админ (свой Telegram боту, форма с ключом админки),
+ * от заявок посторонних людей с сайта: дедупликация для них работает
+ * по-разному, и в очереди модерации происхождение видно штампом.
+ */
+export function ensureByAdminColumn(env: Env): Promise<void> {
+  if (!byAdminColumnReady) {
+    byAdminColumnReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('by_admin')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN by_admin INTEGER DEFAULT 0`).run();
+      }
+    })();
+    byAdminColumnReady.catch(() => { byAdminColumnReady = null; });
+  }
+  return byAdminColumnReady;
+}
+
+/**
+ * Заявка от администратора? Колонке по умолчанию доверяем, а старые строки
+ * (заявки админа из Telegram до появления колонки) узнаём по sourceChatId —
+ * личные сообщения боту от админских ID.
+ */
+export function isAdminOrigin(env: Env, l: Listing): boolean {
+  if (l.byAdmin) return true;
+  return l.source === 'telegram'
+    && !!l.sourceChatId
+    && admins(env).includes(l.sourceChatId);
 }
 
 interface WhereClause { sql: string; params: (string | number)[] }

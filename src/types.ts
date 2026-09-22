@@ -43,6 +43,10 @@ export interface ListingInput {
   sourceChat?: string | null;
   sourceChatId?: string | null;
   sourceMessageId?: number | null;
+  /** Заявку подал администратор (свой Telegram ID боту или форма с ключом
+   *  админки) — а не посторонний человек с сайта. Определяет поведение
+   *  дедупликации и метку в очереди модерации. */
+  byAdmin?: boolean;
 }
 
 export interface Listing extends ListingInput {

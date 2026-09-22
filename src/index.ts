@@ -1,11 +1,11 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsDigest, notifyAdminsReport } from './telegram';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsReport } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
@@ -190,9 +190,14 @@ app.post('/api/listings', async (c) => {
   if (error || !input) return c.json({ error }, 400);
 
   input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
-  // Дубль не плодим: то же объявление тем же маршрутом и датой от того же человека
-  // уже есть — возвращаем существующую заявку (и освежаем её, если она на доске).
-  const res = await createListingSafe(c.env, input);
+  // Кто подаёт: админ (форма с ключом админки в этом же браузере) или
+  // посторонний человек. Для человека дубль не сливаем: возможно, это владелец
+  // рейса подал сам, а копию раньше принёс админ из чата — заявку человека
+  // создаём отдельной, конфликт показываем модератору и в Telegram.
+  const auth = c.req.header('Authorization') ?? '';
+  const isAdminSubmit = !!c.env.ADMIN_API_TOKEN && auth === `Bearer ${c.env.ADMIN_API_TOKEN}`;
+  input.byAdmin = isAdminSubmit;
+  const res = await createListingSafe(c.env, input, { force: !isAdminSubmit });
   const listing = res.listing;
 
   if (!res.created) {
@@ -208,20 +213,29 @@ app.post('/api/listings', async (c) => {
   // Если объявление ушло на модерацию, тут же шлём его администратору в Telegram
   // с кнопками «Одобрить / Отклонить» (см. notifyAdmins в src/telegram.ts).
   if (listing.status === 'pending') {
-    const similar = res.kind === 'similar' && res.duplicateOf
-      ? { id: res.duplicateOf.id, why: res.why }
+    const similar = res.duplicateOf
+      ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !isAdminSubmit }
       : null;
     c.executionCtx.waitUntil(
       notifyAdmins(c.env, listing, similar).catch((e) => console.error('notifyAdmins failed', e))
+    );
+  } else if (res.duplicateOf && !isAdminSubmit) {
+    // автопубликация: карточки модерации нет, но о конфликте всё равно скажем
+    c.executionCtx.waitUntil(
+      notifyAdminsConflict(c.env, listing, res.duplicateOf, res.why)
+        .catch((e) => console.error('notifyAdminsConflict failed', e))
     );
   }
 
   return c.json(
     {
       item: listing,
-      message: input.status === 'published'
+      message: (input.status === 'published'
         ? 'Объявление опубликовано.'
-        : 'Объявление отправлено на модерацию и появится после проверки.',
+        : 'Объявление отправлено на модерацию и появится после проверки.')
+        + (res.duplicateOf && !isAdminSubmit
+          ? ' Похожая заявка уже была — модератор посмотрит и решит, какую оставить.'
+          : ''),
     },
     input.status === 'published' ? 201 : 202
   );
@@ -516,12 +530,14 @@ app.get('/api/admin/listings', async (c) => {
   const items = isBoard
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
+  // происхождение заявки — штамп «от админа» / «с сайта» / «из чата» в карточке
+  const withOrigin = items.map((l) => ({ ...l, byAdmin: isAdminOrigin(c.env, l) }));
 
   // В очереди модерации помечаем повторы: одно и то же объявление пересылают
   // каждый день, и админ не должен держать в голове, что уже одобрил.
-  if (isBoard) return c.json({ items });
+  if (isBoard) return c.json({ items: withOrigin });
   const annotated: Array<Record<string, unknown>> = [];
-  for (const l of items.slice(0, 40)) {
+  for (const l of withOrigin.slice(0, 40)) {
     let badge: DuplicateBadge | null = null;
     try {
       const dup = await findDuplicate(c.env, l);
@@ -537,7 +553,23 @@ app.get('/api/admin/listings', async (c) => {
     }
     annotated.push({ ...l, duplicate: badge });
   }
-  return c.json({ items: [...annotated, ...items.slice(40)], pruned });
+  return c.json({ items: [...annotated, ...withOrigin.slice(40)], pruned });
+});
+
+/* «Заменить старую»: заявку подал сам человек (владелец), а похожая уже висит
+   (её раньше принёс админ из чата) — удаляем старую, новую публикуем. */
+app.post('/api/admin/listings/:id/replace', async (c) => {
+  const id = c.req.param('id');
+  const b = (await c.req.json().catch(() => ({}))) as { deleteId?: string };
+  const deleteId = typeof b.deleteId === 'string' ? b.deleteId : null;
+  if (!deleteId) return c.json({ error: 'deleteId обязателен — какую заявку удалить' }, 400);
+  if (deleteId === id) return c.json({ error: 'нельзя заменить заявку самой собой' }, 400);
+  const target = await getListingById(c.env, id);
+  if (!target) return c.json({ error: 'not_found' }, 404);
+  const deleted = await deleteListing(c.env, deleteId);
+  await updateListingStatus(c.env, id, 'published');
+  const item = await getListingById(c.env, id);
+  return c.json({ ok: true, deleted, item });
 });
 
 /* Редактирование заявки — админ-панель сайта. */

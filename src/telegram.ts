@@ -61,6 +61,11 @@ async function api(env: Env, method: string, body: Record<string, unknown>): Pro
   return json;
 }
 
+/** Сообщение в личке бота от администратора (ADMIN_IDS)? */
+function isAdminChat(env: Env, msg: TgMessage): boolean {
+  return admins(env).includes(String(msg.from?.id));
+}
+
 async function sendText(env: Env, chatId: number, text: string, extra: Record<string, unknown> = {}): Promise<void> {
   await api(env, 'sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
 }
@@ -797,17 +802,25 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         sourceChat: origin.title ?? 'Пересланное сообщение',
         sourceChatId: seenChat,
         sourceMessageId: origin.messageId ?? null,
+        byAdmin: isAdmin,
       };
-      // Одно и то же объявление пересылают каждый день — вторую заявку не плодим:
-      // освежаем уже имеющуюся и объясняем, почему не создали новую.
-      const res = await createListingSafe(env, input);
+      // Пересылку админа дедуплицируем как раньше (одно и то же объявление
+      // пересылают каждый день — вторую заявку не плодим). Пересылку от
+      // постороннего человека — нет: возможно, владелец подал сам, а копию
+      // мы уже принесли из чата; тогда заявку создаём и показываем конфликт.
+      const res = await createListingSafe(env, input, { force: !isAdmin });
       if (!res.created) {
         repeats.push({ listing: res.listing, why: res.why });
         await notifyAdminsRepeat(env, res.listing, res.why);
         continue;
       }
       created.push(res.listing);
-      await notifyAdmins(env, res.listing, similarNote(res));
+      await notifyAdmins(env, res.listing, res.duplicateOf
+        ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !isAdmin }
+        : similarNote(res));
+      if (res.duplicateOf && res.listing.status !== 'pending') {
+        await notifyAdminsConflict(env, res.listing, res.duplicateOf, res.why);
+      }
     }
     if (created.length === 0) {
       await sendText(env, chatId, repeatReply(repeats));
@@ -961,15 +974,23 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               sourceChat: 'Личное сообщение боту',
               sourceChatId: String(chatId),
               sourceMessageId: msg.message_id,
+              byAdmin: isAdminChat(env, msg),
             };
-            const res = await createListingSafe(env, input);
+            // от постороннего человека дубль не сливаем — см. блок пересылок
+            const fromAdmin = isAdminChat(env, msg);
+            const res = await createListingSafe(env, input, { force: !fromAdmin });
             if (!res.created) {
               repeats.push({ listing: res.listing, why: res.why });
               await notifyAdminsRepeat(env, res.listing, res.why);
               continue;
             }
             created.push(res.listing);
-            await notifyAdmins(env, res.listing, similarNote(res));
+            await notifyAdmins(env, res.listing, res.duplicateOf
+              ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !fromAdmin }
+              : similarNote(res));
+            if (res.duplicateOf && res.listing.status !== 'pending') {
+              await notifyAdminsConflict(env, res.listing, res.duplicateOf, res.why);
+            }
           }
           if (created.length > 0) {
             const statusNote = env.AUTO_APPROVE === '1'
@@ -1096,6 +1117,7 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     source: 'telegram',
     sourceChat: `Личное сообщение боту`,
     sourceChatId: String(chatId),
+    byAdmin: admins(env).includes(String(chatId)),
   };
   // /post человек заполняет сам, шаг за шагом, — заявку создаём в любом случае,
   // но если такая уже есть, предупреждаем и его, и модератора.
@@ -1110,7 +1132,9 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
     : '';
   await sendText(env, chatId, formatListing(listing) + statusNote + dupNote);
-  await notifyAdmins(env, listing, res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null);
+  await notifyAdmins(env, listing, res.duplicateOf
+    ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !input.byAdmin }
+    : null);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1248,12 +1272,14 @@ export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string
 
 /**
  * Карточка на модерацию. `dup` — если такая заявка уже есть: модератор видит
- * предупреждение до того, как нажмёт «Одобрить».
+ * предупреждение до того, как нажмёт «Одобрить». `selfSubmitted` — заявку
+ * подал сам человек (сайт или личка бота, не админ): это конфликт «владелец
+ * подал сам, а копию уже принесли из чата», в очереди есть «заменить старую».
  */
 export async function notifyAdmins(
   env: Env,
   listing: Listing,
-  dup?: { id: string; why: string } | null
+  dup?: { id: string; why: string; selfSubmitted?: boolean } | null
 ): Promise<void> {
   if (!listing || listing.status !== 'pending') return;
   // У пересылок от людей со скрытым профилем контакта не бывает: модератор
@@ -1264,13 +1290,39 @@ export async function notifyAdmins(
     ? `\n<i>⚠ Контакта нет (автор пересылки мог скрыть профиль)${editLink}</i>`
     : '';
   const dupNote = dup && dup.id
-    ? `\n<i>⚠ Похоже на дубль: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}</i>`
+    ? (dup.selfSubmitted
+        ? `\n<i>🗂 Человек подал сам (${listing.source === 'site' ? 'с сайта' : 'в личке бота'}), а похожая заявка уже есть: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}.</i>\n<i>Если это владелец — в очереди модерации нажмите «заменить старую»: старая удалится, эта опубликуется.</i>`
+        : `\n<i>⚠ Похоже на дубль: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}</i>`)
     : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
       formatListing(listing, noContact + dupNote),
       { reply_markup: approveKeyboard(listing.id) }
+    ).catch(() => undefined);
+  }
+}
+
+/**
+ * Конфликт при автопубликации: человек подал сам, похожая уже была, и новая
+ * сразу оказалась на доске (AUTO_APPROVE=1). Карточки модерации нет —
+ * пишем короткую сводку, чтобы админ удалил старую руками.
+ */
+export async function notifyAdminsConflict(
+  env: Env,
+  listing: Listing,
+  old: Listing,
+  why: string
+): Promise<void> {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
+  const oldLabel = old.status === 'published' ? 'на доске' : old.status === 'pending' ? 'в очереди' : 'в архиве';
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `🗂 <b>Человек подал сам</b> (${listing.source === 'site' ? 'с сайта' : 'в личке бота'}), а похожая заявка уже есть.\n` +
+      `${listingLine(listing)}${link}\n` +
+      `Старая — №${old.id.slice(0, 8)} (${oldLabel}): ${escapeHtml(why)}.\n` +
+      `Новая уже на доске (автопубликация). Если это владелец — старую стоит удалить: админка, вкладка «на доске».`
     ).catch(() => undefined);
   }
 }

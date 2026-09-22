@@ -51,6 +51,7 @@ const server = {
   cleanedIds: [] as string[],
   reports: [] as string[],
   pendingNoContact: false, // вторая заявка в очереди — без контакта
+  replacedWith: null as { id: string; deleteId: string } | null,
 };
 
 function listing(over: Loose = {}): Loose {
@@ -128,6 +129,7 @@ function makeFetch(calls: string[]) {
               id: DUP,
               status: 'pending',
               publishedAt: null,
+              byAdmin: true, // пересылка от админского Telegram — как пометит воркер
               description: 'Та же заявка, пересланная на следующий день',
               duplicate: { id: ID, kind: 'duplicate', status: 'published', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', why: 'тот же маршрут и даты, контакт совпадает' },
             }),
@@ -139,6 +141,8 @@ function makeFetch(calls: string[]) {
               publishedAt: null,
               telegram: null,
               phone: null,
+              source: 'site',
+              sourceChat: null,
               description: 'Возьму посылку по пути, пишите в чат',
             }));
           }
@@ -149,6 +153,11 @@ function makeFetch(calls: string[]) {
       }
       if (/^\/api\/admin\/listings\/[^/]+\/status$/.test(path) && method === 'POST') {
         return { body: { ok: true, duplicate: server.approvedDuplicate } };
+      }
+      if (/^\/api\/admin\/listings\/([^/]+)\/replace$/.test(path) && method === 'POST') {
+        const { deleteId } = JSON.parse(init.body || '{}') as { deleteId?: string };
+        server.replacedWith = { id: decodeURIComponent(path.split('/').slice(-2)[0] ?? ''), deleteId: deleteId ?? '' };
+        return { body: { ok: true, deleted: true, item: listing({ status: 'published' }) } };
       }
       if (path === '/api/admin/duplicates') {
         return {
@@ -517,6 +526,34 @@ describe('админка', () => {
     expect(win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`)).toBeTruthy();
     expect(text('admin-count')).toContain('Необработано заявок: 1');
     server.pendingNoContact = false;
+  });
+
+  it('штамп происхождения: админ — синим, человек с сайта — серым', async () => {
+    server.pendingNoContact = true;
+    byId('admin-refresh').click();
+    await settle(80);
+    // пересылка от админа (telegram) — штамп «от админа»
+    const adminStamp = win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"] .stamp-admin`);
+    expect(adminStamp, 'штамп «от админа»').not.toBeNull();
+    expect(adminStamp!.textContent).toContain('от админа');
+    // заявка человека с сайта — штамп «с сайта», не админский
+    const personCard = win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`) as HTMLElement;
+    expect(personCard.querySelector('.stamp-origin')!.textContent).toContain('с сайта');
+    expect(personCard.querySelector('.stamp-admin')).toBeNull();
+    server.pendingNoContact = false;
+  });
+
+  it('у заявки с дублем есть «заменить старую»: старая удаляется, новая публикуется', async () => {
+    const listingsBefore = calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length;
+    const replace = Array.from(win.document.querySelectorAll('#admin-list button')).find((b) => b.textContent === 'заменить старую') as HTMLElement;
+    expect(replace, 'кнопка «заменить старую»').toBeTruthy();
+    replace.click();
+    await settle(80);
+    expect(server.replacedWith).toEqual({ id: DUP, deleteId: ID });
+    expect(text('toast')).toContain('Старая удалена, новая на доске.');
+    // без перезагрузки очереди
+    expect(calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length).toBe(listingsBefore);
+    expect(win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"]`)).toBeNull();
   });
 
   it('заявка без контакта подсвечена — видно сразу', async () => {

@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  ensureSearchColumns, getCounts, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
+  ensureSearchColumns, getCounts, isAdminOrigin, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
 
@@ -196,6 +196,24 @@ describe('свежая база: чтение доски гарантирует 
     const { env, calls } = fakeDb();
     await searchByCity(env, 'Минск');
     expect(calls.some((c) => c.sql.includes('ADD COLUMN recurring'))).toBe(true);
+  });
+});
+
+describe('происхождение заявки: админ или посторонний человек', () => {
+  const mk = (over: Record<string, unknown>) =>
+    ({ source: 'site', sourceChatId: null, byAdmin: false, ...over }) as Parameters<typeof isAdminOrigin>[1];
+  const env = { ADMIN_IDS: '42, 43' } as unknown as Env;
+
+  it('колонка by_admin говорит «админ»', () => {
+    expect(isAdminOrigin(env, mk({ byAdmin: true }))).toBe(true);
+    expect(isAdminOrigin(env, mk({}))).toBe(false);
+  });
+
+  it('старые строки: личное сообщение боту от админского ID — тоже админ', () => {
+    expect(isAdminOrigin(env, mk({ source: 'telegram', sourceChatId: '42' }))).toBe(true);
+    expect(isAdminOrigin(env, mk({ source: 'telegram', sourceChatId: '999' }))).toBe(false);
+    // заявка с сайта админским ID не помечается — ключ админки шёл бы в by_admin
+    expect(isAdminOrigin(env, mk({ source: 'site', sourceChatId: '42' }))).toBe(false);
   });
 });
 
