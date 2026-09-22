@@ -20,7 +20,7 @@
 import type { Env, Listing } from './types';
 import { escapeHtml } from './util';
 import {
-  getChatLinks, listCityStats, listListings, listRoutePairs, listSitemapItems,
+  getChatLinks, getCounts, listCityStats, listListings, listRoutePairs, listSitemapItems,
   type CityStat, type RoutePair,
 } from './store';
 import { fmtDayShort, plural } from './format';
@@ -237,6 +237,20 @@ function listingCard(l: Listing, chatLinks: Record<string, string>): string {
 /* Оболочка SEO-страницы                                               */
 /* ------------------------------------------------------------------ */
 
+/** Данные для шапки SEO-страниц: сколько объявлений на доске и есть ли бот.
+ *  На главной это заполняет скрипт (там есть app.js), а каталоги рендерятся
+ *  воркером и живут в кэше CDN — считаем на сервере. */
+export async function mastheadData(env: Env): Promise<{ boardTotal: number; botUsername: string | null }> {
+  let boardTotal = 0;
+  try {
+    const counts = await getCounts(env, {});
+    boardTotal = counts.offer + counts.request;
+  } catch {
+    // база недоступна — шапка без цифры лучше, чем страница без шапки
+  }
+  return { boardTotal, botUsername: env.BOT_USERNAME || null };
+}
+
 /** Общая оболочка SEO-страниц (маршруты, города, каталоги, итоги). */
 export function seoPageShell(opts: {
   title: string;
@@ -248,6 +262,9 @@ export function seoPageShell(opts: {
   image?: string;
   imageAlt?: string;
   robots?: string;
+  /** «на доске N объявлений» и вкладка «Бот» в шапке — как на главной */
+  boardTotal?: number;
+  botUsername?: string | null;
 }): string {
   return `<!DOCTYPE html>
 <html lang="ru">
@@ -274,15 +291,19 @@ export function seoPageShell(opts: {
   <header class="masthead">
     <div class="wrap masthead-grid">
       <a class="wordmark" href="/">попутка<span class="wordmark-dot">.</span></a>
-      <nav class="topnav wrap" style="padding:0">
-        <a href="/">Доска</a>
-        <a href="/how">Как это работает</a>
-        <a href="/routes">Маршруты</a>
-        <a href="/gorod">Города</a>
-        <a href="/itogi">Итоги</a>
-        <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
-      </nav>
+      ${opts.boardTotal != null
+        ? `<p class="masthead-meta"><span>на доске <b>${opts.boardTotal} ${plural(opts.boardTotal, 'объявление', 'объявления', 'объявлений')}</b></span></p>`
+        : ''}
     </div>
+    <nav class="topnav wrap">
+      <a href="/">Доска</a>
+      <a href="/how">Как это работает</a>
+      <a href="/routes">Маршруты</a>
+      <a href="/gorod">Города</a>
+      <a href="/itogi">Итоги</a>
+      ${opts.botUsername ? '<a href="/bot">Бот</a>' : ''}
+      <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
+    </nav>
   </header>
   <main class="wrap narrow section-page seo-page">
 ${opts.body}
@@ -594,6 +615,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     <p class="colophon">Не нашли рейс на нужную дату? Разместите просьбу — это бесплатно и занимает минуту: <a href="/new">форма на сайте</a> или бот в Telegram.</p>`;
 
   return seoPageShell({
+    ...(await mastheadData(env)),
     title,
     description,
     canonical: `${origin}/r/${r.slug}`,
@@ -701,6 +723,7 @@ ${otherCities.length > 0 ? `\n    <h2 class="rule-head">Другие город�
     <p class="colophon">Не нашли нужное направление? Откройте <a href="/">доску</a> и впишите города в поиск — заявки фильтруются по любому маршруту.</p>`;
 
   return seoPageShell({
+    ...(await mastheadData(env)),
     title,
     description,
     canonical: `${origin}/gorod/${slug}`,
@@ -753,6 +776,7 @@ export async function buildRoutesIndexPage(env: Env, origin: string): Promise<st
   const totalActive = idx.pairs.reduce((n, p) => n + p.active, 0);
 
   return seoPageShell({
+    ...(await mastheadData(env)),
     title: `Маршруты передачи посылок — все направления | ${SITE_NAME}`,
     description: 'Все направления передачи посылок попутно: Польша, Беларусь, Украина, Литва, Германия, Чехия и другие. На странице маршрута — живые заявки водителей, цены, вес и контакты.',
     canonical: `${origin}/routes`,
@@ -794,6 +818,7 @@ export async function buildCitiesIndexPage(env: Env, origin: string): Promise<st
     .join('\n');
 
   return seoPageShell({
+    ...(await mastheadData(env)),
     title: `Города — откуда и куда передают посылки | ${SITE_NAME}`,
     description: 'Города на доске попутных передач: направления, живые заявки водителей и просьбы передать посылку. Польша, Беларусь, Украина, Литва, Германия и другие страны.',
     canonical: `${origin}/gorod`,

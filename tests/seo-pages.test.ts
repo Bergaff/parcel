@@ -29,6 +29,7 @@ vi.mock('../src/store', () => ({
   listCityStats: async () => db.cities,
   listSitemapItems: async () => db.items,
   getChatLinks: async () => ({}) as Record<string, string>,
+  getCounts: async () => ({ offer: 3, request: 2 }),
 }));
 
 import {
@@ -253,6 +254,19 @@ describe('каталоги', () => {
     expect(html).toContain('Польша');
     expect(html).toContain('href="/gorod/varshava"');
     expect(html).toContain('href="/gorod/minsk"');
+  });
+
+  it('в шапке каталогов — сколько объявлений на доске и вкладка «Бот»', async () => {
+    const withBot = { BOT_USERNAME: 'parcel_transfer_bot' } as Env;
+    const routes = await buildRoutesIndexPage(withBot, ORIGIN);
+    expect(routes).toContain('на доске <b>5 объявлений</b>');
+    expect(routes).toContain('<a href="/bot">Бот</a>');
+    // навигация — отдельной строкой под шапкой, как на главной (мобильный перенос)
+    expect(routes).toContain('<nav class="topnav wrap">');
+    // без настроенного бота вкладки нет — как на главной до подтверждения конфига
+    const cities = await buildCitiesIndexPage(env, ORIGIN);
+    expect(cities).toContain('на доске <b>5 объявлений</b>');
+    expect(cities).not.toContain('href="/bot"');
   });
 
   it('подвал берёт маршруты без дублей направления', () => {

@@ -14,7 +14,7 @@ import { escapeHtml } from './util';
 import { plural, fmtDayShort, fmtPeriod, fmtPeriodGen, currentPeriod } from './format';
 import { breadcrumbsLd, itemListLd, listingLd, webSiteLd, faqPageLd, SITE_NAME } from './seo';
 import { isArchived, renderDetailHtml, renderRowsHtml, renderShell, readShellTemplate, type View } from './ssr';
-import { seoPageShell, routePathFor } from './seo-routes';
+import { seoPageShell, routePathFor, mastheadData } from './seo-routes';
 import { listMonthStats, refreshStats, parseMonthPayload, fallbackSummary, type MonthStat } from './stats';
 import { getMonthSnapshot } from './store';
 import { fmtAmount, CURRENCY_LABEL } from './price';
@@ -441,6 +441,7 @@ ${months.map(monthRowHtml).join('\n')}
   }
 
   const html = seoPageShell({
+    ...(await mastheadData(env)),
     title: `Итоги месяца на доске попутных передач — сколько заявок и по чём | ${SITE_NAME}`,
     description: 'Статистика доски попутных передач по месяцам: сколько объявлений опубликовано, какие направления самые живые и какая средняя цена передачи в евро, злотых и рублях.',
     canonical: `${origin}/itogi`,
@@ -547,6 +548,7 @@ ${summaryHtml}
   };
 
   const html = seoPageShell({
+    ...(await mastheadData(env)),
     title: `Итоги ${fmtPeriodGen(month)}: ${stat.total} ${plural(stat.total, 'объявление', 'объявления', 'объявлений')}, направления и цены | ${SITE_NAME}`,
     description: desc || `Итоги ${fmtPeriodGen(month)} на доске попутных передач: ${stat.total} объявлений, ${stat.directions} направлений и средние цены.`,
     canonical: `${origin}/itogi/${month}`,

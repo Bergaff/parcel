@@ -92,6 +92,8 @@ describe('/itogi', () => {
     const page = await buildStatsPage(env, ORIGIN);
     expect(page.html).toContain('<title>Итоги месяца на доске попутных передач');
     expect(page.html).toContain(`<link rel="canonical" href="${ORIGIN}/itogi" />`);
+    // в шапке, как на главной, — сколько объявлений на доске
+    expect(page.html).toContain('на доске <b>0 объявлений</b>');
     expect(page.html).toContain('<b>11</b><span>объявлений за месяц</span>');
     expect(page.html).toContain('<b>9</b><span>«водитель везёт»</span>');
     expect(page.html).toContain('сентябрь 2026');
