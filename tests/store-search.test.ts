@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  ensureSearchColumns, getCounts, likeContains, listListings, resetSearchColumnsCache,
+  ensureSearchColumns, getCounts, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
 
@@ -196,5 +196,19 @@ describe('свежая база: чтение доски гарантирует 
     const { env, calls } = fakeDb();
     await searchByCity(env, 'Минск');
     expect(calls.some((c) => c.sql.includes('ADD COLUMN recurring'))).toBe(true);
+  });
+});
+
+describe('очередь модерации: просроченные заявки', () => {
+  it('pending с прошедшей датой выезда удаляется, регулярные — нет', async () => {
+    const { env, calls } = fakeDb();
+    const n = await pruneStalePending(env);
+    expect(n).toBe(1); // fakeDb: run() всегда рапортует об одном изменении
+    const del = calls.find((c) => /^DELETE FROM listings/.test(c.sql))!;
+    expect(del.sql).toContain("status = 'pending'");
+    expect(del.sql).toContain('recurring IS NULL');
+    expect(del.sql).toContain("departure_date < date('now', '+3 hours')");
+    // DELETE ссылается на recurring — колонку запрос гарантирует сам (PRAGMA раньше)
+    expect(calls.findIndex((c) => /PRAGMA/.test(c.sql))).toBeLessThan(calls.indexOf(del));
   });
 });

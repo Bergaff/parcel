@@ -499,6 +499,15 @@ button { font-family: inherit; }
 .dup-why { color: var(--muted); }
 .admin-card .desc { margin: 8px 0; }
 .admin-contact { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
+/* Заявка без контакта: видно сразу — публиковать её бессмысленно,
+   у людей просто не будет способа связаться */
+.admin-contact-none {
+  color: var(--accent-deep);
+  font-weight: 700;
+  border-left: 3px solid var(--accent);
+  background: rgba(164, 58, 16, .07);
+  padding: 6px 10px;
+}
 .admin-card-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .admin-edit { border-top: 1.5px dashed var(--line); margin-top: 12px; padding-top: 14px; display: grid; gap: 10px; }
 .admin-edit .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

@@ -775,6 +775,8 @@ const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
 let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'stats'
 let statsMonth = null; // выбранный месяц на вкладке «итоги»
 let adminEditId = null; // id заявки, открытой на редактирование
+let adminItems = [];   // список открытой вкладки — правим на месте, без перезагрузки
+let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -863,7 +865,7 @@ function adminCard(l, mode = 'pending') {
           : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
         el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
       ];
-  return el('article', { class: 'admin-card' }, [
+  return el('article', { class: 'admin-card', 'data-id': l.id }, [
     duplicateNote(l),
     el('h3', { class: 'route-line' }, [
       l.fromCity,
@@ -883,7 +885,7 @@ function adminCard(l, mode = 'pending') {
           'контакт: ',
           el('a', { href: contact.href, target: '_blank', rel: 'noopener', text: contact.label }),
         ])
-      : el('p', { class: 'admin-contact', text: 'контакт не указан' }),
+      : el('p', { class: 'admin-contact admin-contact-none', text: 'контакт не указан' }),
     ...(adminEditId === l.id ? [adminEditForm(l)] : []),
     relatedBox,
     el('div', { class: 'admin-card-actions' }, actions),
@@ -954,7 +956,9 @@ function adminEditForm(l) {
       if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Ошибка');
       adminEditId = null;
       toast(data.warning === 'no_contact' ? 'Сохранено. Но контакта у заявки нет — писать человеку некуда.' : 'Сохранено.');
-      await loadAdmin();
+      // карточку перерисовываем на месте из ответа сервера — без перезагрузки очереди
+      if (data.item) rerenderAdminCard(data.item);
+      else await loadAdmin();
     } catch (ex) {
       toast(`Не сохранилось: ${ex.message}`);
     }
@@ -999,27 +1003,72 @@ async function loadAdmin() {
       return;
     }
     if (!res.ok) throw new Error('network');
-    const { items } = await res.json();
-    $('#admin-count').textContent = adminTab === 'pending'
-      ? (items.length === 0
-          ? '✅ Необработанных заявок нет.'
-          : `⏳ Необработано заявок: ${items.length}`)
-      : (items.length === 0
-          ? 'На доске пока пусто.'
-          : `На доске: ${items.length} — действующие и архив`);
-    const listEl = $('#admin-list');
-    listEl.replaceChildren();
-    if (items.length === 0) {
-      listEl.append(el('p', {
-        class: 'empty-note',
-        text: adminTab === 'pending' ? 'Очередь пуста. Новые заявки появятся здесь.' : 'На доске ничего нет.',
-      }));
-    } else {
-      for (const l of items) listEl.append(adminCard(l, adminTab));
-    }
+    const data = await res.json();
+    adminItems = data.items ?? [];
+    adminPruned = data.pruned ?? 0;
+    renderAdminItems();
   } catch {
     $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
   }
+}
+
+/* ---------- очередь без перезагрузки ---------- */
+/* «Одобрить»/«отклонить» меняют список на месте: карточка исчезает, соседние
+   остаются как были (открытые «связи», форма редактирования, прокрутка).
+   Раньше после каждого решения очередь перезагружалась целиком — «загружаю…»
+   и список с самого верха. */
+
+function updateAdminCount() {
+  const n = adminItems.length;
+  const prunedNote = adminTab === 'pending' && adminPruned > 0
+    ? ` · просроченных удалено: ${adminPruned}`
+    : '';
+  $('#admin-count').textContent = adminTab === 'pending'
+    ? (n === 0
+        ? '✅ Необработанных заявок нет.'
+        : `⏳ Необработано заявок: ${n}${prunedNote}`)
+    : (n === 0
+        ? 'На доске пока пусто.'
+        : `На доске: ${n} — действующие и архив`);
+}
+
+/** Нарисовать список заявок из adminItems — без сети. */
+function renderAdminItems() {
+  const listEl = $('#admin-list');
+  listEl.replaceChildren();
+  if (adminItems.length === 0) {
+    listEl.append(el('p', {
+      class: 'empty-note',
+      text: adminTab === 'pending' ? 'Очередь пуста. Новые заявки появятся здесь.' : 'На доске ничего нет.',
+    }));
+  } else {
+    for (const l of adminItems) listEl.append(adminCard(l, adminTab));
+  }
+  updateAdminCount();
+}
+
+function adminCardNode(id) {
+  return document.querySelector(`#admin-list .admin-card[data-id="${CSS.escape(id)}"]`);
+}
+
+/** Убрать заявку из списка на месте — карточка исчезает, остальное не трогаем. */
+function dropAdminCard(id) {
+  adminItems = adminItems.filter((x) => x.id !== id);
+  const node = adminCardNode(id);
+  if (node) node.remove();
+  if (adminItems.length === 0) renderAdminItems(); // покажет «очередь пуста»
+  else updateAdminCount();
+}
+
+/** Перерисовать одну карточку (сменился статус или содержимое после правки). */
+function rerenderAdminCard(item) {
+  const idx = adminItems.findIndex((x) => x.id === item.id);
+  if (idx === -1) { renderAdminItems(); return; }
+  adminItems[idx] = item;
+  const node = adminCardNode(item.id);
+  if (node) node.replaceWith(adminCard(item, adminTab));
+  else renderAdminItems();
+  updateAdminCount();
 }
 
 async function renderAdminChats() {
@@ -1520,7 +1569,7 @@ async function adminDelete(id) {
     const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/delete`, { method: 'POST' });
     if (!res.ok) throw new Error();
     toast('Удалено.');
-    await loadAdmin();
+    dropAdminCard(id);
   } catch {
     toast('Не получилось удалить. Попробуйте ещё раз.');
   }
@@ -1731,7 +1780,19 @@ async function adminSetStatus(id, status) {
     toast(data.duplicate && data.duplicate.id
       ? `${labels[status] || 'Готово.'} Но на доске уже есть такая заявка № ${data.duplicate.id.slice(0, 8)} — проверьте, не дубль ли.`
       : (labels[status] || 'Готово.'));
-    await loadAdmin();
+    // Список не перезагружаем: карточка уходит на месте, прокрутка и открытые
+    // «связи» соседних заявок остаются как были.
+    if (adminTab === 'pending') {
+      dropAdminCard(id);
+    } else {
+      const item = adminItems.find((x) => x.id === id);
+      if (item) {
+        item.status = status;
+        rerenderAdminCard(item);
+      } else {
+        await loadAdmin();
+      }
+    }
   } catch {
     toast('Не получилось. Попробуйте ещё раз.');
   }

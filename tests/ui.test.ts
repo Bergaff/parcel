@@ -39,6 +39,7 @@ const ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'; // объявление на 
 const REQ = 'cccc1111-2222-3333-4444-555555555555'; // встречная заявка
 const COLD = 'dddd9999-8888-7777-6666-555555555555'; // есть в API, но не в кэше доски
 const DUP = 'eeee0000-1111-2222-3333-444444444444'; // уже опубликованный «оригинал»
+const NOCONTACT = 'abab1212-3434-5656-7878-909090909090'; // заявка без контакта
 
 const BOARD_DESC = 'Еду 20 мая, возьму одну сумку до 10 кг';
 const FRESH_MARK = '(данные с сервера свежее)';
@@ -49,6 +50,7 @@ const server = {
   approvedDuplicate: null as Loose | null,
   cleanedIds: [] as string[],
   reports: [] as string[],
+  pendingNoContact: false, // вторая заявка в очереди — без контакта
 };
 
 function listing(over: Loose = {}): Loose {
@@ -121,19 +123,27 @@ function makeFetch(calls: string[]) {
       if (path.startsWith('/api/admin/') && !authed) return { status: 401, body: { error: 'unauthorized' } };
       if (path === '/api/admin/listings') {
         if (q.get('tab') === 'pending') {
-          return {
-            body: {
-              items: [
-                listing({
-                  id: DUP,
-                  status: 'pending',
-                  publishedAt: null,
-                  description: 'Та же заявка, пересланная на следующий день',
-                  duplicate: { id: ID, kind: 'duplicate', status: 'published', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', why: 'тот же маршрут и даты, контакт совпадает' },
-                }),
-              ],
-            },
-          };
+          const items = [
+            listing({
+              id: DUP,
+              status: 'pending',
+              publishedAt: null,
+              description: 'Та же заявка, пересланная на следующий день',
+              duplicate: { id: ID, kind: 'duplicate', status: 'published', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', why: 'тот же маршрут и даты, контакт совпадает' },
+            }),
+          ];
+          if (server.pendingNoContact) {
+            items.push(listing({
+              id: NOCONTACT,
+              status: 'pending',
+              publishedAt: null,
+              telegram: null,
+              phone: null,
+              description: 'Возьму посылку по пути, пишите в чат',
+            }));
+          }
+          // сервер выметает просроченные заявки до показа очереди
+          return { body: { items, pruned: 1 } };
         }
         return { body: { items: [listing()] } };
       }
@@ -465,6 +475,8 @@ describe('админка', () => {
 
     expect(byId('admin-panel').hidden).toBe(false);
     expect(text('admin-count')).toContain('Необработано заявок: 1');
+    // сервер удалил просроченную заявку до показа очереди — и сказал об этом
+    expect(text('admin-count')).toContain('просроченных удалено: 1');
     const warn = win.document.querySelector('#admin-list .dup-warn') as HTMLElement | null;
     expect(warn, 'у повтора должен быть бейдж').not.toBeNull();
     expect(warn!.textContent).toContain('Это повтор');
@@ -474,6 +486,7 @@ describe('админка', () => {
 
   it('одобрение дубля предупреждает, что такая заявка уже на доске', async () => {
     server.approvedDuplicate = listing();
+    const listingsBefore = calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length;
     const approve = Array.from(win.document.querySelectorAll('#admin-list button')).find((b) => b.textContent === 'одобрить') as HTMLElement;
     expect(approve, 'кнопка «одобрить»').toBeTruthy();
     approve.click();
@@ -481,7 +494,48 @@ describe('админка', () => {
     expect(calls.filter((c) => c.includes('/status')).length).toBeGreaterThan(0);
     expect(text('toast')).toContain('Опубликовано.');
     expect(text('toast')).toContain(`уже есть такая заявка № ${ID.slice(0, 8)}`);
+    // список не перезагружается: карточка уходит на месте, без «загружаю…»
+    expect(calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length).toBe(listingsBefore);
+    expect(win.document.querySelector('#admin-list .admin-card')).toBeNull();
+    expect(text('admin-count')).toContain('Необработанных заявок нет');
     server.approvedDuplicate = null;
+  });
+
+  it('отклонение тоже убирает карточку без перезагрузки списка', async () => {
+    server.pendingNoContact = true;
+    byId('admin-refresh').click();
+    await settle(80);
+    expect(win.document.querySelectorAll('#admin-list .admin-card')).toHaveLength(2);
+    const listingsBefore = calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length;
+    const reject = Array.from(win.document.querySelectorAll('#admin-list button')).find((b) => b.textContent === 'отклонить') as HTMLElement;
+    reject.click();
+    await settle(80);
+    expect(text('toast')).toContain('Отклонено.');
+    expect(calls.filter((c) => c === 'GET /api/admin/listings?tab=pending').length).toBe(listingsBefore);
+    // отклонённая карточка ушла, вторая осталась на месте
+    expect(win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"]`)).toBeNull();
+    expect(win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`)).toBeTruthy();
+    expect(text('admin-count')).toContain('Необработано заявок: 1');
+    server.pendingNoContact = false;
+  });
+
+  it('заявка без контакта подсвечена — видно сразу', async () => {
+    server.pendingNoContact = true;
+    byId('admin-refresh').click();
+    await settle(80);
+    const cards = Array.from(win.document.querySelectorAll('#admin-list .admin-card')) as HTMLElement[];
+    expect(cards).toHaveLength(2);
+    // у карточек есть data-id — по ним убираем/перерисовываем без перезагрузки
+    expect(win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`)).toBeTruthy();
+    const none = win.document.querySelector('#admin-list .admin-contact-none') as HTMLElement | null;
+    expect(none, 'пометка «контакт не указан»').not.toBeNull();
+    expect(none!.textContent).toContain('контакт не указан');
+    // у заявки с контактом подсветки нет
+    const dupCard = win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"]`) as HTMLElement;
+    expect(dupCard.querySelector('.admin-contact-none')).toBeNull();
+    server.pendingNoContact = false;
+    byId('admin-refresh').click();
+    await settle(80);
   });
 
   it('вкладка «повторы»: группы, что оставить, удаление копий', async () => {

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, loadStatsSnapshots, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { formatMatchDigest, listingSnapshot, pairListings } from './match';
@@ -503,6 +503,16 @@ type DuplicateBadge = {
 
 app.get('/api/admin/listings', async (c) => {
   const isBoard = c.req.query('tab') === 'board';
+  // Перед показом очереди выметаем заявки с прошедшей датой выезда:
+  // модерировать «везу 5 числа» 10-го числа бессмысленно. Регулярные рейсы
+  // остаются — их расписание живёт дальше конкретной даты.
+  let pruned = 0;
+  if (!isBoard) {
+    pruned = await pruneStalePending(c.env).catch((e) => {
+      console.error('prune stale pending failed', e);
+      return 0;
+    });
+  }
   const items = isBoard
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
@@ -527,7 +537,7 @@ app.get('/api/admin/listings', async (c) => {
     }
     annotated.push({ ...l, duplicate: badge });
   }
-  return c.json({ items: [...annotated, ...items.slice(40)] });
+  return c.json({ items: [...annotated, ...items.slice(40)], pruned });
 });
 
 /* Редактирование заявки — админ-панель сайта. */

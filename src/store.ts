@@ -127,6 +127,23 @@ export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
 }
 
 /**
+ * Удалить из очереди модерации заявки с уже прошедшей датой выезда.
+ * Модерация смотрит на «сегодня», а не на дату подачи: заявка «везу 5 числа»
+ * 10-го числа бесполезна — публиковать её на доску смысла нет. Регулярные
+ * рейсы (recurring) не трогаем: их расписание живёт дальше даты заезда.
+ * Возвращает число удалённых.
+ */
+export async function pruneStalePending(env: Env): Promise<number> {
+  await ensureRecurringColumn(env);
+  const res = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE status = 'pending' AND recurring IS NULL
+       AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')`
+  ).run();
+  return res.meta.changes ?? 0;
+}
+
+/**
  * Заявки по городу (куда ИЛИ откуда), без учёта регистра.
  * Кроме действующих показывает и архив — заявки с прошедшей датой,
  * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
