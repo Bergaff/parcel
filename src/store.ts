@@ -26,6 +26,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     sourceMessageId: row.source_message_id ? Number(row.source_message_id) : null,
     byAdmin: Number(row.by_admin ?? 0) === 1,
     fromPerson: Number(row.by_admin ?? 0) === 2,
+    hidden: Number(row.hidden ?? 0) === 1,
     createdAt: String(row.created_at),
     publishedAt: row.published_at ? String(row.published_at) : null,
     views: Number(row.views ?? 0),
@@ -38,6 +39,7 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   await ensureSearchColumns(env);
   await ensureRecurringColumn(env);
   await ensureByAdminColumn(env);
+  await ensureHiddenColumn(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   const publishedAt = input.status === 'published' ? now : null;
@@ -49,8 +51,8 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       by_admin, created_at, published_at, from_city_lc, to_city_lc, description_lc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
@@ -60,7 +62,8 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
       input.sourceMessageId ?? null,
       // 1 — подал админ, 2 — посторонний человек сам (личка бота, форма без ключа),
       // 0 — взято из чата или старая строка до появления колонки
-      input.byAdmin ? 1 : input.fromPerson ? 2 : 0, now, publishedAt,
+      input.byAdmin ? 1 : input.fromPerson ? 2 : 0,
+      input.hidden ? 1 : 0, now, publishedAt,
       // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
       input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
@@ -158,10 +161,12 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
   // ORDER BY ниже смотрит в recurring — гарантируем и его
   await ensureRecurringColumn(env);
   await ensureSearchColumns(env);
+  await ensureHiddenColumn(env);
   const pattern = likeContains(city);
   const res = await env.DB.prepare(
     `SELECT * FROM listings
      WHERE status IN ('published', 'expired')
+       AND (hidden IS NULL OR hidden != 1)
        AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
      ORDER BY (CASE WHEN status = 'expired' OR (recurring IS NULL AND departure_date < date('now', '+3 hours')) THEN 1 ELSE 0 END),
@@ -185,6 +190,7 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
  */
 export async function archiveExpired(env: Env, now: Date = new Date()): Promise<{ archived: number; deleted: number; rolled: number; pruned: number }> {
   await ensureRecurringColumn(env);
+  await ensureHiddenColumn(env);
 
   // 1) Катим дату регулярных рейсов на ближайший заезд — только живые
   //    (освежённые за последние 45 дней), мёртвые трогать не нужно.
@@ -238,7 +244,28 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
        AND COALESCE(published_at, created_at) < datetime('now', '-45 days')`
   ).run();
 
-  return { archived: upd.meta.changes ?? 0, deleted: del.meta.changes ?? 0, rolled, pruned: prune.meta.changes ?? 0 };
+  // 5) Скрытые заявки без даты выезда (сайт, без контакта): дата в форме
+  //    необязательна, поэтому живём по возрасту — 30 дней на доске-невидимке,
+  //    потом архив, ещё через 30 — удаление. С датой разбираются пункты 2–3.
+  const updHidden = await env.DB.prepare(
+    `UPDATE listings SET status = 'expired'
+     WHERE hidden = 1 AND status = 'published'
+       AND departure_date IS NULL
+       AND created_at < datetime('now', '-30 days')`
+  ).run();
+  const delHidden = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE hidden = 1 AND status = 'expired'
+       AND departure_date IS NULL
+       AND created_at < datetime('now', '-60 days')`
+  ).run();
+
+  return {
+    archived: (upd.meta.changes ?? 0) + (updHidden.meta.changes ?? 0),
+    deleted: (del.meta.changes ?? 0) + (delHidden.meta.changes ?? 0),
+    rolled,
+    pruned: prune.meta.changes ?? 0,
+  };
 }
 
 /** Заявка по префиксу id (от 4 символов): «a1b2» из «№ A1B2» на сайте,
@@ -471,12 +498,14 @@ const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
 let searchColumnsReady: Promise<void> | null = null;
 let recurringColumnReady: Promise<void> | null = null;
 let byAdminColumnReady: Promise<void> | null = null;
+let hiddenColumnReady: Promise<void> | null = null;
 
 /** Сбросить отметку «колонки готовы» (тесты и смена базы). */
 export function resetSearchColumnsCache(): void {
   searchColumnsReady = null;
   recurringColumnReady = null;
   byAdminColumnReady = null;
+  hiddenColumnReady = null;
   statsSummaryReady = null;
 }
 
@@ -619,6 +648,40 @@ export function isAdminOrigin(env: Env, l: Listing): boolean {
 }
 
 /**
+ * Колонка hidden («скрыта с публичной доски») — тот же сценарий, что у
+ * recurring и by_admin: ALTER делает сам воркер, миграция не нужна.
+ */
+export function ensureHiddenColumn(env: Env): Promise<void> {
+  if (!hiddenColumnReady) {
+    hiddenColumnReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('hidden')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN hidden INTEGER DEFAULT 0`).run();
+      }
+    })();
+    hiddenColumnReady.catch(() => { hiddenColumnReady = null; });
+  }
+  return hiddenColumnReady;
+}
+
+/**
+ * Заявка «ищу попутчика» с сайта без контакта: публикуем автоматически, но
+ * прячем с доски — видна только в подборе. Владелец сайта пишет людям сам,
+ * а заявка живёт ограниченный срок и удаляется cron'ом.
+ * Не касается админских заявок и заявок из Telegram/чатов — те идут как обычно.
+ */
+export function isHiddenRequestInput(input: ListingInput): boolean {
+  return input.type === 'request'
+    && !input.telegram
+    && !input.phone
+    && input.source === 'site'
+    && input.fromPerson === true;
+}
+
+/**
  * Заявку подал посторонний человек сам: написал боту в личку или отправил
  * форму на сайте без ключа админки. Заявки из чатов (парсер) сюда не входят —
  * там человек нам ничего не подавал. Старые строки до колонки узнаём по
@@ -639,7 +702,8 @@ function buildWhere(f: ListFilters): WhereClause {
     // Архив (вкладка на доске): помеченные cron'ом ('expired')
     // и ещё не помеченные просроченные ('published' с прошедшей датой).
     // Регулярные рейсы в архив не попадают: cron катит их дату вперёд.
-    sql = " WHERE (status = 'expired' OR (status = 'published' AND recurring IS NULL AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')))";
+    // Скрытые (без контакта, только для подбора) в публичном архиве не показываем
+    sql = " WHERE (status = 'expired' OR (status = 'published' AND recurring IS NULL AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours'))) AND (hidden IS NULL OR hidden != 1)";
   } else {
     sql = ' WHERE status = ?';
     params.push(f.status ?? 'published');
@@ -649,6 +713,8 @@ function buildWhere(f: ListFilters): WhereClause {
     // ближайший заезд cron посчитает.
     if ((f.status ?? 'published') === 'published') {
       sql += " AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL)";
+      // скрытые заявки — не для публичной доски (видны в подборе и админке)
+      sql += ' AND (hidden IS NULL OR hidden != 1)';
     }
   }
   if (f.from) { sql += ` AND from_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
@@ -779,6 +845,10 @@ export async function ensureMatchTables(env: Env): Promise<void> {
 
 /** Заявки для подбора: опубликованные (и, если попросят, архив). Города и даты
  *  дальше фильтрует src/match.ts — тут только статус и актуальность. */
+/**
+ * Заявки для подбора пар. Включает и скрытые (hidden) — в этом весь смысл:
+ * заявка без контакта невидима на доске, но в подборе владелец её видит.
+ */
 export async function listForMatching(
   env: Env,
   opts: { includeArchive?: boolean; limit?: number } = {}
@@ -1015,7 +1085,7 @@ export async function deleteListings(env: Env, ids: string[]): Promise<number> {
 const VISIBLE_WHERE = `(
     (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL))
     OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-30 days'))
-  )`;
+  ) AND (hidden IS NULL OR hidden != 1)`;
 
 /** Активная заявка: на доске прямо сейчас (не архив). */
 const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL) THEN 1 ELSE 0 END`;

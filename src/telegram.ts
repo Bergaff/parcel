@@ -1307,6 +1307,23 @@ export async function notifyAdmins(
 }
 
 /**
+ * Заявка «ищу попутчика» с сайта без контакта: опубликована автоматически и
+ * скрыта с доски — видна только в подборе. Владелец пишет людям сам.
+ */
+export async function notifyAdminsHiddenRequest(env: Env, listing: Listing): Promise<void> {
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `📦 <b>Заявка с сайта без контакта</b>\n` +
+      `Опубликована автоматически, на доске скрыта — видна в подборе.\n\n` +
+      `${listingLine(listing)}${link}\n\n` +
+      `Через 30 дней удалится сама. Если контакт есть в описании — напишите человеку сами.`
+    ).catch(() => undefined);
+  }
+}
+
+/**
  * Конфликт при автопубликации: человек подал сам, похожая уже была, и новая
  * сразу оказалась на доске (AUTO_APPROVE=1). Карточки модерации нет —
  * пишем короткую сводку, чтобы админ удалил старую руками.

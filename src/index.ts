@@ -1,11 +1,11 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsReport } from './telegram';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
@@ -189,7 +189,6 @@ app.post('/api/listings', async (c) => {
   const { input, error } = validateListing(body);
   if (error || !input) return c.json({ error }, 400);
 
-  input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
   // Кто подаёт: админ (форма с ключом админки в этом же браузере) или
   // посторонний человек. Для человека дубль не сливаем: возможно, это владелец
   // рейса подал сам, а копию раньше принёс админ из чата — заявку человека
@@ -198,6 +197,16 @@ app.post('/api/listings', async (c) => {
   const isAdminSubmit = !!c.env.ADMIN_API_TOKEN && auth === `Bearer ${c.env.ADMIN_API_TOKEN}`;
   input.byAdmin = isAdminSubmit;
   input.fromPerson = !isAdminSubmit;
+  // «Ищу попутчика» с сайта без контакта: публикуем сразу, но прячем с доски —
+  // человек уже никогда не вернётся за статусом, а владелец напишет ему сам.
+  // На доске такие не показываются, только в подборе (см. isHiddenRequestInput).
+  const autoHidden = isHiddenRequestInput(input);
+  if (autoHidden) {
+    input.status = 'published';
+    input.hidden = true;
+  } else {
+    input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
+  }
   const res = await createListingSafe(c.env, input, { force: !isAdminSubmit });
   const listing = res.listing;
 
@@ -225,6 +234,21 @@ app.post('/api/listings', async (c) => {
     c.executionCtx.waitUntil(
       notifyAdminsConflict(c.env, listing, res.duplicateOf, res.why)
         .catch((e) => console.error('notifyAdminsConflict failed', e))
+    );
+  }
+
+  if (autoHidden) {
+    // владельцу — сразу в Telegram: он пишет людям сам
+    c.executionCtx.waitUntil(
+      notifyAdminsHiddenRequest(c.env, listing).catch((e) => console.error('notifyAdminsHiddenRequest failed', e))
+    );
+    return c.json(
+      {
+        item: listing,
+        hidden: true,
+        message: 'Заявка принята: подбираем попутчика по вашему маршруту. Как найдём — объявление появится на доске.',
+      },
+      201
     );
   }
 

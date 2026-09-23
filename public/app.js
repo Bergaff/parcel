@@ -733,8 +733,11 @@ function bindForm() {
       phone: fd.get('phone') || null,
     };
 
-    if (!payload.telegram && !payload.phone) {
-      err.textContent = 'Нужен хотя бы один контакт: telegram или телефон.';
+    // Водителю контакт обязателен — иначе пассажирам некуда писать. А «нужно
+    // передать» без контакта разрешаем: заявка публикуется автоматически,
+    // но на доске не показывается — по ней подбирают попутчика владельцы сайта.
+    if (payload.type === 'offer' && !payload.telegram && !payload.phone) {
+      err.textContent = 'Водителям нужен хотя бы один контакт: telegram или телефон.';
       err.hidden = false;
       return;
     }
@@ -760,6 +763,10 @@ function bindForm() {
       e.target.reset();
       if (dupeId) {
         navTo(`/item/${dupeId}`); // вторая заявка не нужна — показываем ту, что уже есть
+      } else if (data.hidden && data.item && data.item.id) {
+        // заявка без контакта опубликована, но скрыта с доски — показываем её
+        // автору на собственной странице, чтобы было видно: принято
+        navTo(`/item/${data.item.id}`);
       } else {
         navTo('/');
       }
@@ -915,6 +922,7 @@ function adminCard(l, mode = 'pending') {
       l.byAdmin ? el('span', { class: 'stamp stamp-admin', text: 'от админа' }) : null,
       originStamp(l),
       personStamp(l),
+      l.hidden ? el('span', { class: 'stamp stamp-hidden', text: 'скрыта · только подбор' }) : null,
       l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     ].filter(Boolean)),
     el('div', { class: 'meta-line' }, [

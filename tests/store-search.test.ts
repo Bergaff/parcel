@@ -11,7 +11,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  ensureSearchColumns, getCounts, isAdminOrigin, isPersonOrigin, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
+  ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
+  listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
 
@@ -224,6 +225,42 @@ describe('происхождение заявки: админ или посто�
     expect(isPersonOrigin(env, mk({ source: 'telegram', sourceChat: 'Личное сообщение боту' }))).toBe(true);
     // из чата парсер взял — человек нам ничего не подавал
     expect(isPersonOrigin(env, mk({ source: 'parser', sourceChat: 'Чат PL-BY' }))).toBe(false);
+  });
+});
+
+describe('заявки «ищу попутчика» без контакта — скрытые с доски', () => {
+  const mk = (over: Record<string, unknown>) => ({
+    type: 'request', telegram: null, phone: null, source: 'site', fromPerson: true, ...over,
+  });
+
+  it('скрытой становится заявка с сайта без контакта, поданная человеком', () => {
+    expect(isHiddenRequestInput(mk({}) as never)).toBe(true);
+    // водитель — нет: ему будут писать пассажиры
+    expect(isHiddenRequestInput(mk({ type: 'offer' }) as never)).toBe(false);
+    // с контактом — обычная модерация
+    expect(isHiddenRequestInput(mk({ telegram: '@x' }) as never)).toBe(false);
+    // от админа (форма с ключом) и из бота/чатов — как раньше
+    expect(isHiddenRequestInput(mk({ fromPerson: false }) as never)).toBe(false);
+    expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(false);
+  });
+
+  it('публичная доска и счётчики не показывают скрытые', async () => {
+    const board = fakeDb({ columns: ['id', 'type', 'status', 'recurring'] });
+    await listListings(board.env, {});
+    const query = board.calls.find((c) => /^SELECT \* FROM listings/.test(c.sql))!;
+    expect(query.sql).toContain('(hidden IS NULL OR hidden != 1)');
+    const counts = fakeDb({ columns: ['id', 'type', 'status', 'recurring'] });
+    await getCounts(counts.env, {});
+    expect(counts.calls.some((c) => /hidden IS NULL/.test(c.sql))).toBe(true);
+  });
+
+  it('поиск по городу и карта сайта тоже без скрытых', async () => {
+    const city = fakeDb({ columns: ['id', 'type', 'status', 'recurring'] });
+    await searchByCity(city.env, 'Минск');
+    expect(city.calls.some((c) => /hidden IS NULL/.test(c.sql))).toBe(true);
+    const sitemap = fakeDb({ columns: ['id', 'type', 'status', 'recurring'] });
+    await listSitemapItems(sitemap.env, 10);
+    expect(sitemap.calls.some((c) => /hidden IS NULL/.test(c.sql))).toBe(true);
   });
 });
 

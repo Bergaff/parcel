@@ -40,6 +40,7 @@ const REQ = 'cccc1111-2222-3333-4444-555555555555'; // встречная зая
 const COLD = 'dddd9999-8888-7777-6666-555555555555'; // есть в API, но не в кэше доски
 const DUP = 'eeee0000-1111-2222-3333-444444444444'; // уже опубликованный «оригинал»
 const NOCONTACT = 'abab1212-3434-5656-7878-909090909090'; // заявка без контакта
+const HIDDEN = 'cdcd3434-5656-7878-9090-121212121212'; // «ищу попутчика» с сайта без контакта
 
 const BOARD_DESC = 'Еду 20 мая, возьму одну сумку до 10 кг';
 const FRESH_MARK = '(данные с сервера свежее)';
@@ -106,6 +107,17 @@ function makeFetch(calls: string[]) {
       }
       if (path === '/api/chat-links') return { body: { links: {} } };
 
+      if (path === '/api/listings' && method === 'POST') {
+        // «ищу попутчика» с сайта без контакта: публикуется, но скрыта с доски
+        return {
+          status: 201,
+          body: {
+            item: listing({ id: HIDDEN, type: 'request', status: 'published', hidden: true, telegram: null, phone: null }),
+            hidden: true,
+            message: 'Заявка принята: подбираем попутчика по вашему маршруту. Как найдём — объявление появится на доске.',
+          },
+        };
+      }
       if (path === '/api/listings') {
         const items = [listing(), listing({ id: REQ, type: 'request', fromCity: 'Минск', toCity: 'Варшава', telegram: null })];
         const filtered = q.get('type') ? items.filter((l) => l.type === q.get('type')) : items;
@@ -113,7 +125,12 @@ function makeFetch(calls: string[]) {
       }
       if (/^\/api\/listings\/[^/]+$/.test(path)) {
         const id = decodeURIComponent(path.slice('/api/listings/'.length));
-        const known: Loose = { [ID]: listing(), [REQ]: listing({ id: REQ, type: 'request' }), [COLD]: listing({ id: COLD, description: `${BOARD_DESC} ${FRESH_MARK}` }) };
+        const known: Loose = {
+          [ID]: listing(),
+          [REQ]: listing({ id: REQ, type: 'request' }),
+          [COLD]: listing({ id: COLD, description: `${BOARD_DESC} ${FRESH_MARK}` }),
+          [HIDDEN]: listing({ id: HIDDEN, type: 'request', status: 'published', hidden: true, telegram: null, phone: null }),
+        };
         const item = known[id];
         if (!item) return { status: 404, body: { error: 'not_found' } };
         return {
@@ -621,6 +638,39 @@ describe('админка', () => {
     // возвращаем вкладку «заявки» — следующие тести работают с очередью
     byId('admin-tab-pending').click();
     await settle(100);
+  });
+
+  it('«ищу попутчика» без контакта: принимается сразу, автор видит свою заявку', async () => {
+    await goto('/new');
+    const form = byId('form') as HTMLFormElement;
+    (form.querySelector('input[name="ltype"][value="request"]') as HTMLInputElement).checked = true;
+    (form.querySelector('[name="fromCity"]') as HTMLInputElement).value = 'Варшава';
+    (form.querySelector('[name="toCity"]') as HTMLInputElement).value = 'Минск';
+    (form.querySelector('[name="description"]') as HTMLTextAreaElement).value = 'Передать коробку с лекарствами, 2 кг';
+    // контакт не заполнен — для «нужно передать» это разрешено
+    calls.length = 0;
+    form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+    // ушла на сервер без ошибки валидации
+    expect(calls).toContain('POST /api/listings');
+    expect(text('toast')).toContain('Заявка принята');
+    // автора ведём на его заявку — видно, что принято
+    expect(win.location.pathname).toBe(`/item/${HIDDEN}`);
+  });
+
+  it('водителю без контакта форма честно отказывает', async () => {
+    await goto('/new');
+    calls.length = 0;
+    const form = byId('form') as HTMLFormElement;
+    (form.querySelector('[name="fromCity"]') as HTMLInputElement).value = 'Варшава';
+    (form.querySelector('[name="toCity"]') as HTMLInputElement).value = 'Минск';
+    (form.querySelector('[name="description"]') as HTMLTextAreaElement).value = 'Везу посылки в пятницу';
+    form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(80);
+    expect(byId('form-error').hidden).toBe(false);
+    expect(text('form-error')).toContain('Водителям нужен хотя бы один контакт');
+    // на сервер ничего не ушло
+    expect(calls.filter((c) => c === 'POST /api/listings').length).toBe(0);
   });
 
   it('у заявки с дублем есть «заменить старую»: старая удаляется, новая публикуется', async () => {

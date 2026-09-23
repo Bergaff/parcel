@@ -21,7 +21,7 @@ function recurringRow(over: Record<string, unknown> = {}) {
 }
 
 /** D1-подделка: SELECT возвращает заданные строки, UPDATE/DELETE «выполняются». */
-function fakeDb(selectRows: Record<string, unknown>[]) {
+function fakeDb(selectRows: Record<string, unknown>[], opts: { hiddenChanges?: number } = {}) {
   const calls: Call[] = [];
   const make = (sql: string) => {
     const call: Call = { sql, params: [] };
@@ -39,7 +39,11 @@ function fakeDb(selectRows: Record<string, unknown>[]) {
         if (/^SELECT id, recurring/.test(sql)) return { results: selectRows };
         return { results: [] };
       },
-      async run() { return { meta: { changes: 1 } }; },
+      async run() {
+        // скрытые заявки — отдельная статистика, чтобы старые тесты не путались
+        if (/hidden = 1/.test(sql)) return { meta: { changes: opts.hiddenChanges ?? 0 } };
+        return { meta: { changes: 1 } };
+      },
       async first() { return null; },
     };
     return stmt;
@@ -94,5 +98,33 @@ describe('archiveExpired — регулярные рейсы', () => {
     const prune = calls.find((c) => c.sql.startsWith('DELETE FROM listings') && c.sql.includes('recurring IS NOT NULL'));
     expect(prune).toBeDefined();
     expect(prune!.sql).toContain("datetime('now', '-45 days')");
+  });
+});
+
+describe('archiveExpired — скрытые заявки без контакта', () => {
+  const NOW = new Date('2026-09-22T12:00:00Z');
+
+  it('без даты выезда: 30 дней живёт, потом архив, ещё 30 — удаление', async () => {
+    const { env, calls } = fakeDb([], { hiddenChanges: 2 });
+    const res = await archiveExpired(env, NOW);
+    const expire = calls.find((c) => /UPDATE listings SET status = 'expired'\s+WHERE hidden = 1/.test(c.sql));
+    expect(expire, 'скрытые без даты уходят в архив по возрасту').toBeTruthy();
+    expect(expire!.sql).toContain("departure_date IS NULL");
+    expect(expire!.sql).toContain("-30 days");
+    const del = calls.find((c) => /DELETE FROM listings\s+WHERE hidden = 1/.test(c.sql));
+    expect(del, 'архив скрытых удаляется').toBeTruthy();
+    expect(del!.sql).toContain("-60 days");
+    // статистика схлопывает обе категории (обычный архив дал бы 1 + скрытые 2)
+    expect(res.archived).toBe(3);
+    expect(res.deleted).toBe(3);
+  });
+
+  it('колонку hidden воркер гарантирует сам (PRAGMA до UPDATE)', async () => {
+    const { env, calls } = fakeDb([]);
+    await archiveExpired(env, NOW);
+    const pragma = calls.findIndex((c) => /PRAGMA table_info/.test(c.sql));
+    const firstHidden = calls.findIndex((c) => /hidden = 1/.test(c.sql));
+    expect(pragma).toBeGreaterThanOrEqual(0);
+    expect(firstHidden).toBeGreaterThan(pragma);
   });
 });
