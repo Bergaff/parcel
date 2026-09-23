@@ -52,6 +52,19 @@ const server = {
   reports: [] as string[],
   pendingNoContact: false, // вторая заявка в очереди — без контакта
   replacedWith: null as { id: string; deleteId: string } | null,
+  matchHidden: [] as Array<{ key: string; label: string }>,
+  matchPairs: [
+    {
+      score: 80, reasons: ['маршрут', 'даты рядом'],
+      offer: { id: 'm1', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', contacts: ['@stale_guy'], description: 'везу', status: 'published' },
+      request: { id: 'm2', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-21', contacts: ['@other'], description: 'передать', status: 'published' },
+    },
+    {
+      score: 70, reasons: ['маршрут'],
+      offer: { id: 'm3', fromCity: 'Краков', toCity: 'Львов', departureDate: '2030-05-22', contacts: ['@fresh'], description: 'везу', status: 'published' },
+      request: { id: 'm4', fromCity: 'Краков', toCity: 'Львов', departureDate: '2030-05-22', contacts: ['@other2'], description: 'передать', status: 'published' },
+    },
+  ],
 };
 
 function listing(over: Loose = {}): Loose {
@@ -143,6 +156,7 @@ function makeFetch(calls: string[]) {
               phone: null,
               source: 'site',
               sourceChat: null,
+              fromPerson: true, // сайт без ключа админки — как пометит воркер
               description: 'Возьму посылку по пути, пишите в чат',
             }));
           }
@@ -158,6 +172,33 @@ function makeFetch(calls: string[]) {
         const { deleteId } = JSON.parse(init.body || '{}') as { deleteId?: string };
         server.replacedWith = { id: decodeURIComponent(path.split('/').slice(-2)[0] ?? ''), deleteId: deleteId ?? '' };
         return { body: { ok: true, deleted: true, item: listing({ status: 'published' }) } };
+      }
+      const mKey = (contact: string) => {
+        const digits = String(contact).replace(/\D/g, '');
+        return digits.length >= 9 ? `ph:${digits.slice(-9)}` : `tg:${String(contact).replace(/^@/, '').toLowerCase()}`;
+      };
+      if (path === '/api/admin/match' && method === 'GET') return { body: { runs: [] } };
+      if (path === '/api/admin/match/hidden') return { body: { hidden: server.matchHidden } };
+      if (path === '/api/admin/match/hide' && method === 'POST') {
+        const { contact, hide } = JSON.parse(init.body || '{}') as { contact?: string; hide?: boolean };
+        const key = mKey(contact ?? '');
+        server.matchHidden = hide !== false
+          ? (server.matchHidden.some((h) => h.key === key) ? server.matchHidden : [...server.matchHidden, { key, label: contact ?? '' }])
+          : server.matchHidden.filter((h) => h.key !== key);
+        return { body: { ok: true, key, hidden: server.matchHidden } };
+      }
+      if (path === '/api/admin/match' && method === 'POST') {
+        const hidden = new Set(server.matchHidden.map((h) => h.key));
+        const pairs = server.matchPairs.filter((p) =>
+          ![...(p.offer.contacts ?? []), ...(p.request.contacts ?? [])].some((c) => hidden.has(mKey(c))));
+        return {
+          body: {
+            run: { id: 'run1', createdAt: '2026-09-22T10:00:00.000Z', daysWindow: 3, offersTotal: 2, requestsTotal: 2, pairsFound: pairs.length, notified: false, includeArchive: false, partial: false, note: '' },
+            stats: { offers: 2, requests: 2, pairs: pairs.length, rejected: { route: 0, date_gap: 0, weight: 0, same_contact: 0, archived: 0 } },
+            hiddenPairs: server.matchPairs.length - pairs.length,
+            pairs,
+          },
+        };
       }
       if (path === '/api/admin/duplicates') {
         return {
@@ -540,7 +581,46 @@ describe('админка', () => {
     const personCard = win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`) as HTMLElement;
     expect(personCard.querySelector('.stamp-origin')!.textContent).toContain('с сайта');
     expect(personCard.querySelector('.stamp-admin')).toBeNull();
+    // ...и «от другого человека»: не админский Telegram и не форма с ключом
+    expect(personCard.querySelector('.stamp-person')!.textContent).toContain('от другого человека');
+    // у админской карточки такого штампа нет
+    expect(win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"] .stamp-person`)).toBeNull();
     server.pendingNoContact = false;
+  });
+
+  it('подбор: скрыть неактуальный юзернейм — его пары исчезают, заявки остаются', async () => {
+    byId('admin-tab-match').click();
+    await settle(100);
+    // прогон без фильтров
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(2);
+
+    // у пары с @stale_guy жмём «скрыть»
+    calls.length = 0;
+    const staleLine = Array.from(win.document.querySelectorAll('.match-contact'))
+      .find((p) => p.textContent!.includes('@stale_guy')) as HTMLElement;
+    (staleLine.querySelector('.match-hide-btn') as HTMLElement).click();
+    await settle(100);
+    expect(calls).toContain('POST /api/admin/match/hide');
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(1);
+    expect(text('toast')).toContain('Скрыл');
+
+    // скрытый контакт виден списком с кнопкой «вернуть»
+    const box = win.document.querySelector('.match-hidden') as HTMLElement;
+    expect(box.textContent).toContain('@stale_guy');
+    (box.querySelector('button') as HTMLElement).click();
+    await settle(100);
+    expect(win.document.querySelector('.match-hidden')).toBeNull();
+
+    // новый прогон после возврата — снова две пары
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(2);
+
+    // возвращаем вкладку «заявки» — следующие тести работают с очередью
+    byId('admin-tab-pending').click();
+    await settle(100);
   });
 
   it('у заявки с дублем есть «заменить старую»: старая удаляется, новая публикуется', async () => {

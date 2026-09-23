@@ -25,6 +25,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     sourceChatId: row.source_chat_id ? String(row.source_chat_id) : null,
     sourceMessageId: row.source_message_id ? Number(row.source_message_id) : null,
     byAdmin: Number(row.by_admin ?? 0) === 1,
+    fromPerson: Number(row.by_admin ?? 0) === 2,
     createdAt: String(row.created_at),
     publishedAt: row.published_at ? String(row.published_at) : null,
     views: Number(row.views ?? 0),
@@ -56,7 +57,10 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
       input.departureDate ?? null, input.recurring ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null, input.byAdmin ? 1 : 0, now, publishedAt,
+      input.sourceMessageId ?? null,
+      // 1 — подал админ, 2 — посторонний человек сам (личка бота, форма без ключа),
+      // 0 — взято из чата или старая строка до появления колонки
+      input.byAdmin ? 1 : input.fromPerson ? 2 : 0, now, publishedAt,
       // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
       input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
@@ -612,6 +616,18 @@ export function isAdminOrigin(env: Env, l: Listing): boolean {
   return l.source === 'telegram'
     && !!l.sourceChatId
     && admins(env).includes(l.sourceChatId);
+}
+
+/**
+ * Заявку подал посторонний человек сам: написал боту в личку или отправил
+ * форму на сайте без ключа админки. Заявки из чатов (парсер) сюда не входят —
+ * там человек нам ничего не подавал. Старые строки до колонки узнаём по
+ * sourceChat «Личное сообщение боту».
+ */
+export function isPersonOrigin(env: Env, l: Listing): boolean {
+  if (l.fromPerson) return true;
+  if (isAdminOrigin(env, l)) return false;
+  return !!l.sourceChat && l.sourceChat.startsWith('Личное сообщение боту');
 }
 
 interface WhereClause { sql: string; params: (string | number)[] }

@@ -795,9 +795,15 @@ async function adminApi(path, options = {}) {
    Синим — админские (свой Telegram боту, форма с ключом админки),
    серым — все остальные источники. */
 function originStamp(l) {
-  if (l.byAdmin) return el('span', { class: 'stamp stamp-admin', text: 'от админа' });
   const label = l.source === 'site' ? 'с сайта' : l.source === 'parser' ? 'из чата' : 'из бота';
   return el('span', { class: 'stamp stamp-origin', text: label });
+}
+
+/* «от другого человека»: подал посторонний — не админский Telegram ID и не
+   форма из браузера с ключом админки. Пишется РЯДОМ со штампом источника. */
+function personStamp(l) {
+  if (l.byAdmin || !l.fromPerson) return null;
+  return el('span', { class: 'stamp stamp-person', text: 'от другого человека' });
 }
 
 /* «Заменить старую»: человек (владелец) подал заявку сам, а похожая уже
@@ -906,7 +912,9 @@ function adminCard(l, mode = 'pending') {
       el('span', { class: 'r-arrow', text: '→' }),
       el('span', { class: 'r-to', text: l.toCity }),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      l.byAdmin ? el('span', { class: 'stamp stamp-admin', text: 'от админа' }) : null,
       originStamp(l),
+      personStamp(l),
       l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     ].filter(Boolean)),
     el('div', { class: 'meta-line' }, [
@@ -1216,7 +1224,18 @@ function matchSide(s, icon) {
     el('p', { class: 'match-side-head' }, [el('span', { class: 'match-icon', text: icon }), ...bits]),
     s.description ? el('p', { class: 'match-desc', text: s.description }) : null,
     contacts.length
-      ? el('p', { class: 'match-contact' }, ['контакт: ', el('b', { text: contacts.join(', ') })])
+      ? el('p', { class: 'match-contact' }, [
+          'контакт: ',
+          ...contacts.flatMap((c) => [
+            el('b', { text: c }),
+            el('button', {
+              class: 'link-btn match-hide-btn', type: 'button', text: 'скрыть',
+              title: 'не показывать пары с этим контактом (заявка останется)',
+              onclick: () => matchHideContact(c, true),
+            }),
+            ' ',
+          ]),
+        ])
       : el('p', { class: 'match-contact match-nocontact', text: 'контакта нет — допишите его в карточке заявки («править»)' }),
   ].filter(Boolean));
 }
@@ -1261,6 +1280,87 @@ async function copyText(text, opts = {}) {
   } catch {
     toast(failText);
   }
+}
+
+/* ---------- скрытые контакты в подборе ----------
+   Юзернейм неактуален (человек уже не возит) — пары с ним убираем из
+   подбора, не удаляя сами заявки. Скрытие живёт в воркере (KV), поэтому
+   действует и на будущие прогоны, и на историю. */
+let matchHidden = []; // [{key, label}]
+
+async function loadMatchHidden() {
+  try {
+    const res = await adminApi('/api/admin/match/hidden');
+    if (!res.ok) throw new Error();
+    const { hidden } = await res.json();
+    matchHidden = Array.isArray(hidden) ? hidden : [];
+  } catch {
+    matchHidden = [];
+  }
+}
+
+function matchContactKey(c) {
+  const s = String(c ?? '').trim();
+  if (!s) return null;
+  const digits = s.replace(/\D/g, '');
+  if (digits.length >= 9) return `ph:${digits.slice(-9)}`;
+  const uname = s.replace(/^@/, '').replace(/^t\.me\//i, '').toLowerCase();
+  return uname ? `tg:${uname}` : null;
+}
+
+function sideHasHiddenContact(side) {
+  const list = Array.isArray(side?.contacts) ? side.contacts : [];
+  return list.some((c) => {
+    const k = matchContactKey(c);
+    return k && matchHidden.some((h) => h.key === k);
+  });
+}
+
+async function matchHideContact(contact, hide) {
+  try {
+    const res = await adminApi('/api/admin/match/hide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contact, hide }),
+    });
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    matchHidden = Array.isArray(data.hidden) ? data.hidden : matchHidden;
+    if (matchView) {
+      const before = matchView.pairs.length;
+      matchView.pairs = matchView.pairs.filter((p) => !sideHasHiddenContact(p.offer) && !sideHasHiddenContact(p.request));
+      if (before !== matchView.pairs.length) {
+        matchView.title = matchView.title.replace(/пар: \d+/, `пар: ${matchView.pairs.length}`);
+      }
+    }
+    renderMatchTab();
+    toast(hide
+      ? 'Скрыл: пар с этим контактом больше нет — и в новых прогонах тоже.'
+      : 'Вернул контакт — пары появятся в новых прогонах.');
+  } catch {
+    toast('Не получилось. Попробуйте ещё раз.');
+  }
+}
+
+function matchHiddenBox() {
+  if (!matchHidden.length) return null;
+  return el('section', { class: 'match-hidden admin-card' }, [
+    el('h3', { class: 'match-history-head', text: `Скрытые в подборе: ${matchHidden.length}` }),
+    el('p', {
+      class: 'admin-contact',
+      text: 'Пары с этими контактами не показываются (заявки остаются на доске и в истории):',
+    }),
+    el('p', { class: 'match-hidden-list' }, matchHidden.flatMap((h) => [
+      el('span', { class: 'match-hidden-item' }, [
+        el('b', { text: h.label }),
+        el('button', {
+          class: 'link-btn', type: 'button', text: 'вернуть',
+          onclick: () => matchHideContact(h.label, false),
+        }),
+      ]),
+      ' ',
+    ])),
+  ]);
 }
 
 function matchPairCard(p, i) {
@@ -1390,7 +1490,9 @@ function matchHistoryBox() {
 /* Перерисовать вкладку, не трогая форму (чтобы введённые города не пропадали). */
 function renderMatchTab() {
   if (!matchFormEl) matchFormEl = matchForm();
-  $('#admin-list').replaceChildren(matchFormEl, matchResultsBox(), matchHistoryBox());
+  $('#admin-list').replaceChildren(
+    ...[matchFormEl, matchHiddenBox(), matchResultsBox(), matchHistoryBox()].filter(Boolean)
+  );
 }
 
 async function refreshMatchRuns() {
@@ -1482,7 +1584,7 @@ async function removeMatchRun(id) {
 async function renderAdminMatch() {
   $('#admin-count').textContent = 'Подбор пар: одна кнопка сравнивает водителей с заявками на передачу и сохраняет прогон в историю.';
   $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
-  await refreshMatchRuns();
+  await Promise.all([refreshMatchRuns(), loadMatchHidden()]);
   renderMatchTab();
 }
 

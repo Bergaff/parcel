@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  ensureSearchColumns, getCounts, isAdminOrigin, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
+  ensureSearchColumns, getCounts, isAdminOrigin, isPersonOrigin, likeContains, listListings, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
 
@@ -214,6 +214,16 @@ describe('происхождение заявки: админ или посто�
     expect(isAdminOrigin(env, mk({ source: 'telegram', sourceChatId: '999' }))).toBe(false);
     // заявка с сайта админским ID не помечается — ключ админки шёл бы в by_admin
     expect(isAdminOrigin(env, mk({ source: 'site', sourceChatId: '42' }))).toBe(false);
+  });
+
+  it('«от другого человека»: подал сам, но не админ', () => {
+    expect(isPersonOrigin(env, mk({ fromPerson: true }))).toBe(true);
+    expect(isPersonOrigin(env, mk({ byAdmin: true }))).toBe(false);
+    expect(isPersonOrigin(env, mk({}))).toBe(false);
+    // старая заявка из лички бота от не-админа — тоже «от другого человека»
+    expect(isPersonOrigin(env, mk({ source: 'telegram', sourceChat: 'Личное сообщение боту' }))).toBe(true);
+    // из чата парсер взял — человек нам ничего не подавал
+    expect(isPersonOrigin(env, mk({ source: 'parser', sourceChat: 'Чат PL-BY' }))).toBe(false);
   });
 });
 

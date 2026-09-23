@@ -803,6 +803,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         sourceChatId: seenChat,
         sourceMessageId: origin.messageId ?? null,
         byAdmin: isAdmin,
+        fromPerson: !isAdmin,
       };
       // Пересылку админа дедуплицируем как раньше (одно и то же объявление
       // пересылают каждый день — вторую заявку не плодим). Пересылку от
@@ -975,6 +976,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               sourceChatId: String(chatId),
               sourceMessageId: msg.message_id,
               byAdmin: isAdminChat(env, msg),
+              fromPerson: !isAdminChat(env, msg),
             };
             // от постороннего человека дубль не сливаем — см. блок пересылок
             const fromAdmin = isAdminChat(env, msg);
@@ -1118,6 +1120,7 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     sourceChat: `Личное сообщение боту`,
     sourceChatId: String(chatId),
     byAdmin: admins(env).includes(String(chatId)),
+    fromPerson: !admins(env).includes(String(chatId)),
   };
   // /post человек заполняет сам, шаг за шагом, — заявку создаём в любом случае,
   // но если такая уже есть, предупреждаем и его, и модератора.

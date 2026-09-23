@@ -10,7 +10,7 @@
  * Всё детерминированно: без ИИ и внешних вызовов, поэтому прогон бесплатный
  * и повторяемый. Чистые функции (scorePair, pairListings) тестируются юнитами.
  */
-import type { Listing } from './types';
+import type { Env, Listing } from './types';
 import { normalizeCity } from './parser';
 import { escapeHtml, mskTodayIso, uniqueContacts } from './util';
 
@@ -358,4 +358,70 @@ export function formatMatchDigest(opts: {
   });
   const more = opts.pairs.length > max ? `\n…и ещё ${opts.pairs.length - max} — во вкладке «подбор».` : '';
   return `${head}\n\n${lines.join('\n\n')}${more}`;
+}
+
+/* ---------- скрытые контакты подбора ---------- */
+
+/** Ключ контакта-строки для скрытия в подборе: юзернейм — нормализованный
+ *  без @, телефон — последние 9 цифр. Один и тот же человек, записанный
+ *  по-разному (@Ivan, ivan, t.me/ivan), даёт один ключ.
+ *  (Приватная contactKey выше работает с Listing и ключами дедупликации.) */
+export function contactKeyOf(c: string): string | null {
+  const s = String(c ?? '').trim();
+  if (!s) return null;
+  const digits = s.replace(/\D/g, '');
+  if (digits.length >= 9) return `ph:${digits.slice(-9)}`;
+  const uname = s.replace(/^@/, '').replace(/^t\.me\//i, '').toLowerCase();
+  return uname ? `tg:${uname}` : null;
+}
+
+/** Ключи контактов одной стороны пары: снимок пары хранит contacts[],
+ *  живая заявка — telegram/phone. */
+export function sideContactKeys(side: {
+  contacts?: string[] | null;
+  telegram?: string | null;
+  phone?: string | null;
+}): string[] {
+  const list = Array.isArray(side.contacts) && side.contacts.length > 0
+    ? side.contacts.map(String)
+    : uniqueContacts(side.telegram ?? null, side.phone ?? null);
+  return Array.from(new Set(list.map(contactKeyOf).filter((k): k is string => !!k)));
+}
+
+/** Убрать пары со скрытыми контактами: скрыли юзернейм — из подбора уходит
+ *  каждая пара, где он водитель или заявка. Сами заявки не трогаем. */
+export function filterHiddenPairs<T extends { offer: unknown; request: unknown }>(
+  pairs: T[],
+  hidden: Set<string>
+): { pairs: T[]; hiddenCount: number } {
+  if (hidden.size === 0) return { pairs, hiddenCount: 0 };
+  const kept: T[] = [];
+  let hiddenCount = 0;
+  for (const p of pairs) {
+    const offer = p.offer as Parameters<typeof sideContactKeys>[0] | null;
+    const request = p.request as Parameters<typeof sideContactKeys>[0] | null;
+    const keys = [...(offer ? sideContactKeys(offer) : []), ...(request ? sideContactKeys(request) : [])];
+    if (keys.some((k) => hidden.has(k))) hiddenCount += 1;
+    else kept.push(p);
+  }
+  return { pairs: kept, hiddenCount };
+}
+
+export interface HiddenContact { key: string; label: string }
+
+const HIDDEN_CONTACTS_KV = 'match:hidden-contacts';
+
+export async function loadHiddenContacts(env: Env): Promise<HiddenContact[]> {
+  const raw = await env.KV.get(HIDDEN_CONTACTS_KV).catch(() => null);
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw) as HiddenContact[];
+    return Array.isArray(v) ? v.filter((x) => x && typeof x.key === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function setHiddenContacts(env: Env, list: HiddenContact[]): Promise<void> {
+  await env.KV.put(HIDDEN_CONTACTS_KV, JSON.stringify(list.slice(0, 200)));
 }

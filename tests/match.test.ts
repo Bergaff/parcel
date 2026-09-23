@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  contactKeyOf,
+  filterHiddenPairs,
   formatMatchDigest,
   isArchivedListing,
   listingSnapshot,
@@ -309,5 +311,48 @@ describe('/подбор: разбор аргументов команды', () =
     expect(matchArgDays('100 дней')).toBe(30);
     expect(matchArgDays('0 дней')).toBe(3); // ноль — бессмыслица, окно по умолчанию
     expect(matchArgDays('Варшава Минск')).toBe(3);
+  });
+});
+
+describe('скрытые контакты подбора', () => {
+  it('ключ контакта: юзернейм нормализуется, телефон — последние 9 цифр', () => {
+    expect(contactKeyOf('@Ivan_Waw')).toBe('tg:ivan_waw');
+    expect(contactKeyOf('ivan_waw')).toBe('tg:ivan_waw');
+    expect(contactKeyOf('t.me/Ivan_Waw')).toBe('tg:ivan_waw');
+    expect(contactKeyOf('+48 601 234 567')).toBe('ph:601234567');
+    expect(contactKeyOf('')).toBeNull();
+  });
+
+  it('скрытый юзернейм убирает все его пары — с обеих сторон', () => {
+    const pair = (offerTg: string, reqTg: string) => ({
+      offer: { contacts: [offerTg] },
+      request: { contacts: [reqTg] },
+    });
+    const pairs = [
+      pair('@stale_guy', '@other'),
+      pair('@fresh', '@stale_guy'),
+      pair('@fresh', '@other'),
+    ];
+    const res = filterHiddenPairs(pairs, new Set(['tg:stale_guy']));
+    expect(res.pairs).toHaveLength(1);
+    expect(res.hiddenCount).toBe(2);
+    expect(res.pairs[0]!.offer.contacts).toContain('@fresh');
+  });
+
+  it('живые заявки (telegram/phone, без contacts) тоже фильтруются', () => {
+    const pairs = [
+      { offer: { telegram: '@stale_guy', phone: null }, request: { telegram: null, phone: '+48 601 234 567' } },
+    ];
+    const res = filterHiddenPairs(pairs, new Set(['tg:stale_guy']));
+    expect(res.pairs).toHaveLength(0);
+    expect(res.hiddenCount).toBe(1);
+    // телефон скрывается по последним 9 цифрам
+    const res2 = filterHiddenPairs(pairs, new Set(['ph:601234567']));
+    expect(res2.hiddenCount).toBe(1);
+  });
+
+  it('пустой список скрытых ничего не меняет', () => {
+    const pairs = [{ offer: { contacts: ['@x'] }, request: { contacts: ['@y'] } }];
+    expect(filterHiddenPairs(pairs, new Set())).toEqual({ pairs, hiddenCount: 0 });
   });
 });

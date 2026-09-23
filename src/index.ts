@@ -1,10 +1,10 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
-import { formatMatchDigest, listingSnapshot, pairListings } from './match';
+import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsReport } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import {
@@ -197,6 +197,7 @@ app.post('/api/listings', async (c) => {
   const auth = c.req.header('Authorization') ?? '';
   const isAdminSubmit = !!c.env.ADMIN_API_TOKEN && auth === `Bearer ${c.env.ADMIN_API_TOKEN}`;
   input.byAdmin = isAdminSubmit;
+  input.fromPerson = !isAdminSubmit;
   const res = await createListingSafe(c.env, input, { force: !isAdminSubmit });
   const listing = res.listing;
 
@@ -530,8 +531,13 @@ app.get('/api/admin/listings', async (c) => {
   const items = isBoard
     ? await listAdminBoard(c.env, 200)
     : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
-  // происхождение заявки — штамп «от админа» / «с сайта» / «из чата» в карточке
-  const withOrigin = items.map((l) => ({ ...l, byAdmin: isAdminOrigin(c.env, l) }));
+  // происхождение заявки — штампы «от админа» / «с сайта» / «из чата» /
+  // «от другого человека» в карточке
+  const withOrigin = items.map((l) => ({
+    ...l,
+    byAdmin: isAdminOrigin(c.env, l),
+    fromPerson: isPersonOrigin(c.env, l),
+  }));
 
   // В очереди модерации помечаем повторы: одно и то же объявление пересылают
   // каждый день, и админ не должен держать в голове, что уже одобрил.
@@ -741,7 +747,7 @@ app.post('/api/admin/match', async (c) => {
   const note = sanitizeText(String(body.note ?? ''), 300) || null;
 
   const listings = await listForMatching(env, { includeArchive });
-  const { pairs, stats } = pairListings(listings, {
+  const { pairs: allPairs, stats } = pairListings(listings, {
     fromCity: fromCity || null,
     toCity: toCity || null,
     days,
@@ -749,6 +755,10 @@ app.post('/api/admin/match', async (c) => {
     partial,
     limit: 50,
   });
+  // Скрытые контакты (неактуальный юзернейм) не показываем: пары с ними
+  // убираем до дайджеста и сохранения — и в новых прогонах их не будет тоже.
+  const hiddenKeys = new Set((await loadHiddenContacts(env)).map((x) => x.key));
+  const { pairs, hiddenCount } = filterHiddenPairs(allPairs, hiddenKeys);
 
   if (notify) {
     const digest = formatMatchDigest({
@@ -772,6 +782,7 @@ app.post('/api/admin/match', async (c) => {
   return c.json({
     run,
     stats,
+    hiddenPairs: hiddenCount,
     pairs: pairs.map((p) => ({
       score: p.score,
       reasons: p.reasons,
@@ -839,12 +850,37 @@ app.post('/api/admin/stats/summary', async (c) => {
   return c.json({ ok: true, month, ai: res.ai, summary: res.summary });
 });
 
+/** Скрытые в подборе контакты: юзернейм неактуален — его пары не показываем,
+ *  но заявки не удаляем. */
+app.get('/api/admin/match/hidden', async (c) => {
+  return c.json({ hidden: await loadHiddenContacts(c.env) });
+});
+
+app.post('/api/admin/match/hide', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { contact?: unknown; hide?: unknown };
+  const contact = typeof b.contact === 'string' ? b.contact.trim() : '';
+  if (!contact) return c.json({ error: 'contact обязателен' }, 400);
+  const key = contactKeyOf(contact);
+  if (!key) return c.json({ error: 'не похоже на контакт' }, 400);
+  const hide = b.hide !== false;
+  const list = await loadHiddenContacts(c.env);
+  const next = hide
+    ? (list.some((x) => x.key === key) ? list : [...list, { key, label: contact }])
+    : list.filter((x) => x.key !== key);
+  await setHiddenContacts(c.env, next);
+  return c.json({ ok: true, key, hidden: next });
+});
+
 /** GET /api/admin/match/:id — прогон с парами. Пары хранятся снимками заявок,
  *  поэтому история читается даже после того, как крон почистит архив. */
 app.get('/api/admin/match/:id', async (c) => {
   const found = await getMatchRun(c.env, c.req.param('id'));
   if (!found) return c.json({ error: 'not_found' }, 404);
-  return c.json(found);
+  // скрытые контакты действуют и на историю: старые прогоны читаются без
+  // неактуальных юзернеймов
+  const hiddenKeys = new Set((await loadHiddenContacts(c.env)).map((x) => x.key));
+  const { pairs, hiddenCount } = filterHiddenPairs(found.pairs ?? [], hiddenKeys);
+  return c.json({ ...found, pairs, hiddenPairs: hiddenCount });
 });
 
 /** DELETE /api/admin/match/:id — удалить прогон из истории. */

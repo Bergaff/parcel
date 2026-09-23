@@ -47,6 +47,10 @@ export interface ListingInput {
    *  админки) — а не посторонний человек с сайта. Определяет поведение
    *  дедупликации и метку в очереди модерации. */
   byAdmin?: boolean;
+  /** Заявку подал посторонний человек сам: написал боту в личку или отправил
+   *  форму на сайте из браузера без ключа админки. Не относится к заявкам,
+   *  которые парсер взял из чатов. В базе живёт как by_admin = 2. */
+  fromPerson?: boolean;
 }
 
 export interface Listing extends ListingInput {
@@ -54,6 +58,7 @@ export interface Listing extends ListingInput {
   createdAt: string;
   publishedAt: string | null;
   views: number;
+  fromPerson: boolean;
 }
 
 export interface ListFilters {

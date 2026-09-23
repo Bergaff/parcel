@@ -278,6 +278,12 @@ button { font-family: inherit; }
 /* Происхождение заявки в очереди модерации: админ или посторонний человек */
 .stamp-admin { color: #35507a; border-color: #35507a; background: rgba(53, 80, 122, .08); }
 .stamp-origin { color: #6f675a; border-color: #6f675a; }
+/* Посторонний человек подал сам (не админ) — терракотовый, заметный */
+.stamp-person { color: var(--accent-deep); border-color: var(--accent-deep); background: rgba(164, 58, 16, .06); }
+/* Скрытие контакта в подборе */
+.match-hide-btn { margin-left: 6px; font-size: 12px; }
+.match-hidden-list { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.match-hidden-item { display: inline-flex; align-items: baseline; gap: 6px; border: 1.5px dashed var(--line-strong); padding: 3px 8px; }
 
 .write-link {
   font-size: 13.5px;
