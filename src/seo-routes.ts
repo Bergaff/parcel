@@ -86,12 +86,19 @@ export const SEO_ROUTES: SeoRoute[] = [
   { from: 'Вильнюс', to: 'Киев', slug: 'vilnyus-kiev' },
   // Беларусь ↔ Россия
   { from: 'Минск', to: 'Москва', slug: 'minsk-moskva' },
+  { from: 'Москва', to: 'Минск', slug: 'moskva-minsk' },
   { from: 'Минск', to: 'Санкт-Петербург', slug: 'minsk-peterburg' },
+  { from: 'Москва', to: 'Прага', slug: 'moskva-praga' },
+  { from: 'Прага', to: 'Москва', slug: 'praga-moskva' },
+  // Дальние трассы: «попутка передачка груза Москва — Забайкальск» (дальнобой)
+  { from: 'Москва', to: 'Забайкальск', slug: 'moskva-zabaykalsk' },
   // Внутри стран
   { from: 'Киев', to: 'Львов', slug: 'kiev-lvov' },
   { from: 'Киев', to: 'Одесса', slug: 'kiev-odessa' },
   { from: 'Варшава', to: 'Краков', slug: 'varshava-krakov' },
   { from: 'Минск', to: 'Гродно', slug: 'minsk-grodno' },
+  { from: 'Гродно', to: 'Минск', slug: 'grodno-minsk' },
+  { from: 'Гродно', to: 'Вильнюс', slug: 'grodno-vilnyus' },
 ];
 
 /** Страна города (для текста страниц). */
@@ -122,6 +129,7 @@ const CITY_COUNTRY: Record<string, { name: string; inst: string }> = {
   'Милан': { name: 'Италия', inst: 'Италией' },
   'Москва': { name: 'Россия', inst: 'Россией' },
   'Санкт-Петербург': { name: 'Россия', inst: 'Россией' },
+  'Забайкальск': { name: 'Россия', inst: 'Россией' },
 };
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -318,8 +326,35 @@ ${opts.body}
         <a href="/itogi">итоги месяца</a>
       </nav>
     </div>
+    <nav class="foot-routes" aria-label="Популярные маршруты">
+      <b>Популярные маршруты:</b>
+      ${footRoutes(9).map((r) => `<a href="/r/${r.slug}">${escapeHtml(r.from)} → ${escapeHtml(r.to)}</a>`).join('\n      ')}
+      <a href="/routes">все маршруты →</a>
+    </nav>
+    <nav class="foot-routes" aria-label="Города и итоги">
+      <b>Города:</b>
+      ${FOOT_CITIES.map((c) => `<a href="/gorod/${citySlug(c)}">${escapeHtml(c)}</a>`).join('\n      ')}
+      <a href="/gorod">все города →</a>
+      <a href="/itogi">итоги месяца →</a>
+    </nav>
     <p class="foot-meta">нашли фейк — жалоба из карточки объявления</p>
   </footer>
+  <div id="cookie-note" class="cookie-note" hidden>
+    <span>Сайт работает без рекламных cookies и трекеров — localStorage нужен только для работы доски.</span>
+    <button type="button" id="cookie-ok">понятно</button>
+  </div>
+  <script>
+    try {
+      if (!localStorage.getItem('poputka_cookie_ok')) {
+        var cookieNote = document.getElementById('cookie-note');
+        cookieNote.hidden = false;
+        document.getElementById('cookie-ok').onclick = function () {
+          localStorage.setItem('poputka_cookie_ok', '1');
+          cookieNote.hidden = true;
+        };
+      }
+    } catch (e) { /* приватный режим — просто не показываем плашку */ }
+  </script>
 </body>
 </html>`;
 }
@@ -544,8 +579,8 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     r.pair?.lastmod ? `обновлено ${fmtDayShort(r.pair.lastmod)}` : null,
   ].filter(Boolean).join(' · ');
 
-  const title = `Передать посылку ${r.from} → ${r.to} — заявки водителей | ${SITE_NAME}`;
-  const description = `Нужно передать посылку ${r.from} → ${r.to}? Водители берут посылки попутно: даты выезда, вес, цена и контакт — напрямую, без посредников и комиссий. Обновляется каждый день.`;
+  const title = `Передать посылку ${r.from} → ${r.to} с попуткой — заявки водителей | ${SITE_NAME}`;
+  const description = `Нужно передать посылку ${r.from} → ${r.to}? Попутки и попутчики: водители берут посылки попутно по пути — даты выезда, вес, цена и контакт. Договор напрямую, без посредников и комиссий.`;
 
   const listingsHtml = main.length > 0
     ? main.map((l) => listingCard(l, chatLinks)).join('\n')
@@ -663,8 +698,10 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
   const active = stat?.active ?? outItems.length + inItems.length;
   const gen = genitiveCity(city);
   const acc = accusativeCity(city);
-  const title = `Передачи ${fromCity(city)} и в ${acc} — направления и заявки | ${SITE_NAME}`;
-  const description = `${city}${country ? ` (${country})` : ''}: кто едет и что готов передать. Направления с числом заявок, живые объявления водителей и просьбы передать посылку — договариваетесь напрямую, без посредников.`;
+  // «Попутки Гродно» — как этот город ищут («попутка гродно», «попутки гродно»):
+  // точное вхождение в первых словах заголовка
+  const title = `Попутки ${city}: передать посылку ${fromCity(city)} и в ${acc} | ${SITE_NAME}`;
+  const description = `Попутки ${city}${country ? ` (${country})` : ''}: кто едет и что готов передать. Направления с числом заявок, живые объявления водителей и просьбы передать посылку — разместить объявление можно бесплатно и без регистрации.`;
 
   const dirBlock = (title2: string, dirs: RoutePair[], fromHere: boolean) => {
     if (dirs.length === 0) return '';
@@ -695,7 +732,7 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
 
   const body = `    ${crumbs(origin, trail)}
     <p class="doc-date">город на доске</p>
-    <h1 class="page-title">Передачи ${escapeHtml(fromCity(city))} и в ${escapeHtml(acc)}</h1>
+    <h1 class="page-title">Попутки ${escapeHtml(city)}: передать посылку ${escapeHtml(fromCity(city))} и в ${escapeHtml(acc)}</h1>
     <p class="route-cities">${country ? escapeHtml(country) + ' · ' : ''}${active} ${plural(active, 'заявка', 'заявки', 'заявок')} сейчас${stat?.lastmod ? ' · обновлено ' + fmtDayShort(stat.lastmod) : ''}</p>
 
     <p class="lead">${cityIntro(city, country, active, slug)}</p>
@@ -989,11 +1026,22 @@ export function cityOgSpec(city: string, stat?: CityStat): OgCardSpec {
   };
 }
 
+/** Маршруты для подвала — ручной отбор под то, что чаще всего ищут
+ *  («попутка гродно», «минск москва», «прага москва»), а не первые попавшиеся. */
+const FOOT_ROUTE_SLUGS = [
+  'varshava-lvov', 'varshava-minsk', 'minsk-moskva', 'krakov-kiev',
+  'grodno-minsk', 'praga-moskva', 'varshava-grodno', 'berlin-kiev',
+  'varshava-krakov', 'kiev-lvov', 'minsk-grodno', 'moskva-minsk',
+];
+
 /** Популярные маршруты для подвала (без дублирования направления). */
 export function footRoutes(limit = 9): SeoRoute[] {
+  const bySlug = new Map(SEO_ROUTES.map((r) => [r.slug, r]));
   const seen = new Set<string>();
   const out: SeoRoute[] = [];
-  for (const r of SEO_ROUTES) {
+  for (const slug of FOOT_ROUTE_SLUGS) {
+    const r = bySlug.get(slug);
+    if (!r) continue;
     const key = [r.from, r.to].sort().join('|');
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1002,6 +1050,12 @@ export function footRoutes(limit = 9): SeoRoute[] {
   }
   return out;
 }
+
+/** Города в подвале: живая перелинковка со страницы любого маршрута/города. */
+export const FOOT_CITIES = [
+  'Варшава', 'Минск', 'Москва', 'Киев', 'Краков', 'Львов',
+  'Гродно', 'Брест', 'Прага', 'Вильнюс', 'Берлин',
+];
 
 /** Все известные города (витрина) — для подвала и перелинковки. */
 export function knownCities(): string[] {

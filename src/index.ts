@@ -7,6 +7,7 @@ import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
+import { cacheableStatus, edgeCache, edgeCacheControl, edgeCacheKey, edgeCacheTtl } from './edge-cache';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
   buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
@@ -37,6 +38,52 @@ app.use('/api/*', async (c, next) => {
     return c.body(null, 204);
   }
   await next();
+});
+
+/* ---------------- Edge-кэш публичных страниц ---------------- */
+/* caches.default — кэш колокации Cloudflare: главная, каталоги, карточки,
+   sitemap и OG-картинки отдаются без похода в D1, 404-е тоже запоминаем
+   (отрицательное кэширование — боты любят дёргать несуществующие адреса).
+   Правила и TTL — src/edge-cache.ts. Живое и личное (API, админка, фильтры
+   доски, OG-диагностика) в кэш не попадает никогда. Заголовок x-poputka-edge
+   показывает, откуда ответ: miss — воркер рендерил, hit — отдали из кэша. */
+app.use('*', async (c, next) => {
+  if (c.req.method !== 'GET') return next();
+  const url = new URL(c.req.url);
+  const ttl = edgeCacheTtl(url.pathname, url.search !== '');
+  if (ttl == null) return next();
+
+  const cache = edgeCache();
+  const key = edgeCacheKey(url);
+  const hit = await cache.match(key);
+  if (hit) {
+    const headers = new Headers(hit.headers);
+    headers.set('x-poputka-edge', 'hit');
+    return new Response(hit.body, { status: hit.status, headers });
+  }
+
+  await next();
+  const res = c.res;
+  // no-store/private (архивные карточки, фильтры) — уважаем обработчик
+  if (!cacheableStatus(res.status, res.headers.get('Cache-Control'))) return;
+
+  const headers = new Headers(res.headers);
+  headers.set('Cache-Control', edgeCacheControl(url.pathname, res.status, ttl));
+  headers.set('x-poputka-edge', 'miss');
+  const body = await res.arrayBuffer();
+  // Hono при подмене c.res переносит заголовки старого ответа в новый (включая
+  // его Cache-Control) — поэтому итоговое значение ставим ещё раз через
+  // c.header уже после подмены, иначе победит вариант обработчика
+  c.res = new Response(body, { status: res.status, headers });
+  try {
+    c.header('Cache-Control', headers.get('Cache-Control')!);
+  } catch {
+    /* заголовки неизменяемые — оставляем как есть */
+  }
+  c.executionCtx.waitUntil(
+    cache.put(key, new Response(body, { status: res.status, headers }))
+      .catch((e) => console.error('edge cache put failed', e))
+  );
 });
 
 /* ---------------------------- Meta ---------------------------- */

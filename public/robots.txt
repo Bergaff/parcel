@@ -1,5 +1,8 @@
 User-agent: *
 Disallow: /api/
+Disallow: /admin
+Disallow: /og-debug/
+
 Allow: /
 
 Sitemap: https://pop-utka.app/sitemap.xml

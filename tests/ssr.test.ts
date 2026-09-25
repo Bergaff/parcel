@@ -391,6 +391,24 @@ describe('маршруты SPA и разделы', () => {
     expect(extractFaq(INDEX_HTML, 'admin')).toEqual([]);
   });
 
+  it('FAQ на главной, у бота и у формы — из реальных поисковых вопросов', () => {
+    // «как отправить посылку в другой город с попуткой», «почему объявление
+    // висит на модерации» — так сайт находят в поиске; из блока собирается
+    // FAQPage JSON-LD главной
+    const home = extractFaq(INDEX_HTML, 'list');
+    expect(home.length).toBeGreaterThanOrEqual(6);
+    expect(home.map(([q]) => q)).toContain('Как отправить посылку в другой город с попуткой?');
+    expect(home.map(([q]) => q)).toContain('Почему объявление висит на модерации?');
+    expect(home.map(([q]) => q)).toContain('Нужна ли регистрация?');
+
+    const bot = extractFaq(INDEX_HTML, 'bot');
+    expect(bot.length).toBeGreaterThanOrEqual(3);
+    expect(bot.map(([q]) => q)).toContain('Как отправить посылку через Telegram?');
+
+    const form = extractFaq(INDEX_HTML, 'new');
+    expect(form.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('origin — из SITE_URL, иначе из запроса', () => {
     expect(siteOrigin(fakeEnv(), 'http://127.0.0.1:8788/')).toBe('https://pop-utka.app');
     expect(siteOrigin(fakeEnv({ SITE_URL: undefined }), 'http://127.0.0.1:8788/how')).toBe('http://127.0.0.1:8788');

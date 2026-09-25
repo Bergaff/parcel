@@ -210,8 +210,9 @@ describe('страница города', () => {
   it('склоняет город и показывает направления со счётчиками', async () => {
     const html = await buildCityPage(env, 'varshava', ORIGIN);
     expect(html).not.toBeNull();
-    expect(html).toContain('<title>Передачи из Варшавы и в Варшаву');
-    expect(html).toContain('<h1 class="page-title">Передачи из Варшавы и в Варшаву</h1>');
+    // «Попутки Варшава» — как город ищут в поиске («попутка гродно», «попутки гродно»)
+    expect(html).toContain('<title>Попутки Варшава: передать посылку из Варшавы и в Варшаву');
+    expect(html).toContain('<h1 class="page-title">Попутки Варшава: передать посылку из Варшавы и в Варшаву</h1>');
     expect(html).toContain('Варшава в Польше');
     expect(html).toContain('Куда едут из Варшавы');
     expect(html).toContain('href="/r/varshava-minsk"');
@@ -274,6 +275,27 @@ describe('каталоги', () => {
     const keys = routes.map((r) => [r.from, r.to].sort().join('|'));
     expect(new Set(keys).size).toBe(keys.length);
     expect(routes.length).toBeLessThanOrEqual(9);
+  });
+
+  it('витрина выросла на направления из поисковых запросов', () => {
+    const slugs = new Set(SEO_ROUTES.map((r) => r.slug));
+    // «попутка гродно», «в гродно на попутке» — Гродно ищут чаще всего
+    expect(slugs.has('grodno-minsk')).toBe(true);
+    expect(slugs.has('grodno-vilnyus')).toBe(true);
+    // «возьму попутно посылки из праги в москву», «найти попутку в минск»
+    expect(slugs.has('praga-moskva')).toBe(true);
+    expect(slugs.has('moskva-praga')).toBe(true);
+    expect(slugs.has('moskva-minsk')).toBe(true);
+    // «попутка передачка груза москва забайкальска» (дальнобой)
+    expect(slugs.has('moskva-zabaykalsk')).toBe(true);
+  });
+
+  it('на витринных страницах есть перелинковка на популярные маршруты и города', async () => {
+    const html = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(html).toContain('Популярные маршруты:');
+    expect(html).toContain('href="/r/grodno-minsk"');
+    expect(html).toContain('href="/gorod/grodno"');
+    expect(html).toContain('href="/gorod/moskva"');
   });
 });
 

@@ -677,3 +677,44 @@ button { font-family: inherit; }
 .flow-legend { display: flex; gap: 14px; margin: 0 0 2px; font-size: 13px; color: var(--ink-soft); }
 .flow-leg-offer { color: #47571f; }
 .flow-leg-request { color: #a43a10; }
+
+/* ---------- плашка про cookies: трекеров нет, но честно сказать ---------- */
+.cookie-note {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  background: var(--card);
+  border: 1px solid var(--line-strong);
+  padding: 12px 18px;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  z-index: 70;
+  max-width: 760px;
+}
+.cookie-note button {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 18px;
+  cursor: pointer;
+  font-size: 13.5px;
+}
+.cookie-note button:hover { background: var(--accent); border-color: var(--accent); }
+
+/* ---------- пример объявления на странице формы ---------- */
+.ad-example {
+  border: 1px dashed var(--line-strong);
+  padding: 14px 18px 10px;
+  margin: 4px 0 26px;
+}
+.ad-example .doc-date { margin: 0 0 10px; }
+.example-line { margin: 0 0 10px; font-size: 14.5px; color: var(--ink-soft); }
+.example-line b { color: var(--ink); }
+.example-line:last-of-type { margin-bottom: 6px; }

@@ -195,7 +195,7 @@ function showView(name) {
     a.classList.toggle('on', a.getAttribute('href') === navOn);
   });
   const titles = {
-    list: 'попутка. доска попутных передач',
+    list: 'попутка. попутки и попутчики',
     how: 'попутка. как это работает',
     bot: 'попутка. телеграм-бот',
     terms: 'попутка. условия использования',
