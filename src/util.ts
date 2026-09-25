@@ -414,3 +414,18 @@ export function admins(env: Env): string[] {
     .map((s) => s.trim())
     .filter(Boolean);
 }
+
+/**
+ * Есть ли в тексте хоть какой-то контакт: телефон (9+ цифр, возможны
+ * пробелы/дефисы/скобки) или юзернейм (@name / t.me/name). Нужно, чтобы не
+ * отклонять заявки водителей, которые оставили телефон прямо в описании.
+ */
+export function hasContactHint(text: string | null | undefined): boolean {
+  const s = String(text ?? '');
+  if (!s) return false;
+  const digits = s.replace(/\D/g, '');
+  // группа цифр от 9 — почти наверняка телефон (даже если текст — «наберите 48 601 234 567»)
+  if (/\d/.test(s) && digits.length >= 9) return true;
+  if (/(?:t\.me\/|@)[a-zA-Z0-9_]{4,32}/i.test(s)) return true;
+  return false;
+}

@@ -204,11 +204,11 @@ function makeFetch(calls: string[]) {
             updatedAt: '2026-09-22 10:00:00',
             flow: {
               days: [
-                { day: '2026-09-21', arrived: 5, approved: 3, rejected: 1 },
-                { day: '2026-09-22', arrived: 2, approved: 2, rejected: 0 },
+                { day: '2026-09-21', arrived: 5, approved: 3, rejected: 1, offers: 3, requests: 2 },
+                { day: '2026-09-22', arrived: 2, approved: 2, rejected: 0, offers: 1, requests: 1 },
               ],
-              weeks: [{ key: '2026-09-21', label: '2026-09-21 · неделя', arrived: 7, approved: 5, rejected: 1 }],
-              months: [{ key: '2026-09', label: '2026-09', arrived: 7, approved: 5, rejected: 1 }],
+              weeks: [{ key: '2026-09-21', label: '2026-09-21 · неделя', arrived: 7, approved: 5, rejected: 1, offers: 4, requests: 3 }],
+              months: [{ key: '2026-09', label: '2026-09', arrived: 7, approved: 5, rejected: 1, offers: 4, requests: 3 }],
             },
             topViewed: [
               { id: ID, fromCity: 'Варшава', toCity: 'Минск', views: 42, status: 'published', departureDate: '2030-05-20', createdAt: '2026-09-10T08:00:00.000Z', path: `/item/${ID}` },
@@ -694,7 +694,7 @@ describe('админка', () => {
     form.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
     await settle(80);
     expect(byId('form-error').hidden).toBe(false);
-    expect(text('form-error')).toContain('Водителям нужен хотя бы один контакт');
+    expect(text('form-error')).toContain('В заявке водителя нужен контакт');
     // на сервер ничего не ушло
     expect(calls.filter((c) => c === 'POST /api/listings').length).toBe(0);
   });
@@ -705,9 +705,14 @@ describe('админка', () => {
     // поток по дням — таблица на месте
     const flow = win.document.querySelector('.stats-flow') as HTMLElement;
     expect(flow, 'блок потока').not.toBeNull();
-    expect(flow.textContent).toContain('пришло 7, одобрено 5, отклонено 1');
+    expect(flow.textContent).toContain('пришло 7 (везут 4 · передать 3), одобрено 5, отклонено 1');
     expect(flow.querySelectorAll('tbody tr')).toHaveLength(2);
     expect(flow.textContent).toContain('21 сен');
+    // график: столбики по дням, легенда «везут / нужно передать»
+    const chart = flow.querySelector('svg.flow-chart') as SVGElement | null;
+    expect(chart, 'SVG-график').not.toBeNull();
+    expect(chart!.querySelectorAll('rect').length).toBeGreaterThanOrEqual(4); // 3+2 столбика
+    expect(flow.querySelector('.flow-legend')!.textContent).toContain('нужно передать');
 
     // переключение на месяцы
     (Array.from(flow.querySelectorAll('button')).find((b) => b.textContent === 'по месяцам') as HTMLElement).click();

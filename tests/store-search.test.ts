@@ -239,8 +239,10 @@ describe('заявки «ищу попутчика» без контакта —
     expect(isHiddenRequestInput(mk({ type: 'offer' }) as never)).toBe(false);
     // с контактом — обычная модерация
     expect(isHiddenRequestInput(mk({ telegram: '@x' }) as never)).toBe(false);
-    // от админа (форма с ключом) и из бота/чатов — как раньше
-    expect(isHiddenRequestInput(mk({ fromPerson: false }) as never)).toBe(false);
+    // от админа из формы (с ключом) — тоже скрытая: «ищу передачу» без
+    // контакта не должно висеть на рассмотрении, кто бы ни подал
+    expect(isHiddenRequestInput(mk({ fromPerson: false }) as never)).toBe(true);
+    // из бота/чатов — как раньше (там модерация обычная)
     expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(false);
   });
 

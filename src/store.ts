@@ -674,11 +674,12 @@ export function ensureHiddenColumn(env: Env): Promise<void> {
  * Не касается админских заявок и заявок из Telegram/чатов — те идут как обычно.
  */
 export function isHiddenRequestInput(input: ListingInput): boolean {
+  // от кого подана — не важно: заявка «ищу передачу» без контакта не должна
+  // висеть на рассмотрении, кто бы её ни отправил из формы на сайте
   return input.type === 'request'
     && !input.telegram
     && !input.phone
-    && input.source === 'site'
-    && input.fromPerson === true;
+    && input.source === 'site';
 }
 
 /**
@@ -1210,9 +1211,22 @@ export async function ensureStatsTable(env: Env): Promise<void> {
        arrived   INTEGER NOT NULL DEFAULT 0, -- пришло заявок
        approved  INTEGER NOT NULL DEFAULT 0, -- из них когда-либо одобрено
        rejected  INTEGER NOT NULL DEFAULT 0, -- из них сейчас отклонено
+       offers    INTEGER NOT NULL DEFAULT 0, -- из пришедших — «водитель везёт»
+       requests  INTEGER NOT NULL DEFAULT 0, -- из пришедших — «нужно передать»
        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      )`
   ).run();
+  // таблица могла быть создана до разбивки по типам — дорастим колонки
+  const info = await env.DB.prepare(`PRAGMA table_info(stats_daily)`).all();
+  const names = new Set(
+    ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+  );
+  if (!names.has('offers')) {
+    await env.DB.prepare(`ALTER TABLE stats_daily ADD COLUMN offers INTEGER NOT NULL DEFAULT 0`).run();
+  }
+  if (!names.has('requests')) {
+    await env.DB.prepare(`ALTER TABLE stats_daily ADD COLUMN requests INTEGER NOT NULL DEFAULT 0`).run();
+  }
 }
 
 let statsSummaryReady: Promise<void> | null = null;
@@ -1254,6 +1268,8 @@ export interface DailyCount {
   arrived: number;  // пришло заявок
   approved: number; // из них когда-либо одобрено (published_at не пуст)
   rejected: number; // из них сейчас отклонено
+  offers: number;   // из пришедших — «водитель везёт»
+  requests: number; // из пришедших — «нужно передать»
 }
 
 /**
@@ -1266,7 +1282,9 @@ export async function listModerationCounts(env: Env, sinceDay: string): Promise<
     `SELECT date(created_at, '+3 hours') AS day,
             COUNT(*) AS arrived,
             COALESCE(SUM(CASE WHEN published_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS approved,
-            COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) AS rejected
+            COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) AS rejected,
+            COALESCE(SUM(CASE WHEN type = 'offer' THEN 1 ELSE 0 END), 0) AS offers,
+            COALESCE(SUM(CASE WHEN type = 'request' THEN 1 ELSE 0 END), 0) AS requests
        FROM listings
       WHERE date(created_at, '+3 hours') >= ?
       GROUP BY day`
@@ -1276,6 +1294,8 @@ export async function listModerationCounts(env: Env, sinceDay: string): Promise<
     arrived: Number(r.arrived ?? 0),
     approved: Number(r.approved ?? 0),
     rejected: Number(r.rejected ?? 0),
+    offers: Number(r.offers ?? 0),
+    requests: Number(r.requests ?? 0),
   }));
 }
 
@@ -1295,28 +1315,32 @@ export async function upsertDailyCounts(env: Env, rows: DailyCount[]): Promise<v
   if (rows.length === 0) return;
   await ensureStatsTable(env);
   const stmt = env.DB.prepare(
-    `INSERT INTO stats_daily (day, arrived, approved, rejected, updated_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
+    `INSERT INTO stats_daily (day, arrived, approved, rejected, offers, requests, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(day) DO UPDATE SET
        arrived = MAX(excluded.arrived, stats_daily.arrived),
        approved = MAX(excluded.approved, stats_daily.approved),
        rejected = MAX(excluded.rejected, stats_daily.rejected),
+       offers = MAX(excluded.offers, stats_daily.offers),
+       requests = MAX(excluded.requests, stats_daily.requests),
        updated_at = datetime('now')`
   );
-  await env.DB.batch(rows.map((r) => stmt.bind(r.day, r.arrived, r.approved, r.rejected)));
+  await env.DB.batch(rows.map((r) => stmt.bind(r.day, r.arrived, r.approved, r.rejected, r.offers ?? 0, r.requests ?? 0)));
 }
 
 /** Дневные счётчики из снимков — новые сверху. */
 export async function listDailyStats(env: Env, limit = 90): Promise<DailyCount[]> {
   await ensureStatsTable(env);
   const res = await env.DB.prepare(
-    'SELECT day, arrived, approved, rejected FROM stats_daily ORDER BY day DESC LIMIT ?'
+    'SELECT day, arrived, approved, rejected, offers, requests FROM stats_daily ORDER BY day DESC LIMIT ?'
   ).bind(Math.min(400, Math.max(1, limit))).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
     day: String(r.day),
     arrived: Number(r.arrived ?? 0),
     approved: Number(r.approved ?? 0),
     rejected: Number(r.rejected ?? 0),
+    offers: Number(r.offers ?? 0),
+    requests: Number(r.requests ?? 0),
   }));
 }
 

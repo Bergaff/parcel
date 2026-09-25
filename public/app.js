@@ -733,11 +733,18 @@ function bindForm() {
       phone: fd.get('phone') || null,
     };
 
-    // Водителю контакт обязателен — иначе пассажирам некуда писать. А «нужно
-    // передать» без контакта разрешаем: заявка публикуется автоматически,
-    // но на доске не показывается — по ней подбирают попутчика владельцы сайта.
-    if (payload.type === 'offer' && !payload.telegram && !payload.phone) {
-      err.textContent = 'Водителям нужен хотя бы один контакт: telegram или телефон.';
+    // Водителю контакт обязателен — иначе пассажирам некуда писать. Контакт
+    // прямо в описании (телефон или @юзернейм) тоже подходит — модератор
+    // перенесёт его в поле. «Нужно передать» без контакта разрешаем: заявка
+    // публикуется автоматически, но на доске не показывается.
+    const hasContactInText = (t) => {
+      if (!t) return false;
+      if (/\d/.test(t) && t.replace(/\D/g, '').length >= 9) return true;
+      return /(?:t\.me\/|@)[a-zA-Z0-9_]{4,32}/i.test(t);
+    };
+    if (payload.type === 'offer' && !payload.telegram && !payload.phone
+        && !hasContactInText(payload.description)) {
+      err.textContent = 'В заявке водителя нужен контакт: telegram или телефон — в поле или прямо в описании.';
       err.hidden = false;
       return;
     }
@@ -1731,6 +1738,44 @@ function flowLabel(row, unit) {
   return fmtDate(row.day);
 }
 
+/* График потока: столбики «везут» (оливковый) поверх «нужно передать»
+   (терракотовый). SVG без библиотек — лёгкий и печатный. */
+function flowChart(rows, unit) {
+  const data = rows.slice(0, 40);
+  if (data.length === 0) return null;
+  const W = 720, H = 150, pad = 4, labelH = 18, chartH = H - labelH;
+  const max = Math.max(1, ...data.map((r) => (r.offers || 0) + (r.requests || 0)));
+  const step = W / data.length;
+  const bar = Math.max(3, Math.min(28, step - 3));
+  let bars = '';
+  data.forEach((r, i) => {
+    const total = (r.offers || 0) + (r.requests || 0) || 1;
+    const hTotal = (total / max) * chartH;
+    const hReq = ((r.requests || 0) / max) * chartH;
+    const hOff = ((r.offers || 0) / max) * chartH;
+    const x = i * step + (step - bar) / 2;
+    const yReq = chartH - hTotal;
+    const yOff = yReq + hReq;
+    const label = `${flowLabel(r, unit)}: ${r.offers || 0} везут · ${r.requests || 0} передать`;
+    if (r.requests > 0) bars += `<rect x="${x.toFixed(1)}" y="${yReq.toFixed(1)}" width="${bar.toFixed(1)}" height="${Math.max(hReq, r.requests > 0 ? 1 : 0).toFixed(1)}" fill="#a43a10"><title>${label}</title></rect>`;
+    if (r.offers > 0) bars += `<rect x="${x.toFixed(1)}" y="${yOff.toFixed(1)}" width="${bar.toFixed(1)}" height="${Math.max(hOff, r.offers > 0 ? 1 : 0).toFixed(1)}" fill="#47571f"><title>${label}</title></rect>`;
+  });
+  // подписи дат — не чаще 8 штук, чтобы не сливались
+  let labels = '';
+  const every = Math.max(1, Math.ceil(data.length / 8));
+  data.forEach((r, i) => {
+    if (i % every !== 0 && i !== data.length - 1) return;
+    const d = unit === 'month' ? r.key.slice(5) : String(r.key || r.day).slice(8);
+    labels += `<text x="${(i * step + step / 2).toFixed(1)}" y="${H - 4}" font-size="10" text-anchor="middle" fill="#6f675a">${d}</text>`;
+  });
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('class', 'flow-chart');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.innerHTML = bars + labels;
+  return svg;
+}
+
 function flowBox(flow) {
   if (!flow) return null;
   const unit = statsFlowUnit;
@@ -1739,7 +1784,9 @@ function flowBox(flow) {
     arrived: a.arrived + (r.arrived || 0),
     approved: a.approved + (r.approved || 0),
     rejected: a.rejected + (r.rejected || 0),
-  }), { arrived: 0, approved: 0, rejected: 0 });
+    offers: a.offers + (r.offers || 0),
+    requests: a.requests + (r.requests || 0),
+  }), { arrived: 0, approved: 0, rejected: 0, offers: 0, requests: 0 });
   const seg = (value, label) => el('button', {
     class: `btn btn-sm seg-btn${unit === value ? ' btn-ink' : ' btn-line'}`,
     type: 'button',
@@ -1762,13 +1809,18 @@ function flowBox(flow) {
     el('h3', { class: 'match-history-head', text: 'Поток заявок: пришло, одобрено, отклонено' }),
     el('p', {
       class: 'admin-contact',
-      text: `Всего за период: пришло ${totals.arrived}, одобрено ${totals.approved}, отклонено ${totals.rejected}. Считается по дате подачи заявки; историю cron фиксирует снимком по дням.`,
+      text: `Всего за период: пришло ${totals.arrived} (везут ${totals.offers} · передать ${totals.requests}), одобрено ${totals.approved}, отклонено ${totals.rejected}. Считается по дате подачи заявки; историю cron фиксирует снимком по дням.`,
     }),
+    el('p', { class: 'flow-legend' }, [
+      el('span', { class: 'flow-leg flow-leg-offer', text: '■ везут' }),
+      el('span', { class: 'flow-leg flow-leg-request', text: '■ нужно передать' }),
+    ]),
     el('div', { class: 'admin-card-actions' }, [
       seg('day', 'по дням'), seg('week', 'по неделям'), seg('month', 'по месяцам'),
     ]),
+    rows.length ? flowChart(rows, unit) : null,
     rows.length ? table : el('p', { class: 'empty-note', text: 'Данных пока нет — счётчики начнут накапливаться с первым прогоном (кнопка «пересчитать» или ночной cron).' }),
-  ]);
+  ].filter(Boolean));
 }
 
 function viewedBox(topViewed) {

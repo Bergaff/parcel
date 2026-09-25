@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
-import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
+import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport } from './telegram';
@@ -197,6 +197,16 @@ app.post('/api/listings', async (c) => {
   const isAdminSubmit = !!c.env.ADMIN_API_TOKEN && auth === `Bearer ${c.env.ADMIN_API_TOKEN}`;
   input.byAdmin = isAdminSubmit;
   input.fromPerson = !isAdminSubmit;
+  // Водитель («могу передать») без контакта — отбойник: заявка бесполезна,
+  // писать водителю некуда. Контакт в описании (телефон или @юзернейм) считаем
+  // за контакт — модератор перенесёт его в поле. Отклоняем сразу, до создания.
+  if (input.type === 'offer' && !input.telegram && !input.phone && !hasContactHint(input.description)) {
+    return c.json(
+      { error: 'В заявке водителя нужен контакт: telegram или телефон — в поле контакта или прямо в описании. Иначе пассажирам не с кем связаться.' },
+      400
+    );
+  }
+
   // «Ищу попутчика» с сайта без контакта: публикуем сразу, но прячем с доски —
   // человек уже никогда не вернётся за статусом, а владелец напишет ему сам.
   // На доске такие не показываются, только в подборе (см. isHiddenRequestInput).

@@ -12,7 +12,7 @@
 import type { Env } from './types';
 import {
   ensureStatsTable, listMonthRows, listMonthsPresent, loadStatsSnapshots, saveStatsSnapshot,
-  saveMonthSummary, type MonthRow, listModerationCounts, listDailyDays, upsertDailyCounts, listDailyStats} from './store';
+  saveMonthSummary, type MonthRow, listModerationCounts, listDailyStats, upsertDailyCounts} from './store';
 import { aiMonthSummary } from './ai';
 import { CURRENCY_LABEL, CURRENCY_ORDER, fmtAmount, parsePrice, type Currency } from './price';
 import { fmtPeriod, fmtPeriodGen, plural, prevPeriod } from './format';
@@ -138,6 +138,8 @@ export interface DailyFlow {
   arrived: number;
   approved: number;
   rejected: number;
+  offers: number;   // «водитель везёт»
+  requests: number; // «нужно передать»
 }
 
 /**
@@ -152,11 +154,19 @@ export async function refreshDailyStats(env: Env, now = new Date()): Promise<voi
   const today = msk.toISOString().slice(0, 10);
   const yesterday = new Date(msk.getTime() - 86400_000).toISOString().slice(0, 10);
   const since = new Date(msk.getTime() - 89 * 86400_000).toISOString().slice(0, 10);
-  const [rows, known] = await Promise.all([
+  const [rows, stored] = await Promise.all([
     listModerationCounts(env, since),
-    listDailyDays(env),
+    listDailyStats(env, 400),
   ]);
-  const toUpsert = rows.filter((r) => r.day === today || r.day === yesterday || !known.has(r.day));
+  const byDay = new Map(stored.map((d) => [d.day, d]));
+  const toUpsert = rows.filter((r) => {
+    const prev = byDay.get(r.day);
+    if (!prev) return true; // нового дня ещё нет — пишем
+    if (r.day === today || r.day === yesterday) return true; // цифры ещё растут
+    // старый снимок без разбивки по типам (arrived есть, offers/requests нули) —
+    // догоняем, пока живые строки есть
+    return prev.arrived > 0 && prev.offers + prev.requests === 0 && r.offers + r.requests > 0;
+  });
   await upsertDailyCounts(env, toUpsert);
 }
 
@@ -169,7 +179,7 @@ function weekStart(day: string): string {
 
 /** Дни → недели или месяцы: счётчики суммируются, порядок — новые сверху. */
 export function aggregateDaily(
-  days: Array<{ day: string; arrived: number; approved: number; rejected: number }>,
+  days: Array<{ day: string; arrived: number; approved: number; rejected: number; offers?: number; requests?: number }>,
   unit: 'week' | 'month'
 ): DailyFlow[] {
   const byKey = new Map<string, DailyFlow>();
@@ -177,10 +187,12 @@ export function aggregateDaily(
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d.day)) continue;
     const key = unit === 'month' ? d.day.slice(0, 7) : weekStart(d.day);
     const label = unit === 'month' ? key : `${key} · неделя`;
-    const acc = byKey.get(key) ?? { key, label, arrived: 0, approved: 0, rejected: 0 };
+    const acc = byKey.get(key) ?? { key, label, arrived: 0, approved: 0, rejected: 0, offers: 0, requests: 0 };
     acc.arrived += d.arrived;
     acc.approved += d.approved;
     acc.rejected += d.rejected;
+    acc.offers += d.offers ?? 0;
+    acc.requests += d.requests ?? 0;
     byKey.set(key, acc);
   }
   return [...byKey.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
