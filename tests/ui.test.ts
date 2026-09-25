@@ -190,6 +190,32 @@ function makeFetch(calls: string[]) {
         server.replacedWith = { id: decodeURIComponent(path.split('/').slice(-2)[0] ?? ''), deleteId: deleteId ?? '' };
         return { body: { ok: true, deleted: true, item: listing({ status: 'published' }) } };
       }
+      if (path === '/api/admin/stats') {
+        return {
+          body: {
+            months: [{
+              month: '2026-09', offers: 1, requests: 1, total: 2, cities: 2, directions: 1,
+              topDirections: [{ pair: 'Варшава → Минск', from: 'Варшава', to: 'Минск', count: 2 }],
+              fromChats: 1, fromSite: 1, priced: 1, free: 1, prices: [],
+              updatedAt: '2026-09-22 10:00:00', post: 'текст поста', path: '/itogi/2026-09', summary: null,
+            }],
+            currentMonth: '2026-09',
+            post: 'текст поста',
+            updatedAt: '2026-09-22 10:00:00',
+            flow: {
+              days: [
+                { day: '2026-09-21', arrived: 5, approved: 3, rejected: 1 },
+                { day: '2026-09-22', arrived: 2, approved: 2, rejected: 0 },
+              ],
+              weeks: [{ key: '2026-09-21', label: '2026-09-21 · неделя', arrived: 7, approved: 5, rejected: 1 }],
+              months: [{ key: '2026-09', label: '2026-09', arrived: 7, approved: 5, rejected: 1 }],
+            },
+            topViewed: [
+              { id: ID, fromCity: 'Варшава', toCity: 'Минск', views: 42, status: 'published', departureDate: '2030-05-20', createdAt: '2026-09-10T08:00:00.000Z', path: `/item/${ID}` },
+            ],
+          },
+        };
+      }
       const mKey = (contact: string) => {
         const digits = String(contact).replace(/\D/g, '');
         return digits.length >= 9 ? `ph:${digits.slice(-9)}` : `tg:${String(contact).replace(/^@/, '').toLowerCase()}`;
@@ -671,6 +697,38 @@ describe('админка', () => {
     expect(text('form-error')).toContain('Водителям нужен хотя бы один контакт');
     // на сервер ничего не ушло
     expect(calls.filter((c) => c === 'POST /api/listings').length).toBe(0);
+  });
+
+  it('вкладка «итоги»: поток заявок по дням/неделям/месяцам и самые просматриваемые', async () => {
+    byId('admin-tab-stats').click();
+    await settle(120);
+    // поток по дням — таблица на месте
+    const flow = win.document.querySelector('.stats-flow') as HTMLElement;
+    expect(flow, 'блок потока').not.toBeNull();
+    expect(flow.textContent).toContain('пришло 7, одобрено 5, отклонено 1');
+    expect(flow.querySelectorAll('tbody tr')).toHaveLength(2);
+    expect(flow.textContent).toContain('21 сен');
+
+    // переключение на месяцы
+    (Array.from(flow.querySelectorAll('button')).find((b) => b.textContent === 'по месяцам') as HTMLElement).click();
+    await settle(100);
+    const flow2 = win.document.querySelector('.stats-flow') as HTMLElement;
+    expect(flow2.querySelectorAll('tbody tr')).toHaveLength(1);
+    expect(flow2.textContent).toContain('сентябрь 2026');
+
+    // самые просматриваемые — ссылка на карточку
+    const viewed = win.document.querySelector('.stats-viewed') as HTMLElement;
+    expect(viewed, 'блок просмотров').not.toBeNull();
+    const link = viewed.querySelector('tbody a') as HTMLAnchorElement;
+    expect(link.getAttribute('href')).toBe(`/item/${ID}`);
+    expect(viewed.textContent).toContain('42');
+
+    // текст поста тоже на вкладке — ничего не потеряли
+    expect(win.document.querySelector('.stats-post')).not.toBeNull();
+
+    // возвращаем вкладку «заявки»
+    byId('admin-tab-pending').click();
+    await settle(100);
   });
 
   it('у заявки с дублем есть «заменить старую»: старая удаляется, новая публикуется', async () => {

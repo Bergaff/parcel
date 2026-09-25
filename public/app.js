@@ -785,6 +785,7 @@ function bindForm() {
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
 let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'stats'
 let statsMonth = null; // выбранный месяц на вкладке «итоги»
+let statsFlowUnit = 'day'; // 'day' | 'week' | 'month' — поток заявок в итогах
 let adminEditId = null; // id заявки, открытой на редактирование
 let adminItems = [];   // список открытой вкладки — правим на месте, без перезагрузки
 let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
@@ -1722,6 +1723,75 @@ async function adminDelete(id) {
 
 /* ---------- итоги месяца: текст для поста и цифры ---------- */
 
+/* ---------- поток заявок и самые просматриваемые (вкладка «итоги») ---------- */
+
+function flowLabel(row, unit) {
+  if (unit === 'month') return fmtPeriodRu(row.key);
+  if (unit === 'week') return `неделя с ${fmtDate(row.key)}`;
+  return fmtDate(row.day);
+}
+
+function flowBox(flow) {
+  if (!flow) return null;
+  const unit = statsFlowUnit;
+  const rows = unit === 'day' ? (flow.days || []) : (unit === 'week' ? (flow.weeks || []) : (flow.months || []));
+  const totals = rows.reduce((a, r) => ({
+    arrived: a.arrived + (r.arrived || 0),
+    approved: a.approved + (r.approved || 0),
+    rejected: a.rejected + (r.rejected || 0),
+  }), { arrived: 0, approved: 0, rejected: 0 });
+  const seg = (value, label) => el('button', {
+    class: `btn btn-sm seg-btn${unit === value ? ' btn-ink' : ' btn-line'}`,
+    type: 'button',
+    text: label,
+    onclick: () => { statsFlowUnit = value; renderAdminStats(); },
+  });
+  const table = el('table', { class: 'stats-table stats-table-wide' }, [
+    el('thead', {}, [el('tr', {}, [
+      el('th', { text: unit === 'day' ? 'день' : unit === 'week' ? 'неделя' : 'месяц' }),
+      el('th', { text: 'пришло' }), el('th', { text: 'одобрено' }), el('th', { text: 'отклонено' }),
+    ])]),
+    el('tbody', {}, rows.slice(0, 40).map((r) => el('tr', {}, [
+      el('th', { scope: 'row', text: flowLabel(r, unit) }),
+      el('td', { class: 'mono', text: String(r.arrived ?? 0) }),
+      el('td', { class: 'mono', text: String(r.approved ?? 0) }),
+      el('td', { class: 'mono', text: String(r.rejected ?? 0) }),
+    ]))),
+  ]);
+  return el('section', { class: 'admin-card stats-flow' }, [
+    el('h3', { class: 'match-history-head', text: 'Поток заявок: пришло, одобрено, отклонено' }),
+    el('p', {
+      class: 'admin-contact',
+      text: `Всего за период: пришло ${totals.arrived}, одобрено ${totals.approved}, отклонено ${totals.rejected}. Считается по дате подачи заявки; историю cron фиксирует снимком по дням.`,
+    }),
+    el('div', { class: 'admin-card-actions' }, [
+      seg('day', 'по дням'), seg('week', 'по неделям'), seg('month', 'по месяцам'),
+    ]),
+    rows.length ? table : el('p', { class: 'empty-note', text: 'Данных пока нет — счётчики начнут накапливаться с первым прогоном (кнопка «пересчитать» или ночной cron).' }),
+  ]);
+}
+
+function viewedBox(topViewed) {
+  const items = Array.isArray(topViewed) ? topViewed : [];
+  if (!items.length) return null;
+  return el('section', { class: 'admin-card stats-viewed' }, [
+    el('h3', { class: 'match-history-head', text: 'Самые просматриваемые' }),
+    el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'заявка' }), el('th', { text: 'просмотров' }),
+        el('th', { text: 'выезд' }), el('th', { text: 'статус' }),
+      ])]),
+      el('tbody', {}, items.map((l) => el('tr', {}, [
+        el('th', { scope: 'row' }, [el('a', { href: l.path, target: '_blank', rel: 'noopener', text: `${l.fromCity} → ${l.toCity}` })]),
+        el('td', { class: 'mono', text: String(l.views ?? 0) }),
+        el('td', { class: 'mono', text: l.departureDate ? fmtDate(l.departureDate) : '—' }),
+        el('td', { text: l.status === 'expired' ? 'архив' : 'на доске' }),
+      ]))),
+    ]),
+    el('p', { class: 'form-note', text: 'Живые и архивные заявки; удалённые из подсчёта выпадают.' }),
+  ]);
+}
+
 async function renderAdminStats() {
   const listEl = $('#admin-list');
   $('#admin-count').textContent = 'Итоги месяца: сколько объявлений прошло через доску и по чём договаривались.';
@@ -1739,10 +1809,17 @@ async function renderAdminStats() {
     return;
   }
   const months = data.months || [];
+  // поток заявок и просмотры показываем всегда — даже если опубликованных
+  // объявлений ещё нет (например, всё отклонили)
+  const flow = flowBox(data.flow);
+  const viewed = viewedBox(data.topViewed);
   if (months.length === 0) {
-    listEl.replaceChildren(el('p', {
+    listEl.replaceChildren();
+    if (flow) listEl.append(flow);
+    if (viewed) listEl.append(viewed);
+    listEl.append(el('p', {
       class: 'empty-note',
-      text: 'Пока считать нечего: на доске не было опубликованных объявлений. Как только появится первое, пересчитайте итоги здесь или дождитесь ночного cron.',
+      text: 'Итогов месяцев пока нет: на доске не было опубликованных объявлений. Как только появится первое, пересчитайте итоги здесь или дождитесь ночного cron.',
     }));
     return;
   }
@@ -1814,6 +1891,9 @@ async function renderAdminStats() {
       }
     },
   }, 'написать мнение');
+
+  if (flow) listEl.append(flow);
+  if (viewed) listEl.append(viewed);
 
   listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn, pageLink, summaryBtn]));
 

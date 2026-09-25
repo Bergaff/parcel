@@ -12,8 +12,7 @@
 import type { Env } from './types';
 import {
   ensureStatsTable, listMonthRows, listMonthsPresent, loadStatsSnapshots, saveStatsSnapshot,
-  saveMonthSummary, type MonthRow,
-} from './store';
+  saveMonthSummary, type MonthRow, listModerationCounts, listDailyDays, upsertDailyCounts, listDailyStats} from './store';
 import { aiMonthSummary } from './ai';
 import { CURRENCY_LABEL, CURRENCY_ORDER, fmtAmount, parsePrice, type Currency } from './price';
 import { fmtPeriod, fmtPeriodGen, plural, prevPeriod } from './format';
@@ -131,6 +130,62 @@ export async function computeMonthStat(env: Env, month: string, now = new Date()
   return aggregateMonth(month, rows, now);
 }
 
+/* ------------------ Поток заявок: дни, недели, месяцы ------------------- */
+
+export interface DailyFlow {
+  key: string;      // день / понедельник недели / месяц — для группировки
+  label: string;    // человекочитаемая метка
+  arrived: number;
+  approved: number;
+  rejected: number;
+}
+
+/**
+ * Обновить дневные счётчики потока заявок. Пересчитываем из живых строк:
+ *  - пропущенные дни (cron простаивал, первый запуск — бэкфилл за 90 дней);
+ *  - вчера и сегодня (цифры ещё могут расти: заявки приходят, модератор
+ *    решает). Историю не трогаем — удалённые заявки не должны «худить»
+ *    уже зафиксированные дни.
+ */
+export async function refreshDailyStats(env: Env, now = new Date()): Promise<void> {
+  const msk = new Date(now.getTime() + 3 * 3600 * 1000);
+  const today = msk.toISOString().slice(0, 10);
+  const yesterday = new Date(msk.getTime() - 86400_000).toISOString().slice(0, 10);
+  const since = new Date(msk.getTime() - 89 * 86400_000).toISOString().slice(0, 10);
+  const [rows, known] = await Promise.all([
+    listModerationCounts(env, since),
+    listDailyDays(env),
+  ]);
+  const toUpsert = rows.filter((r) => r.day === today || r.day === yesterday || !known.has(r.day));
+  await upsertDailyCounts(env, toUpsert);
+}
+
+/** Понедельник недели, к которой относится день (YYYY-MM-DD → YYYY-MM-DD). */
+function weekStart(day: string): string {
+  const d = new Date(`${day}T00:00:00Z`);
+  const shift = (d.getUTCDay() + 6) % 7; // Mon=0
+  return new Date(d.getTime() - shift * 86400_000).toISOString().slice(0, 10);
+}
+
+/** Дни → недели или месяцы: счётчики суммируются, порядок — новые сверху. */
+export function aggregateDaily(
+  days: Array<{ day: string; arrived: number; approved: number; rejected: number }>,
+  unit: 'week' | 'month'
+): DailyFlow[] {
+  const byKey = new Map<string, DailyFlow>();
+  for (const d of days) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d.day)) continue;
+    const key = unit === 'month' ? d.day.slice(0, 7) : weekStart(d.day);
+    const label = unit === 'month' ? key : `${key} · неделя`;
+    const acc = byKey.get(key) ?? { key, label, arrived: 0, approved: 0, rejected: 0 };
+    acc.arrived += d.arrived;
+    acc.approved += d.approved;
+    acc.rejected += d.rejected;
+    byKey.set(key, acc);
+  }
+  return [...byKey.values()].sort((a, b) => (a.key < b.key ? 1 : -1));
+}
+
 export interface RefreshResult {
   /** месяцы, которые пересчитали и сохранили */
   saved: string[];
@@ -174,6 +229,9 @@ export function parseMonthPayload(payload: string, fallbackMonth: string): Month
 export async function refreshStats(env: Env, opts: { force?: boolean; now?: Date } = {}): Promise<RefreshResult> {
   const now = opts.now ?? new Date();
   await ensureStatsTable(env);
+  // дневные счётчики потока (пришло/одобрено/отклонено) — та же дисциплина
+  // снимков, что и у месяцев: история фиксируется, вчера-сегодня пересчитываются
+  await refreshDailyStats(env, now).catch((e) => console.error('refreshDailyStats failed', e));
   const [present, stored] = await Promise.all([listMonthsPresent(env), loadStatsSnapshots(env)]);
   const storedByMonth = new Map(stored.map((s) => [s.month, s]));
   const currentMonth = now.toISOString().slice(0, 7);

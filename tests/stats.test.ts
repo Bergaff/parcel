@@ -14,6 +14,10 @@ const db = vi.hoisted(() => ({
   snapshots: new Map<string, { total: number; payload: string; summary?: string | null }>(),
   saves: [] as string[],
   summarySaves: [] as string[],
+  // поток заявок по дням
+  liveDays: [] as Array<{ day: string; arrived: number; approved: number; rejected: number }>,
+  knownDays: new Set<string>(),
+  dailyUpserts: [] as Array<{ day: string; arrived: number; approved: number; rejected: number }>,
 }));
 
 vi.mock('../src/store', () => ({
@@ -31,6 +35,17 @@ vi.mock('../src/store', () => ({
     db.snapshots.set(month, { total, payload: JSON.stringify(payload), summary: summary ?? db.snapshots.get(month)?.summary ?? null });
     db.saves.push(month);
   },
+  listModerationCounts: async (_env: unknown, sinceDay: string) =>
+    db.liveDays.filter((r) => r.day >= sinceDay),
+  listDailyDays: async () => new Set(db.knownDays),
+  upsertDailyCounts: async (_env: unknown, rows: Array<{ day: string; arrived: number; approved: number; rejected: number }>) => {
+    db.dailyUpserts.push(...rows);
+    for (const r of rows) db.knownDays.add(r.day);
+  },
+  listDailyStats: async () => [...db.knownDays].sort().reverse().map((day) =>
+    db.dailyUpserts.filter((r) => r.day === day).reduce((a, r) => ({
+      day, arrived: Math.max(a.arrived, r.arrived), approved: Math.max(a.approved, r.approved), rejected: Math.max(a.rejected, r.rejected),
+    }), { day, arrived: 0, approved: 0, rejected: 0 })),
   saveMonthSummary: async (_env: unknown, month: string, summary: string) => {
     const s = db.snapshots.get(month);
     if (!s) return false;
@@ -40,7 +55,7 @@ vi.mock('../src/store', () => ({
   },
 }));
 
-import { aggregateMonth, computeMonthStat, fallbackSummary, listMonthStats, refreshStats, statsPostText, statsSummaryLine } from '../src/stats';
+import { aggregateDaily, aggregateMonth, computeMonthStat, fallbackSummary, listMonthStats, refreshDailyStats, refreshStats, statsPostText, statsSummaryLine } from '../src/stats';
 
 const env = {} as Env;
 
@@ -58,6 +73,9 @@ function row(over: Partial<MonthRow> = {}): MonthRow {
 
 beforeEach(() => {
   db.rows = new Map();
+  db.liveDays = [];
+  db.knownDays = new Set();
+  db.dailyUpserts = [];
   db.snapshots = new Map();
   db.saves = [];
 });
@@ -270,5 +288,64 @@ describe('аналитическая заметка месяца', () => {
     // заметка сохранилась и не перезаписывается при следующем прогоне
     const again = await refreshStats(env, { now: new Date('2026-09-21T12:00:00Z') });
     expect(again.summaries).toEqual([]);
+  });
+});
+
+describe('поток заявок по дням', () => {
+  const day = (d: string, over: Partial<{ arrived: number; approved: number; rejected: number }> = {}) =>
+    ({ day: d, arrived: 1, approved: 0, rejected: 0, ...over });
+
+  it('агрегация по месяцам суммирует счётчики', () => {
+    const weeks = aggregateDaily([
+      day('2026-08-31', { arrived: 2, approved: 1 }),
+      day('2026-09-01', { arrived: 3, approved: 2, rejected: 1 }),
+      day('2026-09-02', { arrived: 4, rejected: 2 }),
+    ], 'month');
+    expect(weeks).toHaveLength(2);
+    expect(weeks[0]).toMatchObject({ key: '2026-09', arrived: 7, approved: 2, rejected: 3 });
+    expect(weeks[1]).toMatchObject({ key: '2026-08', arrived: 2, approved: 1, rejected: 0 });
+  });
+
+  it('агрегация по неделям склеивает дни одного понедельника', () => {
+    // 2026-09-15 — вторник, неделя с 2026-09-14 (пн)
+    const weeks = aggregateDaily([
+      day('2026-09-14', { arrived: 5 }),
+      day('2026-09-15', { arrived: 2, approved: 2 }),
+      day('2026-09-20', { arrived: 1 }), // вс, та же неделя
+      day('2026-09-21', { arrived: 9 }), // пн следующей
+    ], 'week');
+    expect(weeks).toHaveLength(2);
+    expect(weeks[0]).toMatchObject({ key: '2026-09-21', arrived: 9 });
+    expect(weeks[1]).toMatchObject({ key: '2026-09-14', arrived: 8, approved: 2 });
+  });
+
+  it('refreshDailyStats: вчерашний и сегодняшний дни пересчитываются, история не трогается', async () => {
+    const now = new Date('2026-09-22T10:00:00Z'); // МСК 13:00 → 2026-09-22
+    db.liveDays = [
+      day('2026-09-22', { arrived: 3, approved: 2 }),
+      day('2026-09-21', { arrived: 5 }),
+      day('2026-09-20', { arrived: 7 }),
+    ];
+    db.knownDays = new Set(['2026-09-20']); // этот день уже зафиксирован
+    await refreshDailyStats({} as Env, now);
+    expect(db.dailyUpserts.map((r) => r.day).sort()).toEqual(['2026-09-21', '2026-09-22']);
+  });
+
+  it('refreshDailyStats: первый прогон — бэкфилл всех дней из живых строк', async () => {
+    const now = new Date('2026-09-22T10:00:00Z');
+    db.liveDays = [
+      day('2026-09-22', { arrived: 3 }),
+      day('2026-09-10', { arrived: 4 }),
+      day('2026-08-30', { arrived: 6 }),
+    ];
+    await refreshDailyStats({} as Env, now);
+    expect(db.dailyUpserts).toHaveLength(3); // известных дней нет — пишем все
+  });
+
+  it('refreshStats обновляет и дневные счётчики', async () => {
+    db.rows.set('2026-09', [row()]);
+    db.liveDays = [day('2026-09-22', { arrived: 2, approved: 1 })];
+    await refreshStats({} as Env, { now: new Date('2026-09-22T10:00:00Z') });
+    expect(db.dailyUpserts.map((r) => r.day)).toContain('2026-09-22');
   });
 });

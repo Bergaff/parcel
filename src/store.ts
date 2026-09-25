@@ -1204,6 +1204,15 @@ export async function ensureStatsTable(env: Env): Promise<void> {
      )`
   ).run();
   await ensureStatsSummaryColumn(env);
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS stats_daily (
+       day       TEXT PRIMARY KEY,          -- '2026-09-22' (МСК)
+       arrived   INTEGER NOT NULL DEFAULT 0, -- пришло заявок
+       approved  INTEGER NOT NULL DEFAULT 0, -- из них когда-либо одобрено
+       rejected  INTEGER NOT NULL DEFAULT 0, -- из них сейчас отклонено
+       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+     )`
+  ).run();
 }
 
 let statsSummaryReady: Promise<void> | null = null;
@@ -1236,6 +1245,89 @@ export interface MonthRow {
   toCity: string;
   price: string | null;
   source: string | null;
+}
+
+/* ------------------ Поток заявок по дням (админка) ------------------- */
+
+export interface DailyCount {
+  day: string;      // YYYY-MM-DD по МСК
+  arrived: number;  // пришло заявок
+  approved: number; // из них когда-либо одобрено (published_at не пуст)
+  rejected: number; // из них сейчас отклонено
+}
+
+/**
+ * Поток модерации из живых строк: считаем ПО ДАТЕ ПОДАЧИ заявки — «за день
+ * пришло 10, из них 7 одобрил, 2 отклонил». Считаем только по живым строкам,
+ * поэтому старые дни (заявки уже удалены) фиксируются снимком stats_daily.
+ */
+export async function listModerationCounts(env: Env, sinceDay: string): Promise<DailyCount[]> {
+  const res = await env.DB.prepare(
+    `SELECT date(created_at, '+3 hours') AS day,
+            COUNT(*) AS arrived,
+            COALESCE(SUM(CASE WHEN published_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS approved,
+            COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0) AS rejected
+       FROM listings
+      WHERE date(created_at, '+3 hours') >= ?
+      GROUP BY day`
+  ).bind(sinceDay).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    day: String(r.day),
+    arrived: Number(r.arrived ?? 0),
+    approved: Number(r.approved ?? 0),
+    rejected: Number(r.rejected ?? 0),
+  }));
+}
+
+/** Какие дни уже есть в stats_daily — чтобы не пересчитывать историю. */
+export async function listDailyDays(env: Env): Promise<Set<string>> {
+  await ensureStatsTable(env);
+  const res = await env.DB.prepare('SELECT day FROM stats_daily').all();
+  return new Set(((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.day)));
+}
+
+/**
+ * Записать дневные счётчики. Пересчитываем только пропущенные дни и
+ * вчера-сегодня; историю не трогаем — если заявка из старого дня удалилась,
+ * цифра «пришло за тот день» не должна худеть (как у месячных снимков).
+ */
+export async function upsertDailyCounts(env: Env, rows: DailyCount[]): Promise<void> {
+  if (rows.length === 0) return;
+  await ensureStatsTable(env);
+  const stmt = env.DB.prepare(
+    `INSERT INTO stats_daily (day, arrived, approved, rejected, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(day) DO UPDATE SET
+       arrived = MAX(excluded.arrived, stats_daily.arrived),
+       approved = MAX(excluded.approved, stats_daily.approved),
+       rejected = MAX(excluded.rejected, stats_daily.rejected),
+       updated_at = datetime('now')`
+  );
+  await env.DB.batch(rows.map((r) => stmt.bind(r.day, r.arrived, r.approved, r.rejected)));
+}
+
+/** Дневные счётчики из снимков — новые сверху. */
+export async function listDailyStats(env: Env, limit = 90): Promise<DailyCount[]> {
+  await ensureStatsTable(env);
+  const res = await env.DB.prepare(
+    'SELECT day, arrived, approved, rejected FROM stats_daily ORDER BY day DESC LIMIT ?'
+  ).bind(Math.min(400, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    day: String(r.day),
+    arrived: Number(r.arrived ?? 0),
+    approved: Number(r.approved ?? 0),
+    rejected: Number(r.rejected ?? 0),
+  }));
+}
+
+/** Самые просматриваемые заявки (живые и архив — не удалённые). */
+export async function listMostViewed(env: Env, limit = 10): Promise<Listing[]> {
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+      WHERE status IN ('published', 'expired') AND (hidden IS NULL OR hidden != 1)
+      ORDER BY views DESC LIMIT ?`
+  ).bind(Math.min(50, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
 /** Объявления месяца — сырьё для подсчёта (цена как написана человеком). */

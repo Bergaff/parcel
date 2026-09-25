@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -14,7 +14,7 @@ import {
 } from './seo-routes';
 import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, buildMonthStatsPage, siteOrigin, STATIC_PAGES } from './pages';
 import { currentPeriod } from './format';
-import { listMonthStats, refreshStats, regenerateMonthSummary, statsPostText } from './stats';
+import { aggregateDaily, listMonthStats, refreshStats, regenerateMonthSummary, statsPostText } from './stats';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -843,11 +843,29 @@ async function statsPayload(env: Env, origin: string) {
     summary: summaryByMonth.get(m.month) ?? null,
   }));
   const headline = withPosts.find((m) => m.month === current) ?? withPosts[0] ?? null;
+  // поток заявок (пришло/одобрено/отклонено) и самые просматриваемые
+  const days = (await listDailyStats(env, 90)).slice().reverse(); // старые → новые
+  const topViewed = await listMostViewed(env, 10).catch(() => []);
   return {
     months: withPosts,
     currentMonth: current,
     post: headline?.post ?? null,
     updatedAt: months[0]?.updatedAt ?? null,
+    flow: {
+      days,
+      weeks: aggregateDaily(days, 'week'),
+      months: aggregateDaily(days, 'month'),
+    },
+    topViewed: topViewed.map((l) => ({
+      id: l.id,
+      fromCity: l.fromCity,
+      toCity: l.toCity,
+      views: l.views,
+      status: l.status,
+      departureDate: l.departureDate,
+      createdAt: l.createdAt,
+      path: `/item/${l.id}`,
+    })),
   };
 }
 
