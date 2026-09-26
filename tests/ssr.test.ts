@@ -458,3 +458,22 @@ describe('страница 404', () => {
     expect(NOT_FOUND_HTML).not.toContain('href="#/');
   });
 });
+
+describe('фавикон', () => {
+  it('настоящие файлы вместо data-URI — поисковики показывают значок, а не глобус', () => {
+    // Яндекс и Google не читают data-URI из <link rel="icon">: в выдаче был глобус.
+    // Нужны файлы: /favicon.ico в корне (его ищет Яндекс) + ico/svg/apple-touch в link.
+    for (const html of [INDEX_HTML, NOT_FOUND_HTML]) {
+      expect(html).toContain('<link rel="icon" href="/favicon.ico"');
+      expect(html).toContain('href="/favicon.svg"');
+      expect(html).toContain('href="/apple-touch-icon.png"');
+      expect(html).not.toContain('data:image/svg+xml');
+    }
+    const ico = readFileSync(new URL('../public/favicon.ico', import.meta.url));
+    expect([...ico.slice(0, 4)]).toEqual([0, 0, 1, 0]); // магия формата ICO
+    expect(ico.length).toBeGreaterThan(500);            // внутри PNG 16/32/48
+    const svg = readFileSync(new URL('../public/favicon.svg', import.meta.url), 'utf8');
+    expect(svg).toContain('>п</text>');
+    expect(readFileSync(new URL('../public/apple-touch-icon.png', import.meta.url)).length).toBeGreaterThan(900);
+  });
+});

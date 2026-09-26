@@ -718,3 +718,7 @@ button { font-family: inherit; }
 .example-line { margin: 0 0 10px; font-size: 14.5px; color: var(--ink-soft); }
 .example-line b { color: var(--ink); }
 .example-line:last-of-type { margin-bottom: 6px; }
+/* Кнопка «понятно» не скрывала плашку без этого правила: у .cookie-note
+   задан display:flex, а авторский стиль всегда сильнее браузерного
+   [hidden] { display: none } — атрибут hidden переставал работать */
+.cookie-note[hidden] { display: none; }

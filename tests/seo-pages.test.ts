@@ -163,6 +163,8 @@ describe('страница маршрута', () => {
     expect(html).toContain('href="/gorod/varshava"');
     // статистика пары попала в подпись под заголовком
     expect(html).toContain('4 заявки на доске');
+    // фавикон — реальными файлами (см. tests/ssr.test.ts), не только на главной
+    expect(html).toContain('<link rel="icon" href="/favicon.ico"');
   });
 
   it('живые заявки маршрута отрендерены ссылками на карточки', async () => {

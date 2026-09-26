@@ -799,6 +799,32 @@ describe('админка', () => {
   });
 });
 
+describe('плашка про cookies', () => {
+  // инлайн-скрипт плашки не выполняется в jsdom сам (runScripts: 'outside-only'),
+  // поэтому достаём его из htmlSource и выполняем как app.js
+  const scriptStart = htmlSource.lastIndexOf('<script>', htmlSource.indexOf('poputka_cookie_ok'));
+  const cookieScript = htmlSource.slice(scriptStart + '<script>'.length, htmlSource.indexOf('</script>', scriptStart));
+
+  it('CSS не даёт display:flex перебить атрибут hidden', () => {
+    // кнопка «понятно» не скрывала плашку: .cookie-note { display: flex }
+    // сильнее браузерного [hidden] { display: none } — нужно явное правило
+    expect(cssSource).toMatch(/\.cookie-note\[hidden\]\s*\{\s*display:\s*none/);
+  });
+
+  it('«понятно» скрывает плашку и запоминает выбор', () => {
+    win.localStorage.removeItem('poputka_cookie_ok');
+    win.eval(cookieScript);
+    const note = byId('cookie-note');
+    expect(note.hidden, 'плашка показалась').toBe(false);
+    byId('cookie-ok').click();
+    expect(win.localStorage.getItem('poputka_cookie_ok')).toBe('1');
+    expect(note.hidden, 'плашка скрылась').toBe(true);
+    // повторный заход с уже сохранённым выбором: плашка не появляется
+    win.eval(cookieScript);
+    expect(note.hidden).toBe(true);
+  });
+});
+
 describe('здоровье страницы', () => {
   it('за всё время теста не было необработанных ошибок скрипта', () => {
     expect(pageErrors).toEqual([]);
