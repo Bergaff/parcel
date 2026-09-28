@@ -3,7 +3,7 @@ import type { MatchPair, ListingSnapshot } from './match';
 import { listingSnapshot, parseSnapshot } from './match';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
-import { admins, normalizeContacts } from './util';
+import { admins, hasContactHint, normalizeContacts } from './util';
 import { nextRecurringDate } from './parser';
 
 function mapRow(row: Record<string, unknown>): Listing {
@@ -42,11 +42,16 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   await ensureHiddenColumn(env);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
-  const publishedAt = input.status === 'published' ? now : null;
   // Единая точка нормализации контактов: номер не должен лежать в поле telegram,
   // а один и тот же контакт — в обоих полях (иначе дубли в карточке и битая
   // ссылка t.me/+48… на сайте). Через createListing проходят все источники.
   const { telegram, phone } = normalizeContacts(input.telegram, input.phone);
+  // Приговор заявке без контакта — здесь, единым правилом для всех источников:
+  // offer отклоняем (чтобы не висел в очереди), request публикуем скрытым
+  const auto = autoStatusFor(input, { telegram, phone });
+  const status = auto ? auto.status : input.status;
+  const hidden = auto ? auto.hidden : input.hidden === true;
+  const publishedAt = status === 'published' ? now : null;
   await env.DB.prepare(
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
@@ -58,12 +63,12 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.recurring ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
-      input.status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
+      status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
       input.sourceMessageId ?? null,
       // 1 — подал админ, 2 — посторонний человек сам (личка бота, форма без ключа),
       // 0 — взято из чата или старая строка до появления колонки
       input.byAdmin ? 1 : input.fromPerson ? 2 : 0,
-      input.hidden ? 1 : 0, now, publishedAt,
+      hidden ? 1 : 0, now, publishedAt,
       // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
       input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
     )
@@ -674,12 +679,37 @@ export function ensureHiddenColumn(env: Env): Promise<void> {
  * Не касается админских заявок и заявок из Telegram/чатов — те идут как обычно.
  */
 export function isHiddenRequestInput(input: ListingInput): boolean {
-  // от кого подана — не важно: заявка «ищу передачу» без контакта не должна
-  // висеть на рассмотрении, кто бы её ни отправил из формы на сайте
+  // «ищу передачу» без контакта — из ЛЮБОГО источника (форма сайта, личка
+  // бота, пересылка, чат): публикуем сразу и прячем с доски, видна только
+  // в подборе — владелец рейса пишет людям сам (см. autoStatusFor)
   return input.type === 'request'
     && !input.telegram
-    && !input.phone
-    && input.source === 'site';
+    && !input.phone;
+}
+
+/**
+ * Что сразу делать с заявкой без контакта — правило для всех источников
+ * (форма сайта, личка бота, пересылки, чаты), чтобы такие не висели в
+ * очереди модерации:
+ *  - offer («могу передать») без контакта ни в полях, ни в описании —
+ *    отклоняем сразу: пассажирам некуда писать, модерировать нечего;
+ *  - request («ищу передачу») без контакта — публикуем и прячем с доски
+ *    (видна только в подборе; человеку отвечаем «подбираем попутчика»).
+ * null — обычный путь: модерация или AUTO_APPROVE.
+ */
+export function autoStatusFor(
+  input: Pick<ListingInput, 'type' | 'description'>,
+  contacts: { telegram: string | null; phone: string | null }
+): { status: 'rejected' | 'published'; hidden: boolean } | null {
+  if (contacts.telegram || contacts.phone) return null;
+  if (input.type === 'offer') {
+    // контакт, написанный прямо в описании (телефон или @юзернейм),
+    // считается контактом — заявку оставляем модератору, он перенесёт
+    // его в поле
+    if (input.description && hasContactHint(input.description)) return null;
+    return { status: 'rejected', hidden: false };
+  }
+  return { status: 'published', hidden: true };
 }
 
 /**

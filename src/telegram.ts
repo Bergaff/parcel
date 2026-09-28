@@ -816,10 +816,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         continue;
       }
       created.push(res.listing);
-      await notifyAdmins(env, res.listing, res.duplicateOf
+      await notifyCreated(env, res.listing, res.duplicateOf
         ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !isAdmin }
         : similarNote(res));
-      if (res.duplicateOf && res.listing.status !== 'pending') {
+      if (res.duplicateOf && res.listing.status === 'published' && !res.listing.hidden) {
         await notifyAdminsConflict(env, res.listing, res.duplicateOf, res.why);
       }
     }
@@ -827,11 +827,8 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       await sendText(env, chatId, repeatReply(repeats));
       return;
     }
-    const statusNote = env.AUTO_APPROVE === '1'
-      ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
-      : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
     await sendText(env, chatId,
-      created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+      created.map((l) => formatListing(l) + listingStatusNote(l)).join('\n\n') +
       (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
     return;
   }
@@ -987,19 +984,16 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               continue;
             }
             created.push(res.listing);
-            await notifyAdmins(env, res.listing, res.duplicateOf
+            await notifyCreated(env, res.listing, res.duplicateOf
               ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !fromAdmin }
               : similarNote(res));
-            if (res.duplicateOf && res.listing.status !== 'pending') {
+            if (res.duplicateOf && res.listing.status === 'published' && !res.listing.hidden) {
               await notifyAdminsConflict(env, res.listing, res.duplicateOf, res.why);
             }
           }
           if (created.length > 0) {
-            const statusNote = env.AUTO_APPROVE === '1'
-              ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
-              : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
             await sendText(env, chatId,
-              created.map((l) => formatListing(l)).join('\n\n') + statusNote +
+              created.map((l) => formatListing(l) + listingStatusNote(l)).join('\n\n') +
               (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
             return;
           }
@@ -1127,15 +1121,14 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
   const res = await createListingSafe(env, input, { force: true });
   const listing = res.listing;
   await setWizard(env, chatId, null);
-  const statusNote =
-    input.status === 'published'
-      ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
-      : '\n<b>Отправлено на модерацию.</b> Администратор одобрит его в ближайшее время.';
+  // статус — по факту, а не по AUTO_APPROVE: offer без контакта мог быть
+  // отклонён, request без контакта — опубликован скрытым (autoStatusFor)
+  const statusNote = listingStatusNote(listing);
   const dupNote = res.duplicateOf
     ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
     : '';
   await sendText(env, chatId, formatListing(listing) + statusNote + dupNote);
-  await notifyAdmins(env, listing, res.duplicateOf
+  await notifyCreated(env, listing, res.duplicateOf
     ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !input.byAdmin }
     : null);
 }
@@ -1224,9 +1217,11 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       `Спасибо! Ваше объявление отправлено на доску${env.AUTO_APPROVE === '1' ? '' : ' (на модерацию)'}.${site ? `\n${site}` : ''}`
     );
   }
-  // Карточки модератору — по одной на заявку (с предупреждением, если похоже на дубль)
+  // Карточки модератору — по одной на заявку (с предупреждением, если похоже
+  // на дубль); скрытые заявки без контакта — карточкой про подбор,
+  // отклонённые офферы — молча (их в админке быть не должно)
   for (const listing of created) {
-    await notifyAdmins(env, listing, similarBy.get(listing.id) ?? null);
+    await notifyCreated(env, listing, similarBy.get(listing.id) ?? null);
   }
 }
 
@@ -1243,6 +1238,37 @@ function similarNote(res: {
   duplicateOf: Listing | null;
 }): { id: string; why: string } | null {
   return res.kind === 'similar' && res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null;
+}
+
+/** Что ответить человеку после создания заявки — по её НАСТОЯЩЕМУ статусу
+ *  (offer без контакта отклонён правилом autoStatusFor, request без контакта
+ *  опубликован скрытым — ответ «на модерации» в обоих случаях был бы враньём). */
+export function listingStatusNote(l: Listing): string {
+  if (l.status === 'rejected') {
+    return '\n⚠ <b>Не принято:</b> в объявлении водителя нет контакта — пассажирам некуда писать. '
+      + 'Пришлите ещё раз, добавив телефон или @юзернейм Telegram.';
+  }
+  if (l.hidden) {
+    return '\n📦 <b>Принято.</b> Подбираю попутчика по вашему маршруту — как найдётся, объявление появится на доске.';
+  }
+  return l.status === 'published'
+    ? '\n<b>Опубликовано.</b> Объявление уже на доске.'
+    : '\n<b>Отправлено на модерацию.</b> Проверю и опубликую в ближайшее время.';
+}
+
+/** Карточка модератору после создания заявки: скрытая (request без контакта) —
+ *  своя карточка про подбор, отклонённая (offer без контакта) — никакой:
+ *  таких заявок в админке быть не должно, остальные — обычная модерация. */
+async function notifyCreated(
+  env: Env,
+  listing: Listing,
+  dup?: { id: string; why: string; selfSubmitted?: boolean } | null
+): Promise<void> {
+  if (listing.hidden && listing.status === 'published') {
+    await notifyAdminsHiddenRequest(env, listing);
+    return;
+  }
+  await notifyAdmins(env, listing, dup ?? null);
 }
 
 function listingLine(l: Listing): string {
@@ -1313,10 +1339,15 @@ export async function notifyAdmins(
 export async function notifyAdminsHiddenRequest(env: Env, listing: Listing): Promise<void> {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
+  // источник может быть любым: форма сайта, личка бота, пересылка, чат —
+  // правило «без контакта» теперь общее для всех (isHiddenRequestInput)
+  const origin = listing.source === 'site'
+    ? 'форма на сайте'
+    : listing.sourceChat ?? 'Telegram';
   for (const adminId of admins(env)) {
     await sendText(env, Number(adminId),
-      `📦 <b>Заявка с сайта без контакта</b>\n` +
-      `Опубликована автоматически, на доске скрыта — видна в подборе.\n\n` +
+      `📦 <b>Заявка без контакта</b>\n` +
+      `Источник: ${escapeHtml(origin)}. Опубликована автоматически, на доске скрыта — видна в подборе.\n\n` +
       `${listingLine(listing)}${link}\n\n` +
       `Через 30 дней удалится сама. Если контакт есть в описании — напишите человеку сами.`
     ).catch(() => undefined);

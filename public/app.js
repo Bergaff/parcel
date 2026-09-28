@@ -2145,6 +2145,12 @@ async function init() {
     $('#bot-link').href = '/bot';
   }
 
+  // версия сборки — в шапку админки: сразу видно, доехал ли деплой
+  if (config.version) {
+    const sub = $('#admin-sub');
+    if (sub) sub.textContent = `Модерация заявок · v${config.version}`;
+  }
+
   await route();
 }
 

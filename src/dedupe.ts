@@ -16,7 +16,7 @@
  * Всё чистые функции — сравнивать текст и контакты тестируется юнитами.
  */
 import { normalizeCity } from './parser';
-import { uniqueContacts } from './util';
+import { hasContactHint, uniqueContacts } from './util';
 
 /** Заявка или черновик заявки: всё, что нужно для сравнения. */
 export interface DedupeSubject {
@@ -256,19 +256,25 @@ export function compareForDuplicate(
   //    на один рейс бывает несколько водителей, это не дубль.
   if (different) return null;
 
-  // Одного маршрута и даты мало. Нужен ещё признак: текст похож или источник тот же
-  // (один и тот же человек пересылает объявление, профиль которого скрыт).
+  // Одного маршрута и даты мало. Нужен ещё признак: текст похож или — особый
+  // случай — тот же источник, когда ОБЕ заявки без контактов вовсе (человек
+  // со скрытым профилем пересылает одно и то же объявление). Если контакт
+  // есть хотя бы у одной из двух — в один чат на популярном маршруте пишут
+  // и разные люди, предупреждение будет только шуметь.
   const sameSource = Boolean(input.sourceChatId) && input.sourceChatId === existing.sourceChatId;
+  const contactless = (l: DedupeSubject) =>
+    uniqueContacts(l.telegram ?? null, l.phone ?? null).length === 0
+    && !hasContactHint(l.description);
   if (sim >= SIMILAR_TEXT_SIMILARITY) {
     return {
       kind: 'similar',
       why: `похоже на уже имеющуюся заявку (${whoLabel(existing)}, текст совпадает на ${Math.round(sim * 100)}%) — проверьте, не один ли это человек`,
     };
   }
-  if (sameSource) {
+  if (sameSource && contactless(input) && contactless(existing)) {
     return {
       kind: 'similar',
-      why: `тот же источник, маршрут ${route}, ${dateNote(input, existing)} — проверьте, не один ли это человек`,
+      why: `тот же источник, обе без контактов, маршрут ${route}, ${dateNote(input, existing)} — проверьте, не один ли это человек`,
     };
   }
   return null;

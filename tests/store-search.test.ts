@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
+  autoStatusFor, ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
   listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
@@ -233,7 +233,7 @@ describe('заявки «ищу попутчика» без контакта —
     type: 'request', telegram: null, phone: null, source: 'site', fromPerson: true, ...over,
   });
 
-  it('скрытой становится заявка с сайта без контакта, поданная человеком', () => {
+  it('скрытой становится «ищу передачу» без контакта — из любого источника', () => {
     expect(isHiddenRequestInput(mk({}) as never)).toBe(true);
     // водитель — нет: ему будут писать пассажиры
     expect(isHiddenRequestInput(mk({ type: 'offer' }) as never)).toBe(false);
@@ -242,8 +242,27 @@ describe('заявки «ищу попутчика» без контакта —
     // от админа из формы (с ключом) — тоже скрытая: «ищу передачу» без
     // контакта не должно висеть на рассмотрении, кто бы ни подал
     expect(isHiddenRequestInput(mk({ fromPerson: false }) as never)).toBe(true);
-    // из бота/чатов — как раньше (там модерация обычная)
-    expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(false);
+    // из бота, пересылок и чатов — теперь так же: без контакта заявке на
+    // доске всё равно нечего показывать, а в подборе она работает
+    expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(true);
+    expect(isHiddenRequestInput(mk({ source: 'parser' }) as never)).toBe(true);
+  });
+
+  it('autoStatusFor: оффер без контакта — rejected, реквест — published и скрыт', () => {
+    const none = { telegram: null, phone: null };
+    // оффер без контакта ни в полях, ни в описании — отклоняем сразу,
+    // в очереди модерации ему не место
+    expect(autoStatusFor({ type: 'offer', description: 'везу из Гродно в Белосток' }, none))
+      .toEqual({ status: 'rejected', hidden: false });
+    // контакт прямо в описании спасает заявку: модератор перенесёт в поле
+    expect(autoStatusFor({ type: 'offer', description: 'везу, телефон +375291234567' }, none)).toBeNull();
+    expect(autoStatusFor({ type: 'offer', description: 'пишите @driver' }, none)).toBeNull();
+    // контакт в поле — обычный путь (модерация/AUTO_APPROVE)
+    expect(autoStatusFor({ type: 'offer', description: 'везу' }, { telegram: '@x', phone: null })).toBeNull();
+    // «ищу передачу» без контакта — сразу опубликована и скрыта, кто бы ни подал
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт' }, none))
+      .toEqual({ status: 'published', hidden: true });
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать' }, { telegram: null, phone: '+48 579 264 254' })).toBeNull();
   });
 
   it('публичная доска и счётчики не показывают скрытые', async () => {

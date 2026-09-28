@@ -28,7 +28,8 @@ vi.mock('../src/stats', async (importOriginal) => {
   };
 });
 
-import { handleTelegramUpdate } from '../src/telegram';
+import { handleTelegramUpdate, listingStatusNote } from '../src/telegram';
+import type { Listing } from '../src/types';
 
 const env = {
   BOT_TOKEN: 'test-token',
@@ -38,7 +39,7 @@ const env = {
   KV: { get: async () => null, put: async () => undefined, delete: async () => undefined },
 } as unknown as Env;
 
-interface Sent { method: string; text: string }
+interface Sent { method: string; text: string; chatId: number }
 const sent: Sent[] = [];
 const realFetch = global.fetch;
 
@@ -88,8 +89,8 @@ beforeEach(() => {
     const u = String(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
     const m = /api\.telegram\.org\/bot[^/]+\/(\w+)/.exec(u);
     if (m) {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { text?: string };
-      sent.push({ method: m[1] ?? '', text: body.text ?? '' });
+      const body = JSON.parse(String(init?.body ?? '{}')) as { text?: string; chat_id?: number };
+      sent.push({ method: m[1] ?? '', text: body.text ?? '', chatId: body.chat_id ?? 0 });
       return new Response(JSON.stringify({ ok: true, result: { message_id: sent.length } }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       });
@@ -191,5 +192,112 @@ describe('/статистика', () => {
     const text = await send('/help');
     expect(text).toContain('/статистика');
     expect(text).toContain('итоги месяца');
+  });
+});
+
+describe('ответ после создания заявки — по реальному статусу', () => {
+  const mk = (over: Partial<Listing>): Listing => ({ status: 'pending', hidden: false, ...over } as Listing);
+
+  it('отклонённый оффер без контакта объясняет, чего не хватило', () => {
+    const note = listingStatusNote(mk({ status: 'rejected' }));
+    expect(note).toContain('Не принято');
+    expect(note).toContain('нет контакта');
+  });
+
+  it('скрытый «ищу передачу» — «подбираю попутчика», без слов про модерацию', () => {
+    const note = listingStatusNote(mk({ status: 'published', hidden: true }));
+    expect(note).toContain('Подбираю попутчика');
+    expect(note).not.toContain('модерацию');
+  });
+
+  it('обычные статусы — как раньше', () => {
+    expect(listingStatusNote(mk({ status: 'published' }))).toContain('Опубликовано');
+    expect(listingStatusNote(mk({}))).toContain('модерацию');
+  });
+});
+
+describe('пересылка объявления без контакта — правила для всех источников', () => {
+  /** Память вместо D1: помним SQL и параметры каждого вызова. */
+  function dbFake() {
+    // порядок колонок INSERT INTO listings из src/store.ts (createListing)
+    const COLS = ['id', 'type', 'from_city', 'to_city', 'departure_date', 'recurring', 'weight_kg',
+      'price', 'description', 'phone', 'telegram', 'status', 'source', 'source_chat', 'source_chat_id',
+      'source_message_id', 'by_admin', 'hidden', 'created_at', 'published_at', 'from_city_lc',
+      'to_city_lc', 'description_lc'];
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const make = (sql: string) => {
+      const call = { sql, params: [] as unknown[] };
+      calls.push(call);
+      const stmt = {
+        bind(...params: unknown[]) { call.params = params; return stmt; },
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+        // «прочитал только что вставленное»: createListing после INSERT делает
+        // SELECT * FROM listings WHERE id = ? — собираем строку из его параметров
+        async first() {
+          if (/FROM listings WHERE id = /i.test(sql)) {
+            const ins = [...calls].reverse().find((c) => c.sql.includes('INSERT INTO listings'));
+            if (!ins) return null;
+            const row: Record<string, unknown> = {};
+            COLS.forEach((name, i) => { row[name] = ins.params[i]; });
+            return row;
+          }
+          return null;
+        },
+      };
+      return stmt;
+    };
+    return { db: { prepare: make, batch: async (s: unknown[]) => Promise.all(s as never) }, calls };
+  }
+
+  function forward(text: string) {
+    return {
+      update_id: 1,
+      message: {
+        message_id: 10,
+        date: 1789000000,
+        chat: { id: 555, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text,
+        forward_from: { id: 111, first_name: 'Сергей' } as never,
+      },
+    };
+  }
+
+  it('оффер без контакта — rejected сразу: переславшему «не принято», модератору ни карточки', async () => {
+    sent.length = 0;
+    const { db, calls } = dbFake();
+    const envFwd = { ...env, DB: db } as unknown as Env;
+    await handleTelegramUpdate(envFwd, forward('Везу 5 января Гродно — Белосток, возьму посылку до 5 кг'));
+    // заявка записана сразу отклонённой — в очереди модерации ей не место
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO listings'));
+    expect(insert).toBeTruthy();
+    expect(insert!.params).toContain('rejected');
+    expect(insert!.params).not.toContain('pending');
+    // переславшему — объяснение, а не «отправлено на модерацию»
+    const reply = sent.filter((s) => s.chatId === 555).map((s) => s.text).join('\n');
+    expect(reply).toContain('Не принято');
+    expect(reply).toContain('нет контакта');
+    expect(reply).not.toContain('модерацию');
+    // модератору (42) — никаких карточек: ни обычной, ни «скрытой»
+    expect(sent.filter((s) => s.chatId === 42)).toHaveLength(0);
+  });
+
+  it('«ищу передачу» без контакта — опубликована скрытой: админу карточка «Заявка без контакта»', async () => {
+    sent.length = 0;
+    const { db, calls } = dbFake();
+    const envFwd = { ...env, DB: db } as unknown as Env;
+    await handleTelegramUpdate(envFwd, forward('Нужно передать 5 января Гродно — Белосток, конверт с документами'));
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO listings'));
+    expect(insert).toBeTruthy();
+    expect(insert!.params).toContain('published');
+    expect(insert!.params).toContain(1); // hidden
+    // переславшему — «подбираю попутчика», без слов про модерацию
+    const reply = sent.filter((s) => s.chatId === 555).map((s) => s.text).join('\n');
+    expect(reply).toContain('Подбираю попутчика');
+    // админу — карточка скрытой заявки с источником
+    const card = sent.filter((s) => s.chatId === 42).map((s) => s.text).join('\n');
+    expect(card).toContain('Заявка без контакта');
+    expect(card).toContain('Опубликована автоматически, на доске скрыта');
   });
 });

@@ -78,6 +78,40 @@ describe('пересылки без контакта (автор скрыл пр
     expect(v?.kind).toBe('duplicate');
   });
 
+  it('тот же источник, обе без контактов — предупреждение остаётся (скрытый профиль)', () => {
+    const v = compareForDuplicate(
+      input({ telegram: null, phone: null, sourceChatId: 'fwd:555', sourceChat: 'Пересланное сообщение',
+              description: 'беру посылки, багажник пустой' }),
+      existing({ telegram: null, phone: null, sourceChatId: 'fwd:555', sourceChat: 'Пересланное сообщение',
+                 description: '29 сентября еду, свободное место есть' })
+    );
+    expect(v?.kind).toBe('similar');
+    expect(v?.why).toContain('тот же источник');
+    expect(v?.why).toContain('обе без контактов');
+  });
+
+  it('тот же источник и дата, но у новой заявки есть контакт — молчим (популярное направление)', () => {
+    // «попутка передачка груза Гродно — Белосток»: в один чат пишут разные
+    // люди, у каждой заявки свой контакт — предупреждение только шумит
+    const v = compareForDuplicate(
+      input({ telegram: '@gr_driver', sourceChatId: 'fwd:555', sourceChat: 'Пересланное сообщение',
+              description: 'беру посылки, багажник пустой' }),
+      existing({ telegram: null, phone: null, sourceChatId: 'fwd:555', sourceChat: 'Пересланное сообщение',
+                 description: '29 сентября еду, свободное место есть' })
+    );
+    expect(v).toBeNull();
+  });
+
+  it('тот же источник, контакт только в описании старой — тоже молчим', () => {
+    const v = compareForDuplicate(
+      input({ telegram: null, phone: null, sourceChatId: 'fwd:555',
+              description: 'беру посылки, багажник пустой' }),
+      existing({ telegram: null, phone: null, sourceChatId: 'fwd:555',
+                 description: '29 сентября еду, свободное место есть, телефон +375291234567' })
+    );
+    expect(v).toBeNull();
+  });
+
   it('тот же автор пересылки, текст переписан — дубль по имени автора', () => {
     const v = compareForDuplicate(
       input({ telegram: null, description: 'актуально! 20.09 Варшава-Минск, возьму посылку', sourceChat: 'Переслано от sergei' }),

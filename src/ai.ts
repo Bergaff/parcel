@@ -178,8 +178,26 @@ async function aiQuotaOk(env: Env): Promise<boolean> {
  * содержать несколько направлений). Пустой массив — не объявление,
  * пассажирская попутка, ошибка сети или исчерпана квота.
  */
+/** Хэш нормализованного текста — ключ кэша разбора. */
+async function textHash(text: string): Promise<string> {
+  const norm = text.trim().toLowerCase().replace(/\s+/g, ' ');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(norm));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function aiExtractListing(env: Env, text: string): Promise<AiFields[]> {
   if (!env.AI_API_KEY) return [];
+  // Кэш разбора по тексту (KV, 3 дня): одно объявление кросспостят в несколько
+  // чатов — платим за разбор один раз. «Не объявление» тоже кэшируем: повторные
+  // вопросы из чатов и есть главный мусор. В кэч кладём СЫРОЙ ответ ИИ и при
+  // каждом чтении валидируем заново — просроченные даты отсеются сами.
+  const cacheKey = `ai:txt:${await textHash(text)}`;
+  try {
+    const cached = await env.KV.get(cacheKey);
+    if (cached != null) {
+      return parseAiListings(JSON.parse(cached), { now: new Date(), originalText: text });
+    }
+  } catch { /* кэша нет или он битый — просто идём в API */ }
   if (!(await aiQuotaOk(env))) return [];
 
   const now = new Date();
@@ -214,7 +232,11 @@ export async function aiExtractListing(env: Env, text: string): Promise<AiFields
     };
     const content = json.choices?.[0]?.message?.content ?? '';
     const parsed = JSON.parse(content) as unknown;
-    return parseAiListings(parsed, { now, originalText: text });
+    const list = parseAiListings(parsed, { now, originalText: text });
+    try {
+      await env.KV.put(cacheKey, JSON.stringify(parsed), { expirationTtl: 3 * 86400 });
+    } catch { /* кэш недоступен — не страшно, просто без экономии */ }
+    return list;
   } catch (e) {
     console.error('deepseek call failed', e);
     return [];

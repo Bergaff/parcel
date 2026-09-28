@@ -103,7 +103,7 @@ function makeFetch(calls: string[]) {
     const authed = init.headers?.Authorization === `Bearer ${ADMIN_KEY}`;
     const r: StubResult = (() => {
       if (path === '/api/config') {
-        return { body: { siteName: 'попутка.', botUsername: 'poputka_bot', botLink: 'https://t.me/poputka_bot' } };
+        return { body: { siteName: 'попутка.', version: '9.9.9', botUsername: 'poputka_bot', botLink: 'https://t.me/poputka_bot' } };
       }
       if (path === '/api/chat-links') return { body: { links: {} } };
 
@@ -822,6 +822,13 @@ describe('плашка про cookies', () => {
     // повторный заход с уже сохранённым выбором: плашка не появляется
     win.eval(cookieScript);
     expect(note.hidden).toBe(true);
+  });
+});
+
+describe('версия сборки', () => {
+  it('в шапке админки видна версия из /api/config — видно, доехал ли деплой', () => {
+    expect(byId('admin-sub').textContent).toContain('Модерация заявок');
+    expect(byId('admin-sub').textContent).toContain('v9.9.9');
   });
 });
 

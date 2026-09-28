@@ -8,6 +8,7 @@ import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, lo
 import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import { cacheableStatus, edgeCache, edgeCacheControl, edgeCacheKey, edgeCacheTtl } from './edge-cache';
+import { SITE_VERSION } from './version';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
   buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
@@ -93,6 +94,7 @@ app.get('/api/health', (c) => c.json({ ok: true, time: new Date().toISOString() 
 app.get('/api/config', (c) => {
   return c.json({
     siteName: 'Попутная',
+    version: SITE_VERSION,
     botUsername: c.env.BOT_USERNAME ?? null,
     botLink: c.env.BOT_USERNAME ? `https://t.me/${c.env.BOT_USERNAME}` : null,
   });
