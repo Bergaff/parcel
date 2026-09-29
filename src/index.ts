@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import type { SerpCheck } from './store';
+import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -565,6 +567,75 @@ app.get('/api/admin/pending', async (c) => {
   return c.json({ items, total });
 });
 
+/* ---------- SEO-видимость: корпуса ИИ + позиции ---------- */
+
+/** Ручная проверка не чаще раза в полчаса: данные внешние и медленные. */
+async function seoCheckGate(env: Env, key: string): Promise<boolean> {
+  try {
+    if (await env.KV.get(key) != null) return false;
+    await env.KV.put(key, '1', { expirationTtl: 1800 });
+    return true;
+  } catch { /* KV недоступен — пускаем без ограничений */ return true; }
+}
+
+app.get('/api/admin/seo', async (c) => {
+  const [aiRuns, queries, history] = await Promise.all([
+    listAiRuns(c.env),
+    listSerpQueries(c.env),
+    listSerpHistory(c.env),
+  ]);
+  // последняя и предпоследняя проверка на запрос — позиция сейчас и динамика
+  const byQuery = new Map<string, SerpCheck[]>();
+  for (const h of history) {
+    const list = byQuery.get(h.queryId) ?? [];
+    if (list.length < 2) list.push(h);
+    byQuery.set(h.queryId, list);
+  }
+  const serpQueries = queries.map((q) => {
+    const list = byQuery.get(q.id) ?? [];
+    return { ...q, last: list[0] ?? null, prev: list[1] ?? null };
+  });
+  return c.json({
+    domain: siteDomain(c.env.SITE_URL),
+    ai: { runs: aiRuns },
+    serp: {
+      keyMissing: !c.env.SERPAPI_KEY,
+      queries: serpQueries,
+      lastCheckAt: history[0]?.checkedAt ?? null,
+    },
+  });
+});
+
+app.post('/api/admin/seo/ai-check', async (c) => {
+  if (!(await seoCheckGate(c.env, 'seo-ai-lock'))) {
+    return c.json({ error: 'Проверка уже запускалась недавно — подождите полчаса.' }, 429);
+  }
+  try {
+    const summary = await runAiVisibilityCheck(c.env, { collections: 3 });
+    return c.json({ ok: true, summary });
+  } catch (e) {
+    // проверка не удалась — снимаем замок, чтобы можно было повторить сразу
+    await c.env.KV.delete('seo-ai-lock').catch(() => undefined);
+    return c.json({ error: e instanceof Error ? e.message : 'не получилось' }, 502);
+  }
+});
+
+app.post('/api/admin/seo/serp-check', async (c) => {
+  if (!c.env.SERPAPI_KEY) {
+    return c.json({ error: 'Добавьте секрет SERPAPI_KEY (бесплатный ключ serpapi.com) — и проверка заработает.' }, 400);
+  }
+  if (!(await seoCheckGate(c.env, 'seo-serp-lock'))) {
+    return c.json({ error: 'Проверка уже запускалась недавно — подождите полчаса.' }, 429);
+  }
+  try {
+    const summary = await runSerpCheck(c.env);
+    return c.json({ ok: true, summary });
+  } catch (e) {
+    await c.env.KV.delete('seo-serp-lock').catch(() => undefined);
+    return c.json({ error: e instanceof Error ? e.message : 'не получилось' }, 502);
+  }
+});
+
 app.post('/api/admin/listings/:id/status', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { status?: string };
   if (!['published', 'rejected', 'expired'].includes(body.status ?? '')) {
@@ -1021,6 +1092,36 @@ const worker = {
     }
     const res = await archiveExpired(env);
     console.log('archiveExpired:', JSON.stringify(res));
+
+    // SEO-видимость раз в неделю: краулы Common Crawl выходят примерно раз в
+    // месяц-два, позиции достаточно мерить еженедельно (20 запросов ≈ 85/мес —
+    // бесплатный лимит SerpApi 100/мес). Прогон зависим от прошлого замера,
+    // а не от дня недели: безопасно при любых пропусках cron.
+    try {
+      const lastAi = await lastAiRunAt(env);
+      if (!lastAi || Date.now() - Date.parse(lastAi) > 6.5 * 86400e3) {
+        const sum = await runAiVisibilityCheck(env, { collections: 4 });
+        console.log('ai visibility:', JSON.stringify({
+          cc: sum.cc.map((x) => ({ label: x.label, pages: x.pages })),
+          wayback: sum.wayback.pages,
+        }));
+      }
+    } catch (e) {
+      console.error('ai visibility failed', e);
+    }
+    try {
+      if (env.SERPAPI_KEY) {
+        const lastSerp = await lastSerpCheckAt(env);
+        if (!lastSerp || Date.now() - Date.parse(lastSerp) > 6.5 * 86400e3) {
+          const sum = await runSerpCheck(env);
+          console.log('serp check:', JSON.stringify({
+            checked: sum.checked, found: sum.found, errors: sum.errors.length,
+          }));
+        }
+      }
+    } catch (e) {
+      console.error('serp check failed', e);
+    }
   },
 };
 

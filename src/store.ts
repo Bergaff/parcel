@@ -1032,6 +1032,113 @@ export async function getMatchRun(
   return { run: mapRun(row), pairs };
 }
 
+/* ------------------------------------------------------------------ */
+/* SEO-видимость: корпуса (Common Crawl, Wayback) и позиции (SerpApi)   */
+/* ------------------------------------------------------------------ */
+
+/** Один замер присутствия в открытом корпусе. */
+export interface AiRun {
+  id: string;
+  kind: 'commoncrawl' | 'wayback';
+  label: string;
+  pages: number;
+  urls: string[];
+  checkedAt: string;
+}
+
+/** Записать замер присутствия. */
+export async function saveAiRun(
+  env: Env,
+  run: { kind: 'commoncrawl' | 'wayback'; label: string; pages: number; urls?: string[] }
+): Promise<void> {
+  await env.DB.prepare(
+    'INSERT INTO ai_runs (id, kind, label, pages, urls, checked_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).bind(
+    crypto.randomUUID(), run.kind, run.label, run.pages,
+    JSON.stringify(run.urls ?? []), new Date().toISOString()
+  ).run();
+}
+
+/** Свежие замеры (свежие сверху) — история для динамики. */
+export async function listAiRuns(env: Env, limit = 80): Promise<AiRun[]> {
+  const res = await env.DB.prepare(
+    'SELECT * FROM ai_runs ORDER BY checked_at DESC LIMIT ?'
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    kind: r.kind as AiRun['kind'],
+    label: String(r.label),
+    pages: Number(r.pages ?? 0),
+    urls: Array.isArray(JSON.parse(String(r.urls ?? '[]'))) ? JSON.parse(String(r.urls ?? '[]')) as string[] : [],
+    checkedAt: String(r.checked_at),
+  }));
+}
+
+/** Когда был последний замер — cron по нему понимает, пора ли новый. */
+export async function lastAiRunAt(env: Env): Promise<string | null> {
+  const row = await env.DB.prepare(
+    'SELECT checked_at AS t FROM ai_runs ORDER BY checked_at DESC LIMIT 1'
+  ).first() as { t: string } | null;
+  return row?.t ?? null;
+}
+
+/** Отслеживаемый поисковый запрос. */
+export interface SerpQuery { id: string; engine: string; query: string }
+
+export async function listSerpQueries(env: Env): Promise<SerpQuery[]> {
+  const res = await env.DB.prepare(
+    'SELECT id, engine, query FROM serp_queries WHERE active = 1 ORDER BY id'
+  ).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id), engine: String(r.engine), query: String(r.query),
+  }));
+}
+
+/** Одна проверка позиции. */
+export interface SerpCheck {
+  id: string;
+  queryId: string;
+  checkedAt: string;
+  position: number | null;
+  foundUrl: string | null;
+  top: string[];
+}
+
+/** Записать пачку проверок позиций (одна строка на запрос). */
+export async function saveSerpChecks(
+  env: Env,
+  rows: Array<{ queryId: string; position: number | null; foundUrl: string | null; top: string[] }>
+): Promise<void> {
+  const now = new Date().toISOString();
+  await env.DB.batch(rows.map((r) =>
+    env.DB.prepare(
+      'INSERT INTO serp_checks (id, query_id, checked_at, position, found_url, top) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(crypto.randomUUID(), r.queryId, now, r.position, r.foundUrl, JSON.stringify(r.top))
+  ));
+}
+
+/** История проверок (свежие сверху) — для позиции сейчас и «было раньше». */
+export async function listSerpHistory(env: Env, limit = 400): Promise<SerpCheck[]> {
+  const res = await env.DB.prepare(
+    'SELECT * FROM serp_checks ORDER BY checked_at DESC LIMIT ?'
+  ).bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    queryId: String(r.query_id),
+    checkedAt: String(r.checked_at),
+    position: r.position == null ? null : Number(r.position),
+    foundUrl: r.found_url ? String(r.found_url) : null,
+    top: (() => { try { return JSON.parse(String(r.top ?? '[]')) as string[]; } catch { return []; } })(),
+  }));
+}
+
+export async function lastSerpCheckAt(env: Env): Promise<string | null> {
+  const row = await env.DB.prepare(
+    'SELECT checked_at AS t FROM serp_checks ORDER BY checked_at DESC LIMIT 1'
+  ).first() as { t: string } | null;
+  return row?.t ?? null;
+}
+
 export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
   const res = await env.DB.batch([
     env.DB.prepare('DELETE FROM match_pairs WHERE run_id = ?').bind(id),

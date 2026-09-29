@@ -185,6 +185,27 @@ function makeFetch(calls: string[]) {
         }
         return { body: { items: [listing()] } };
       }
+      if (path === '/api/admin/seo') {
+        return {
+          body: {
+            domain: 'pop-utka.app',
+            ai: {
+              runs: [
+                { id: 'w1', kind: 'wayback', label: 'wayback', pages: 3, urls: [], checkedAt: '2026-09-28T10:00:00Z' },
+                { id: 'c1', kind: 'commoncrawl', label: 'CC-MAIN-2026-30', pages: 12, urls: ['https://pop-utka.app/', 'https://pop-utka.app/routes'], checkedAt: '2026-09-28T10:00:00Z' },
+              ],
+            },
+            serp: {
+              keyMissing: false,
+              lastCheckAt: '2026-09-28T10:00:00Z',
+              queries: [
+                { id: 'q01', engine: 'google', query: 'передать посылку варшава минск', last: { position: 7, foundUrl: 'https://pop-utka.app/', top: [] }, prev: { position: 9, foundUrl: null, top: [] } },
+                { id: 'q11', engine: 'yandex', query: 'попутка передача посылок', last: { position: null, foundUrl: null, top: ['site1.by', 'site2.by'] }, prev: null },
+              ],
+            },
+          },
+        };
+      }
       if (/^\/api\/admin\/listings\/[^/]+\/status$/.test(path) && method === 'POST') {
         return { body: { ok: true, duplicate: server.approvedDuplicate } };
       }
@@ -621,6 +642,27 @@ describe('админка', () => {
     await settle(80);
     expect(text('admin-count')).toContain('повторов отклонено: 18');
     server.dupesPruned = 0;
+  });
+
+  it('вкладка SEO: позиции с динамикой и присутствие в корпусах ИИ', async () => {
+    byId('admin-tab-seo').click();
+    await settle(80);
+    // позиции: таблица с запросами, позиция и её движение (9 -> 7 = ▲2)
+    expect(text('admin-count')).toContain('SEO-видимость');
+    const rows = Array.from(win.document.querySelectorAll('#admin-list .stats-table tbody tr'));
+    expect(rows.length).toBe(2);
+    expect(rows[0]?.textContent).toContain('передать посылку варшава минск');
+    expect(rows[0]?.textContent).toContain('№ 7');
+    expect(rows[0]?.textContent).toContain('▲2');
+    // нет в топе — прочерк и конкуренты
+    expect(rows[1]?.textContent).toContain('попутка передача посылок');
+    expect(rows[1]?.textContent).toContain('—');
+    // корпуса: Common Crawl и Wayback
+    expect(win.document.querySelector('#admin-list')?.textContent).toContain('CC-MAIN-2026-30: 12 стр.');
+    expect(win.document.querySelector('#admin-list')?.textContent).toContain('Wayback: 3 стр.');
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
   });
 
   it('счётчик очереди — настоящее число с сервера, а не длина списка', async () => {

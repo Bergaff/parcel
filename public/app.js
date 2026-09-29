@@ -1052,6 +1052,10 @@ async function loadAdmin() {
     await renderAdminStats();
     return;
   }
+  if (adminTab === 'seo') {
+    await renderAdminSeo();
+    return;
+  }
   try {
     const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
     if (res.status === 401) {
@@ -2060,7 +2064,157 @@ function switchAdminTab(tab) {
   $('#admin-tab-match').classList.toggle('on', tab === 'match');
   $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
   $('#admin-tab-stats').classList.toggle('on', tab === 'stats');
+  $('#admin-tab-seo').classList.toggle('on', tab === 'seo');
   loadAdmin();
+}
+
+/* ---------- SEO: позиции и присутствие в корпусах ИИ ---------- */
+
+let seoBusy = false; // проверка идёт — кнопки не дёргаем повторно
+
+/** Позиция с динамикой: № 7 (+2 к прошлой проверке) / — / новое. */
+function serpPositionCell(last, prev) {
+  if (!last || last.position == null) {
+    return last && last.top && last.top.length
+      ? el('span', { class: 'mono', text: `— (топ: ${last.top.slice(0, 3).join(', ')})` })
+      : el('span', { class: 'mono', text: '—' });
+  }
+  const parts = [el('b', { text: `№ ${last.position}` })];
+  if (prev && prev.position != null) {
+    const d = prev.position - last.position; // позиции растут вверх: 5 -> 3 = +2
+    if (d > 0) parts.push(` ▲${d}`);
+    else if (d < 0) parts.push(` ▼${-d}`);
+  } else if (prev) {
+    parts.push(' · новое');
+  }
+  return el('span', { class: 'mono' }, parts);
+}
+
+async function renderAdminSeo() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'SEO-видимость: позиции в поиске и присутствие сайта в открытых корпусах ИИ.';
+  if (seoBusy) return;
+  listEl.replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
+  let data;
+  try {
+    const res = await adminApi('/api/admin/seo');
+    if (!res.ok) throw new Error('network');
+    data = await res.json();
+  } catch {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».',
+    }));
+    return;
+  }
+
+  listEl.replaceChildren();
+
+  /* --- позиции (SerpApi) --- */
+  const serpRows = (data.serp && data.serp.queries) || [];
+  const found = serpRows.filter((q) => q.last && q.last.position != null).length;
+  const posCard = el('section', { class: 'admin-card' }, [
+    el('h3', { text: 'Позиции в поиске' }),
+    el('p', { class: 'empty-note' }, [
+      `${serpRows.length} запросов · в топ-20: ${found}`,
+      data.serp.lastCheckAt ? ` · последняя проверка: ${ago(data.serp.lastCheckAt)}` : ' · ещё не проверяли',
+      ' · движки: Google (Беларусь, ru) и Яндекс (Минск)',
+    ]),
+    data.serp.keyMissing
+      ? el('p', { class: 'dup-warn dup-similar' }, [
+          el('b', { text: 'Нет ключа SerpApi. ' }),
+          'Зарегистрируйтесь на serpapi.com (бесплатно, 100 поисков/мес), скопируйте ключ в секрет SERPAPI_KEY воркера — и проверки заработают. Расход: 20 запросов в неделю ≈ 85 из 100.',
+        ])
+      : null,
+    el('button', {
+      class: 'btn btn-ink btn-sm',
+      type: 'button',
+      text: data.serp.keyMissing ? 'проверить позиции (нужен ключ)' : 'проверить позиции',
+      onclick: () => adminSeoCheck('/api/admin/seo/serp-check'),
+    }),
+  ]);
+  listEl.append(posCard);
+
+  if (serpRows.length > 0) {
+    posCard.append(el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'запрос' }),
+        el('th', { text: 'движок' }),
+        el('th', { text: 'позиция' }),
+      ])]),
+      el('tbody', {}, serpRows.map((q) => el('tr', {}, [
+        el('td', { text: q.query }),
+        el('td', { text: q.engine === 'yandex' ? 'Яндекс' : 'Google' }),
+        el('td', {}, [serpPositionCell(q.last, q.prev)]),
+      ]))),
+    ]));
+  }
+
+  /* --- присутствие в корпусах ИИ --- */
+  const runs = (data.ai && data.ai.runs) || [];
+  const ccRuns = runs.filter((r) => r.kind === 'commoncrawl');
+  const wayback = runs.find((r) => r.kind === 'wayback');
+  const aiCard = el('section', { class: 'admin-card' }, [
+    el('h3', { text: 'Присутствие в корпусах ИИ' }),
+    el('p', { class: 'empty-note', text: 'Common Crawl — краулер, на котором учатся языковые модели: сколько страниц сайта он видит. Wayback Machine — веб-архив. Оба — бесплатно и без ключей.' }),
+    el('button', {
+      class: 'btn btn-line btn-sm',
+      type: 'button',
+      text: 'проверить сейчас',
+      onclick: () => adminSeoCheck('/api/admin/seo/ai-check'),
+    }),
+  ]);
+  listEl.append(aiCard);
+
+  if (runs.length === 0) {
+    aiCard.append(el('p', { class: 'empty-note', text: 'Проверок ещё не было — нажмите «проверить сейчас». Cron тоже меряет сам раз в неделю.' }));
+    return;
+  }
+
+  // коллекции CC: свежая сверху, по одной строке на коллекцию
+  for (const r of ccRuns.slice(0, 4)) {
+    const urls = Array.isArray(r.urls) ? r.urls : [];
+    aiCard.append(el('p', { class: 'empty-note' }, [
+      el('b', { text: `${r.label}: ${r.pages} стр.` }),
+      ` · проверено ${ago(r.checkedAt)}`,
+    ]));
+    if (urls.length > 0) {
+      aiCard.append(el('details', { class: 'qa' }, [
+        el('summary', { text: 'какие страницы в крауле' }),
+        el('ul', { class: 'plain-list' }, urls.map((u) => el('li', { text: u }))),
+      ]));
+    }
+  }
+  if (wayback) {
+    aiCard.append(el('p', { class: 'empty-note' }, [
+      el('b', { text: `Wayback: ${wayback.pages} стр.` }),
+      ` · проверено ${ago(wayback.checkedAt)}`,
+    ]));
+  }
+}
+
+/** Кнопка «проверить»: ждём ответ (SerpApi может думать около минуты). */
+async function adminSeoCheck(path) {
+  if (seoBusy) return;
+  seoBusy = true;
+  toast('Проверяю… позиции и краулы бывают небыстрыми, до минуты.');
+  try {
+    const res = await adminApi(path, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || 'Не получилось проверить.');
+    } else {
+      const s = data.summary;
+      toast(s && s.cc
+        ? `Готово: Common Crawl ${s.cc.map((x) => x.pages).join('/')} стр., Wayback ${s.wayback.pages} стр.`
+        : `Готово: проверено ${s.checked}, в топ-20 — ${s.found}.`);
+    }
+  } catch {
+    toast('Не получилось проверить. Попробуйте ещё раз.');
+  } finally {
+    seoBusy = false;
+    await renderAdminSeo();
+  }
 }
 
 async function adminSetStatus(id, status) {
@@ -2102,6 +2256,7 @@ function bindAdmin() {
   $('#admin-tab-match').addEventListener('click', () => switchAdminTab('match'));
   $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
   $('#admin-tab-stats').addEventListener('click', () => switchAdminTab('stats'));
+  $('#admin-tab-seo').addEventListener('click', () => switchAdminTab('seo'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();

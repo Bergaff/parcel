@@ -19,6 +19,8 @@ export interface Env {
   AI_MODEL?: string;
   /** Базовый URL API — для локальных тестов. */
   AI_BASE_URL?: string;
+  /** Ключ serpapi.com — включает трекер позиций (бесплатный тариф: 100 поисков/мес). */
+  SERPAPI_KEY?: string;
 }
 
 export type ListingType = 'offer' | 'request';
