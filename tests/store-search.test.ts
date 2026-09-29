@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  autoStatusFor, ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
+  autoStatusFor, countPending, ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
   listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
@@ -296,5 +296,24 @@ describe('очередь модерации: просроченные заявк
     expect(del.sql).toContain("departure_date < date('now', '+3 hours')");
     // DELETE ссылается на recurring — колонку запрос гарантирует сам (PRAGMA раньше)
     expect(calls.findIndex((c) => /PRAGMA/.test(c.sql))).toBeLessThan(calls.indexOf(del));
+  });
+});
+
+describe('счётчик очереди модерации', () => {
+  it('countPending — настоящее число очереди (COUNT), без лимита выборки', async () => {
+    // раньше число брали из длины загруженного списка — и при 80 ждущих
+    // счётчик застревал на лимите выборки (50)
+    let asked = '';
+    const stmt = {
+      bind: (..._params: unknown[]) => stmt,
+      first: async () => ({ n: 137 }),
+    };
+    const db = {
+      prepare: (sql: string) => { asked = sql; return stmt; },
+    };
+    expect(await countPending({ DB: db } as unknown as Env)).toBe(137);
+    expect(asked).toContain('COUNT(*)');
+    expect(asked).toContain("status = 'pending'");
+    expect(asked).not.toContain('LIMIT');
   });
 });

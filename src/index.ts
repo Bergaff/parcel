@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, listPending, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -559,8 +559,10 @@ app.use('/api/admin/*', async (c, next) => {
 });
 
 app.get('/api/admin/pending', async (c) => {
-  const { items } = await listListings(c.env, { status: 'pending', perPage: 100 });
-  return c.json({ items });
+  // тот же фикс клампа: listListings урезал perPage до 50 молча
+  const items = await listPending(c.env, 200);
+  const total = await countPending(c.env);
+  return c.json({ items, total });
 });
 
 app.post('/api/admin/listings/:id/status', async (c) => {
@@ -611,9 +613,13 @@ app.get('/api/admin/listings', async (c) => {
       return 0;
     });
   }
+  // Очередь — как и доска, до 200 карточек: раньше стоявший тут listListings
+  // с perPage:100 молча урезался клампом до 50, и счётчик «Необработано
+  // заявок» застревал на 50. Настоящее число очереди приходит отдельно
+  // (pendingTotal) — оно не зависит от размера выборки.
   const items = isBoard
     ? await listAdminBoard(c.env, 200)
-    : await listListings(c.env, { status: 'pending', perPage: 100 }).then((r) => r.items);
+    : await listPending(c.env, 200);
   // происхождение заявки — штампы «от админа» / «с сайта» / «из чата» /
   // «от другого человека» в карточке
   const withOrigin = items.map((l) => ({
@@ -625,6 +631,7 @@ app.get('/api/admin/listings', async (c) => {
   // В очереди модерации помечаем повторы: одно и то же объявление пересылают
   // каждый день, и админ не должен держать в голове, что уже одобрил.
   if (isBoard) return c.json({ items: withOrigin });
+  const pendingTotal = await countPending(c.env);
   const annotated: Array<Record<string, unknown>> = [];
   for (const l of withOrigin.slice(0, 40)) {
     let badge: DuplicateBadge | null = null;
@@ -642,7 +649,7 @@ app.get('/api/admin/listings', async (c) => {
     }
     annotated.push({ ...l, duplicate: badge });
   }
-  return c.json({ items: [...annotated, ...withOrigin.slice(40)], pruned });
+  return c.json({ items: [...annotated, ...withOrigin.slice(40)], pruned, pendingTotal });
 });
 
 /* «Заменить старую»: заявку подал сам человек (владелец), а похожая уже висит

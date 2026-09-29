@@ -796,6 +796,7 @@ let statsFlowUnit = 'day'; // 'day' | 'week' | 'month' — поток заяво
 let adminEditId = null; // id заявки, открытой на редактирование
 let adminItems = [];   // список открытой вкладки — правим на месте, без перезагрузки
 let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
+let adminPendingTotal = 0; // сколько заявок реально ждёт в очереди (COUNT на сервере, не длина списка)
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -1065,6 +1066,7 @@ async function loadAdmin() {
     const data = await res.json();
     adminItems = data.items ?? [];
     adminPruned = data.pruned ?? 0;
+    adminPendingTotal = data.pendingTotal ?? adminItems.length;
     renderAdminItems();
   } catch {
     $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
@@ -1078,17 +1080,26 @@ async function loadAdmin() {
    и список с самого верха. */
 
 function updateAdminCount() {
-  const n = adminItems.length;
   const prunedNote = adminTab === 'pending' && adminPruned > 0
     ? ` · просроченных удалено: ${adminPruned}`
     : '';
-  $('#admin-count').textContent = adminTab === 'pending'
-    ? (n === 0
-        ? '✅ Необработанных заявок нет.'
-        : `⏳ Необработано заявок: ${n}${prunedNote}`)
-    : (n === 0
-        ? 'На доске пока пусто.'
-        : `На доске: ${n} — действующие и архив`);
+  if (adminTab !== 'pending') {
+    const n = adminItems.length;
+    $('#admin-count').textContent = n === 0
+      ? 'На доске пока пусто.'
+      : `На доске: ${n} — действующие и архив`;
+    return;
+  }
+  // число очереди — настоящее (COUNT на сервере), а не «сколько карточек
+  // доехало»: раньше при 80 ждущих писалось 50 — по лимиту выборки
+  if (adminPendingTotal === 0) {
+    $('#admin-count').textContent = `✅ Необработанных заявок нет.${adminPruned > 0 ? ` Просроченных удалено: ${adminPruned}.` : ''}`;
+    return;
+  }
+  const shownNote = adminItems.length < adminPendingTotal
+    ? ` · показаны последние ${adminItems.length}`
+    : '';
+  $('#admin-count').textContent = `⏳ Необработано заявок: ${adminPendingTotal}${shownNote}${prunedNote}`;
 }
 
 /** Нарисовать список заявок из adminItems — без сети. */
@@ -1112,6 +1123,11 @@ function adminCardNode(id) {
 
 /** Убрать заявку из списка на месте — карточка исчезает, остальное не трогаем. */
 function dropAdminCard(id) {
+  // ушла заявка из очереди — уменьшаем и счётчик (без перезагрузки списка)
+  const removed = adminItems.find((x) => x.id === id);
+  if (removed && removed.status === 'pending') {
+    adminPendingTotal = Math.max(0, adminPendingTotal - 1);
+  }
   adminItems = adminItems.filter((x) => x.id !== id);
   const node = adminCardNode(id);
   if (node) node.remove();

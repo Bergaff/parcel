@@ -3,7 +3,7 @@ import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, parseR
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
+  countPending, listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -890,14 +890,16 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           await sendText(env, chatId, 'Команда доступна только администраторам.');
           return;
         }
-        const pending = await listPending(env, 100);
-        if (pending.length === 0) {
+        // число — из COUNT(*), а не из длины выборки: иначе больше 100
+        // заявок счётчик показывал бы «100»
+        const [pending, total] = await Promise.all([listPending(env, 100), countPending(env)]);
+        if (total === 0) {
           await sendText(env, chatId, '✅ Необработанных заявок нет — очередь модерации пуста.');
           return;
         }
         await sendText(env, chatId,
-          `⏳ Необработано заявок: <b>${pending.length}</b>` +
-          (pending.length > 10 ? '\nПоказаны последние 10 — разберите их и напишите /pending снова.' : ''));
+          `⏳ Необработано заявок: <b>${total}</b>` +
+          (Math.max(total, pending.length) > 10 ? '\nПоказаны последние 10 — разберите их и напишите /pending снова.' : ''));
         for (const [i, l] of pending.slice(-10).entries()) {
           await sendText(env, chatId,
             formatListing(l, `\n<i>Заявка ${i + 1} из ${pending.length}</i>`),

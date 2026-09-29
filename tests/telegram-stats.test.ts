@@ -216,9 +216,9 @@ describe('ответ после создания заявки — по реал�
   });
 });
 
-describe('пересылка объявления без контакта — правила для всех источников', () => {
-  /** Память вместо D1: помним SQL и параметры каждого вызова. */
-  function dbFake() {
+/** Память вместо D1: помним SQL и параметры каждого вызова.
+ *  pendingRows/pendingTotal — что отвечает очередь модерации (/pending). */
+function dbFake(opts: { pendingRows?: Array<Record<string, unknown>>; pendingTotal?: number } = {}) {
     // порядок колонок INSERT INTO listings из src/store.ts (createListing)
     const COLS = ['id', 'type', 'from_city', 'to_city', 'departure_date', 'recurring', 'weight_kg',
       'price', 'description', 'phone', 'telegram', 'status', 'source', 'source_chat', 'source_chat_id',
@@ -230,11 +230,19 @@ describe('пересылка объявления без контакта — п
       calls.push(call);
       const stmt = {
         bind(...params: unknown[]) { call.params = params; return stmt; },
-        async all() { return { results: [] }; },
+        async all() {
+          // listPending: очередь модерации для /pending
+          if (/WHERE status = \? ORDER BY created_at/i.test(sql)) {
+            return { results: opts.pendingRows ?? [] };
+          }
+          return { results: [] };
+        },
         async run() { return { meta: { changes: 1 } }; },
         // «прочитал только что вставленное»: createListing после INSERT делает
         // SELECT * FROM listings WHERE id = ? — собираем строку из его параметров
         async first() {
+          // countPending: настоящее число очереди, без лимита выборки
+          if (/COUNT\(\*\) AS n/i.test(sql)) return { n: opts.pendingTotal ?? 0 };
           if (/FROM listings WHERE id = /i.test(sql)) {
             const ins = [...calls].reverse().find((c) => c.sql.includes('INSERT INTO listings'));
             if (!ins) return null;
@@ -249,6 +257,8 @@ describe('пересылка объявления без контакта — п
     };
     return { db: { prepare: make, batch: async (s: unknown[]) => Promise.all(s as never) }, calls };
   }
+
+describe('пересылка объявления без контакта — правила для всех источников', () => {
 
   function forward(text: string) {
     return {
@@ -299,5 +309,48 @@ describe('пересылка объявления без контакта — п
     const card = sent.filter((s) => s.chatId === 42).map((s) => s.text).join('\n');
     expect(card).toContain('Заявка без контакта');
     expect(card).toContain('Опубликована автоматически, на доске скрыта');
+  });
+});
+
+describe('/pending — настоящее число очереди', () => {
+  it('заявок больше лимита выборки: счётчик из COUNT, а не из длины списка', async () => {
+    sent.length = 0;
+    const row = {
+      id: 'p1', type: 'offer', from_city: 'Варшава', to_city: 'Минск', departure_date: '2027-01-05',
+      description: 'везу посылки', telegram: null, phone: null, status: 'pending', source: 'telegram',
+      source_chat: null, source_chat_id: null, source_message_id: null, by_admin: 0, hidden: 0,
+      created_at: '2027-01-01 00:00:00', published_at: null,
+    };
+    const { db } = dbFake({ pendingRows: [row, row, row], pendingTotal: 137 });
+    await handleTelegramUpdate({ ...env, DB: db } as unknown as Env, {
+      update_id: 1,
+      message: {
+        message_id: 11,
+        date: 1789000000,
+        chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text: '/pending',
+      },
+    });
+    const reply = sent.map((s) => s.text).join('\n');
+    // раньше здесь было бы 3 — по длине выборки
+    expect(reply).toContain('Необработано заявок: <b>137</b>');
+    expect(reply).toContain('Показаны последние 10');
+  });
+
+  it('пустая очередь — по COUNT, а не по выборке', async () => {
+    sent.length = 0;
+    const { db } = dbFake({ pendingRows: [], pendingTotal: 0 });
+    await handleTelegramUpdate({ ...env, DB: db } as unknown as Env, {
+      update_id: 1,
+      message: {
+        message_id: 12,
+        date: 1789000000,
+        chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text: '/pending',
+      },
+    });
+    expect(sent[0]!.text).toContain('Необработанных заявок нет');
   });
 });
