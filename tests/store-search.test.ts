@@ -11,7 +11,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
 import {
-  autoStatusFor, countPending, ensureSearchColumns, getCounts, isAdminOrigin, isHiddenRequestInput, isPersonOrigin, likeContains,
+  autoStatusFor, countPending, ensureSearchColumns, findDuplicateCandidates, getCounts, isAdminOrigin, isHiddenRequestInput,
+  isPersonOrigin, likeContains, pruneDuplicatePending,
   listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
   searchByCity, sqlLowerCyr,
 } from '../src/store';
@@ -300,6 +301,18 @@ describe('очередь модерации: просроченные заявк
 });
 
 describe('счётчик очереди модерации', () => {
+  it('окно кандидатов дедупликации — самые свежие заявки, а не «сначала все опубликованные»', async () => {
+    // раньше сортировка «published вперёд» при большом объёме доски вытесняла
+    // из лимита свежие pending-копии: повтор не видел предыдущую копию и
+    // создавался заново — чат с автоперепостом заводил десяток карточек
+    const { env, calls } = fakeDb();
+    await findDuplicateCandidates(env, { type: 'offer', fromCity: 'Бяла', toCity: 'Брест', description: 'еду' } as never);
+    const q = calls.find((c) => c.sql.includes("status IN ('pending', 'published', 'expired')"));
+    expect(q).toBeTruthy();
+    expect(q!.sql).toContain('ORDER BY COALESCE(published_at, created_at) DESC');
+    expect(q!.sql).not.toContain("(status = 'published') DESC");
+  });
+
   it('countPending — настоящее число очереди (COUNT), без лимита выборки', async () => {
     // раньше число брали из длины загруженного списка — и при 80 ждущих
     // счётчик застревал на лимите выборки (50)
@@ -315,5 +328,76 @@ describe('счётчик очереди модерации', () => {
     expect(asked).toContain('COUNT(*)');
     expect(asked).toContain("status = 'pending'");
     expect(asked).not.toContain('LIMIT');
+  });
+});
+
+describe('очередь модерации: автоочистка явных повторов', () => {
+  /** Строка базы под копию объявления «Бяла → Брест» от @TMihalina. */
+  function dupRow(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id, type: 'offer', from_city: 'Бяла', to_city: 'Брест', departure_date: null, recurring: null,
+      weight_kg: null, price: null,
+      description: 'Еду Бяла-Тересполь-Брест, через 1-1,5ч выезд. Возьму попутчиков, без предоплаты.',
+      phone: null, telegram: '@TMihalina', status: 'pending', source: 'telegram',
+      source_chat: 'Переслано от Татьяна Михайловская', source_chat_id: 'fwd:111', source_message_id: null,
+      by_admin: 1, hidden: 0, created_at: '2026-09-29 07:15:00', published_at: null,
+      from_city_lc: 'бяла', to_city_lc: 'брест', description_lc: 'еду бяла',
+      ...over,
+    };
+  }
+
+  /** Память вместо D1: очередь и кандидатов возвращаем по SQL-шаблону. */
+  function pruneDb(pendingRows: Array<Record<string, unknown>>, candidateRows: Array<Record<string, unknown>>) {
+    const updates: Array<{ sql: string; params: unknown[] }> = [];
+    const make = (sql: string) => {
+      const params: unknown[] = [];
+      const stmt = {
+        bind(...p: unknown[]) { params.push(...p); return stmt; },
+        async all() {
+          if (/WHERE status = \? ORDER BY created_at/i.test(sql)) return { results: pendingRows };
+          if (/status IN \('pending', 'published', 'expired'\)/i.test(sql)) return { results: candidateRows };
+          return { results: [] };
+        },
+        async run() { updates.push({ sql, params }); return { meta: { changes: 1 } }; },
+        async first() { return null; },
+      };
+      return stmt;
+    };
+    return { env: { DB: { prepare: make }, ADMIN_IDS: '42' } as unknown as Env, updates };
+  }
+
+  it('копии объявления, уже опубликованного на доске, отклоняются все', async () => {
+    const pending = [dupRow('p1'), dupRow('p2'), dupRow('p3')];
+    const board = [dupRow('board', { status: 'published', published_at: '2026-09-29 07:40:00' })];
+    // кандидаты — как вернёт база: доска + сами копии из очереди
+    const { env, updates } = pruneDb(pending, [...board, ...pending]);
+    expect(await pruneDuplicatePending(env)).toBe(3);
+    const rejected = updates.filter((u) => /UPDATE listings SET status/i.test(u.sql));
+    expect(rejected).toHaveLength(3);
+    expect(rejected.every((u) => u.params.includes('rejected'))).toBe(true);
+  });
+
+  it('пачка одинаковых в очереди без доски: остаётся первая, повторные отклоняются', async () => {
+    const pending = [
+      dupRow('p1', { created_at: '2026-09-29 05:00:00' }),
+      dupRow('p2', { created_at: '2026-09-29 06:00:00' }),
+      dupRow('p3', { created_at: '2026-09-29 07:00:00' }),
+    ];
+    const { env, updates } = pruneDb(pending, pending);
+    expect(await pruneDuplicatePending(env)).toBe(2);
+    const rejectedIds = updates.filter((u) => /UPDATE listings SET status/i.test(u.sql)).map((u) => u.params[2]);
+    expect(rejectedIds).toContain('p2');
+    expect(rejectedIds).toContain('p3');
+    expect(rejectedIds).not.toContain('p1');
+  });
+
+  it('заявку, поданную самим человеком, автоочистка не трогает', async () => {
+    // владелец подал сам, а копию уже принесли из чата — «заменить старую»
+    // решает модератор, не автоочистка
+    const pending = [dupRow('mine', { by_admin: 2, source: 'site', source_chat: null, source_chat_id: null })];
+    const board = [dupRow('board', { status: 'published' })];
+    const { env, updates } = pruneDb(pending, [...board, ...pending]);
+    expect(await pruneDuplicatePending(env)).toBe(0);
+    expect(updates.filter((u) => /UPDATE listings SET status/i.test(u.sql))).toHaveLength(0);
   });
 });

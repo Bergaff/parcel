@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, listPending, loadStatsSnapshots, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, listDailyStats, listMostViewed, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -607,9 +607,17 @@ app.get('/api/admin/listings', async (c) => {
   // модерировать «везу 5 числа» 10-го числа бессмысленно. Регулярные рейсы
   // остаются — их расписание живёт дальше конкретной даты.
   let pruned = 0;
+  let dupesPruned = 0;
   if (!isBoard) {
     pruned = await pruneStalePending(c.env).catch((e) => {
       console.error('prune stale pending failed', e);
+      return 0;
+    });
+    // Явные повторы не должны доходить до модератора: копия объявления с
+    // доски и лишние копии внутри очереди отклоняются сами (чат с
+    // автоперепостом каждые 10 минут иначе заводит десяток одинаковых карточек)
+    dupesPruned = await pruneDuplicatePending(c.env).catch((e) => {
+      console.error('prune duplicate pending failed', e);
       return 0;
     });
   }
@@ -649,7 +657,7 @@ app.get('/api/admin/listings', async (c) => {
     }
     annotated.push({ ...l, duplicate: badge });
   }
-  return c.json({ items: [...annotated, ...withOrigin.slice(40)], pruned, pendingTotal });
+  return c.json({ items: [...annotated, ...withOrigin.slice(40)], pruned, dupesPruned, pendingTotal });
 });
 
 /* «Заменить старую»: заявку подал сам человек (владелец), а похожая уже висит

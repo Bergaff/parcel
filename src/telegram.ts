@@ -1282,7 +1282,7 @@ function listingLine(l: Listing): string {
 function repeatReply(repeats: Repeat[]): string {
   const published = repeats.some(({ listing }) => listing.status === 'published');
   const lines = repeats.map(({ listing, why }) => `${listingLine(listing)}\n${escapeHtml(why)}`);
-  return '♻️ <b>Такое объявление уже есть на доске</b> — дубль создавать не стал' +
+  return `♻️ <b>Такое объявление уже есть ${published ? 'на доске' : 'в очереди модерации'}</b> — дубль создавать не стал` +
     (published ? ', освежил его (заявка снова вверху списка).' : '.') +
     `\n\n${lines.join('\n\n')}` +
     '\n\nЕсли это другой человек или другой рейс — добавьте отдельно: /post.';
@@ -1290,6 +1290,14 @@ function repeatReply(repeats: Repeat[]): string {
 
 /** Короткая заметка модератору: пришёл повтор, дубль не создан. */
 export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string): Promise<void> {
+  // Антишторм: чаты автоперепощивают объявление каждые 10 минут, и на каждый
+  // повтор карточка «дубль не создавал» захлебнула бы админский чат. Об одной
+  // и той же заявке — не чаще одной карточки в 6 часов.
+  try {
+    const key = `repeat-note:${listing.id}`;
+    if (await env.KV.get(key) != null) return;
+    await env.KV.put(key, '1', { expirationTtl: 6 * 3600 });
+  } catch { /* KV недоступен — шлём как раньше, без ограничений */ }
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
   const refreshed = listing.status === 'published' ? ' Освежил: заявка снова вверху доски.' : '';

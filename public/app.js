@@ -797,6 +797,7 @@ let adminEditId = null; // id заявки, открытой на редакти
 let adminItems = [];   // список открытой вкладки — правим на месте, без перезагрузки
 let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
 let adminPendingTotal = 0; // сколько заявок реально ждёт в очереди (COUNT на сервере, не длина списка)
+let adminDupesPruned = 0; // сколько явных повторов отклонено из очереди до показа
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -1066,6 +1067,7 @@ async function loadAdmin() {
     const data = await res.json();
     adminItems = data.items ?? [];
     adminPruned = data.pruned ?? 0;
+    adminDupesPruned = data.dupesPruned ?? 0;
     adminPendingTotal = data.pendingTotal ?? adminItems.length;
     renderAdminItems();
   } catch {
@@ -1080,9 +1082,6 @@ async function loadAdmin() {
    и список с самого верха. */
 
 function updateAdminCount() {
-  const prunedNote = adminTab === 'pending' && adminPruned > 0
-    ? ` · просроченных удалено: ${adminPruned}`
-    : '';
   if (adminTab !== 'pending') {
     const n = adminItems.length;
     $('#admin-count').textContent = n === 0
@@ -1090,16 +1089,21 @@ function updateAdminCount() {
       : `На доске: ${n} — действующие и архив`;
     return;
   }
+  // что вычищено из очереди до показа: просроченные и явные повторы
+  const bits = [];
+  if (adminPruned > 0) bits.push(`просроченных удалено: ${adminPruned}`);
+  if (adminDupesPruned > 0) bits.push(`повторов отклонено: ${adminDupesPruned}`);
+  const cleanNote = bits.length ? ` · ${bits.join(' · ')}` : '';
   // число очереди — настоящее (COUNT на сервере), а не «сколько карточек
   // доехало»: раньше при 80 ждущих писалось 50 — по лимиту выборки
   if (adminPendingTotal === 0) {
-    $('#admin-count').textContent = `✅ Необработанных заявок нет.${adminPruned > 0 ? ` Просроченных удалено: ${adminPruned}.` : ''}`;
+    $('#admin-count').textContent = `✅ Необработанных заявок нет.${cleanNote}`;
     return;
   }
   const shownNote = adminItems.length < adminPendingTotal
     ? ` · показаны последние ${adminItems.length}`
     : '';
-  $('#admin-count').textContent = `⏳ Необработано заявок: ${adminPendingTotal}${shownNote}${prunedNote}`;
+  $('#admin-count').textContent = `⏳ Необработано заявок: ${adminPendingTotal}${shownNote}${cleanNote}`;
 }
 
 /** Нарисовать список заявок из adminItems — без сети. */

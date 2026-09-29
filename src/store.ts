@@ -171,6 +171,46 @@ export async function pruneStalePending(env: Env): Promise<number> {
 }
 
 /**
+ * Вычистить из очереди модерации явные повторы: копию объявления, которое
+ * уже на доске, и лишние копии внутри самой очереди (чат с автоперепостом
+ * заводил по 20 одинаковых карточек). Остаётся первая копия, повторные
+ * отклоняются — модератор видит только действительно новые заявки.
+ *
+ * Заявку, которую подал сам человек (сайт, личка бота), не трогаем: это
+ * конфликт «владелец подал сам, а копию уже принесли из чата» — решение
+ * («заменить старую») за модератором, а не за автоочисткой.
+ * Возвращает число отклонённых.
+ */
+export async function pruneDuplicatePending(env: Env): Promise<number> {
+  const pending = await listPending(env, 200);
+  if (pending.length === 0) return 0;
+  // обходим с самых старых: первая копия остаётся, повторные — отклоняются
+  const ordered = [...pending].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const keptIds = new Set<string>();
+  let rejected = 0;
+  for (const l of ordered) {
+    if (isPersonOrigin(env, l)) {
+      keptIds.add(l.id);
+      continue;
+    }
+    const candidates = await findDuplicateCandidates(env, l);
+    // кандидаты из очереди учитываем, только если мы решили такую копию
+    // оставить: иначе пачка одинаковых отклонит друг друга целиком
+    const visible = candidates.filter(
+      (c) => c.id !== l.id && (c.status !== 'pending' || keptIds.has(c.id))
+    );
+    const hit = pickDuplicate(visible, l);
+    if (hit && hit.kind === 'duplicate') {
+      await updateListingStatus(env, l.id, 'rejected');
+      rejected += 1;
+    } else {
+      keptIds.add(l.id);
+    }
+  }
+  return rejected;
+}
+
+/**
  * Заявки по городу (куда ИЛИ откуда), без учёта регистра.
  * Кроме действующих показывает и архив — заявки с прошедшей датой,
  * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
@@ -1009,6 +1049,13 @@ export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
  * живой (на модерации, на доске или в архиве). Маршрут, контакты и текст
  * сравнивает src/dedupe.ts — там города нормализуются, а телефоны сверяются
  * по последним цифрам, поэтому в SQL эти условия не унести.
+ *
+ * Окно — САМЫЕ СВЕЖИЕ заявки, а не «сначала все опубликованные»: раньше
+ * сортировка «published вперёд» при большом объёме доски и архива (>200)
+ * вытесняла из лимита свежие pending-копии, и повтор не видел предыдущую
+ * копию — чат с автоперепостом каждые 10 минут заводил в очередь десяток
+ * одинаковых карточек. Какую из найденных предпочесть (дубль важнее
+ * «похожей», доска важнее очереди), решает pickDuplicate сам.
  */
 export async function findDuplicateCandidates(env: Env, input: DedupeSubject): Promise<Listing[]> {
   const date = input.departureDate ?? null;
@@ -1018,8 +1065,8 @@ export async function findDuplicateCandidates(env: Env, input: DedupeSubject): P
         AND type = ?
         AND (? IS NULL OR departure_date IS NULL
              OR ABS(julianday(departure_date) - julianday(?)) <= 1)
-      ORDER BY (status = 'published') DESC, COALESCE(published_at, created_at) DESC
-      LIMIT 200`
+      ORDER BY COALESCE(published_at, created_at) DESC
+      LIMIT 300`
   ).bind(input.type, date, date).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }

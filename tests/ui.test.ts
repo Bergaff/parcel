@@ -53,6 +53,7 @@ const server = {
   reports: [] as string[],
   pendingNoContact: false, // вторая заявка в очереди — без контакта
   pendingTotal: 0, // настоящее число очереди с сервера (COUNT), 0 — не подменять
+  dupesPruned: 0, // сколько явных повторов отклонено до показа очереди
   replacedWith: null as { id: string; deleteId: string } | null,
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
@@ -180,7 +181,7 @@ function makeFetch(calls: string[]) {
           }
           // сервер выметает просроченные заявки до показа очереди;
           // pendingTotal — настоящее число очереди (COUNT), не длина списка
-          return { body: { items, pruned: 1, ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
+          return { body: { items, pruned: 1, ...(server.dupesPruned ? { dupesPruned: server.dupesPruned } : {}), ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
         }
         return { body: { items: [listing()] } };
       }
@@ -612,6 +613,14 @@ describe('админка', () => {
     expect(win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`)).toBeTruthy();
     expect(text('admin-count')).toContain('Необработано заявок: 1');
     server.pendingNoContact = false;
+  });
+
+  it('счётчик показывает, сколько повторов вычищено из очереди до показа', async () => {
+    server.dupesPruned = 18;
+    byId('admin-refresh').click();
+    await settle(80);
+    expect(text('admin-count')).toContain('повторов отклонено: 18');
+    server.dupesPruned = 0;
   });
 
   it('счётчик очереди — настоящее число с сервера, а не длина списка', async () => {

@@ -28,7 +28,7 @@ vi.mock('../src/stats', async (importOriginal) => {
   };
 });
 
-import { handleTelegramUpdate, listingStatusNote } from '../src/telegram';
+import { handleTelegramUpdate, listingStatusNote, notifyAdminsRepeat } from '../src/telegram';
 import type { Listing } from '../src/types';
 
 const env = {
@@ -352,5 +352,26 @@ describe('/pending — настоящее число очереди', () => {
       },
     });
     expect(sent[0]!.text).toContain('Необработанных заявок нет');
+  });
+});
+
+describe('антишторм карточек повтора', () => {
+  it('об одной заявке — не чаще карточки в 6 часов, о другой — сразу', async () => {
+    sent.length = 0;
+    const store = new Map<string, string>();
+    const kv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => { store.set(k, v); },
+    };
+    const envR = { ...env, KV: kv } as unknown as Env;
+    const l = { id: 'repeat-1', fromCity: 'Бяла', toCity: 'Брест', status: 'published' } as Listing;
+    await notifyAdminsRepeat(envR, l, 'тот же контакт');
+    expect(sent.length).toBe(1);
+    // тот же репост через 10 минут — второй карточки нет
+    await notifyAdminsRepeat(envR, l, 'тот же контакт');
+    expect(sent.length).toBe(1);
+    // о другой заявке — карточка уходит сразу
+    await notifyAdminsRepeat(envR, { ...l, id: 'repeat-2' }, 'тот же контакт');
+    expect(sent.length).toBe(2);
   });
 });
