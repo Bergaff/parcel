@@ -8,6 +8,7 @@
 # Fallback рекламной сети: правится руками, кэш короткий
 /fallback.js
   Cache-Control: public, max-age=300
+  Content-Type: text/javascript; charset=utf-8
 
 # Фавиконы не меняются — держим в кэше неделю
 /favicon.ico
