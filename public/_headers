@@ -5,6 +5,10 @@
 /styles.css
   Cache-Control: public, max-age=300
 
+# Fallback рекламной сети: правится руками, кэш короткий
+/fallback.js
+  Cache-Control: public, max-age=300
+
 # Фавиконы не меняются — держим в кэше неделю
 /favicon.ico
   Cache-Control: public, max-age=604800
