@@ -152,6 +152,13 @@ export function ensureStatTables(env: Env): Promise<void> {
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_js (day TEXT NOT NULL, vid TEXT NOT NULL, PRIMARY KEY (day, vid))'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_bot_chats (chat_id TEXT PRIMARY KEY, last_seen TEXT NOT NULL)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'),
+        // боты работали с чатами и до появления статистики — не начинаем
+        // счётчик с нуля, засеиваем из истории объявлений (idempotent)
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO stat_bot_chats (chat_id, last_seen)
+           SELECT DISTINCT source_chat_id, datetime('now') FROM listings
+           WHERE source_chat_id IS NOT NULL`
+        ),
       ]);
     })();
     statTablesReady.catch(() => { statTablesReady = null; });
@@ -262,7 +269,8 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
 
   const [byDay, jsByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
     env.DB.prepare(
-      `SELECT day, COUNT(*) AS views, COUNT(DISTINCT CASE WHEN bot = 0 THEN vid END) AS uniques,
+      `SELECT day, SUM(CASE WHEN bot = 0 THEN 1 ELSE 0 END) AS views,
+              COUNT(DISTINCT CASE WHEN bot = 0 THEN vid END) AS uniques,
               SUM(bot) AS bots
        FROM stat_views WHERE day >= ? GROUP BY day`
     ).bind(from).all(),
@@ -316,7 +324,9 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
 
   const views = daily.reduce((a, d) => a + d.views, 0);
   const uniquesSum = daily.reduce((a, d) => a + d.uniques, 0);
-  const coveredDays = daily.filter((d) => d.views > 0).length;
+  // день «покрыт», только если были живые посетители: день с одними
+  // ботами данными не считаем (иначе «1 из 30» при нулевых людях)
+  const coveredDays = daily.filter((d) => d.uniques > 0 || d.views > 0).length;
   const jsSum = daily.reduce((a, d) => a + d.js, 0);
   // доля каждой строки от общего числа просмотров (один знак после запятой)
   const withShare = <T extends object>(rows: T[], count: (r: T) => number, total: number) =>
