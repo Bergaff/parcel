@@ -1139,6 +1139,40 @@ export async function lastSerpCheckAt(env: Env): Promise<string | null> {
   return row?.t ?? null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Настройки сайта (key-value): например, доступ к медиакиту            */
+/* ------------------------------------------------------------------ */
+
+let settingsReady: Promise<void> | null = null;
+
+export async function ensureSettingsTable(env: Env): Promise<void> {
+  if (!settingsReady) {
+    settingsReady = (async () => {
+      await env.DB.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)').run();
+    })();
+    settingsReady.catch(() => { settingsReady = null; });
+  }
+  return settingsReady;
+}
+
+export async function getSetting(env: Env, key: string): Promise<string | null> {
+  await ensureSettingsTable(env);
+  const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first() as { value: string } | null;
+  return row?.value ?? null;
+}
+
+export async function setSetting(env: Env, key: string, value: string): Promise<void> {
+  await ensureSettingsTable(env);
+  await env.DB.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).bind(key, value).run();
+}
+
+export async function deleteSetting(env: Env, key: string): Promise<void> {
+  await ensureSettingsTable(env);
+  await env.DB.prepare('DELETE FROM settings WHERE key = ?').bind(key).run();
+}
+
 export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
   const res = await env.DB.batch([
     env.DB.prepare('DELETE FROM match_pairs WHERE run_id = ?').bind(id),

@@ -11,7 +11,7 @@
  * приватной.
  */
 import type { Env } from './types';
-import { getCounts, listDailyStats } from './store';
+import { getCounts, getSetting, listDailyStats } from './store';
 
 /* ------------------------------------------------------------------ */
 /* Данные                                                              */
@@ -122,10 +122,40 @@ export function getCookie(req: Request, name: string): string | null {
   return null;
 }
 
-/** Проверить cookie входа: пересчитываем хэш по секретам и сверяем. */
+/**
+ * Проверить cookie входа. Приоритет — пара, заданная в админке (таблица
+ * settings, там хранится только хэш), затем секреты воркера
+ * MEDIA_LOGIN / MEDIA_PASSWORD.
+ */
 export async function isMediaAuthed(cookieValue: string | null, env: Env): Promise<boolean> {
-  if (!cookieValue || !env.MEDIA_LOGIN || !env.MEDIA_PASSWORD) return false;
-  return cookieValue === await mediaCookieValue(env.MEDIA_LOGIN, env.MEDIA_PASSWORD);
+  if (!cookieValue) return false;
+  const storedHash = await getSetting(env, 'mediakit_hash').catch(() => null);
+  // пара задана в админке — работает ТОЛЬКО она; секреты воркера
+  // возвращаются кнопкой «сбросить» в админке
+  if (storedHash) return cookieValue === storedHash;
+  if (env.MEDIA_LOGIN && env.MEDIA_PASSWORD) {
+    return cookieValue === await mediaCookieValue(env.MEDIA_LOGIN, env.MEDIA_PASSWORD);
+  }
+  return false;
+}
+
+/**
+ * Проверить пару логин/пароль при входе: сначала пара из админки, затем
+ * секреты воркера. Возвращает значение cookie или null, если не сошлось.
+ */
+export async function checkMediaCredentials(
+  login: string,
+  password: string,
+  env: Env
+): Promise<string | null> {
+  const hash = await mediaCookieValue(login, password);
+  const storedHash = await getSetting(env, 'mediakit_hash').catch(() => null);
+  if (storedHash) return hash === storedHash ? hash : null;
+  if (env.MEDIA_LOGIN && env.MEDIA_PASSWORD) {
+    const envHash = await mediaCookieValue(env.MEDIA_LOGIN, env.MEDIA_PASSWORD);
+    if (hash === envHash) return envHash;
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -169,81 +199,6 @@ export function renderLoginPage(error?: string | null): string {
     <label>Пароль<br><input type="password" name="password" autocomplete="current-password" required></label><br><br>
     <button type="submit" class="btn btn-ink">войти</button>
   </form>
-</main>
-</body>
-</html>`;
-}
-
-function fmtDateRu(iso: string): string {
-  const [, m, d] = iso.split('-');
-  const months = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-  return `${Number(d)} ${months[Number(m) - 1] ?? ''}`;
-}
-
-/** Сама страница статистики (после входа). */
-export function renderMediaPage(stats: MediaStats, opts: { contact?: string | null } = {}): string {
-  const maxArrived = Math.max(1, ...stats.daily.map((d) => d.arrived));
-  const bars = stats.daily
-    .map((d) => `<div class="media-bar" style="height:${Math.max(2, Math.round((d.arrived / maxArrived) * 140))}px" title="${d.day}: ${d.arrived}"></div>`)
-    .join('');
-  const ticks = stats.daily
-    .filter((_, i) => i % 5 === 0)
-    .map((d) => `<span>${fmtDateRu(d.day)}</span>`)
-    .join('');
-  const onBoardTotal = stats.onBoard.offer + stats.onBoard.request;
-  const tiles = [
-    [String(onBoardTotal), 'объявлений на доске сейчас'],
-    [`${stats.onBoard.offer} / ${stats.onBoard.request}`, 'везут / нужно передать'],
-    [String(stats.last30.arrived), 'новых заявок за 30 дней'],
-    [String(stats.last30.cities), 'городов в обороте за 30 дней'],
-    [String(stats.viewsTotal), 'просмотров карточек'],
-  ]
-    .map(([n, label]) => `<div class="media-tile"><b>${n}</b><span>${label}</span></div>`)
-    .join('');
-  const dirs = stats.topDirections.length > 0
-    ? `<table class="stats-table">
-        <thead><tr><th>направление</th><th>объявлений за 30 дней</th></tr></thead>
-        <tbody>${stats.topDirections
-          .map((d) => `<tr><td>${escapeHtml(d.from)} → ${escapeHtml(d.to)}</td><td>${d.n}</td></tr>`)
-          .join('')}</tbody>
-      </table>`
-    : '<p class="plain">Направления появятся, когда наберутся объявления.</p>';
-  const sources = stats.sources.length > 0
-    ? stats.sources.map((s) => `${s.label} — ${s.share}% (${s.n})`).join(' · ')
-    : '—';
-  const contact = opts.contact
-    ? `<p class="plain">Для рекламы и вопросов: ${escapeHtml(opts.contact)}</p>`
-    : '';
-
-  return `${SHELL_HEAD}
-</head>
-<body>
-<main class="media-wrap">
-  <p class="doc-date">попутка. · медиакит · собрано ${fmtDateRu(stats.generatedAt.slice(0, 10))}</p>
-  <h1 class="page-title">Статистика доски «попутка.»</h1>
-  <p class="plain">«попутка.» — доска объявлений о передаче посылок попутным транспортом между Польшей, Беларусью и соседними странами. Люди публикуют поездки и просьбы о передаче, договариваются напрямую, без посредников. Аудитория — релоканты, отправители документов и посылок, водители регулярных маршрутов.</p>
-
-  <h2 class="rule-head">Ключевые цифры</h2>
-  <div class="media-grid">${tiles}</div>
-
-  <h2 class="rule-head">Новые заявки по дням (30 дней)</h2>
-  <div class="media-chart">${bars}</div>
-  <div class="media-ticks">${ticks}</div>
-  <p class="plain">Всего за 30 дней: ${stats.last30.arrived} заявок, из них одобрено к публикации ${stats.last30.approved}.</p>
-
-  <h2 class="rule-head">Популярные направления</h2>
-  ${dirs}
-
-  <h2 class="rule-head">Откуда приходят заявки</h2>
-  <p class="plain">${sources}</p>
-
-  <h2 class="rule-head">Контакты</h2>
-  ${contact || '<p class="plain">Свяжитесь с владельцем доски — контакты в профиле бота <a href="https://t.me/parcel_transfer_bot">@parcel_transfer_bot</a>.</p>'}
-
-  <form method="post" action="/mediakit/logout" style="margin-top:28px">
-    <button type="submit" class="btn btn-line btn-sm">выйти</button>
-  </form>
-  <p class="doc-date" style="margin-top:24px">Данные — собственная статистика доски pop-utka.app, агрегаты без персональной информации. Обновляется при каждом открытии страницы.</p>
 </main>
 </body>
 </html>`;

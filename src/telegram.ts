@@ -1,5 +1,6 @@
 import type { Env, Listing, ListingInput, ListingType } from './types';
 import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, parseRecurring, normalizeCity, isPassengerOnly, worthAiCheck, findCities } from './parser';
+import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
@@ -1555,7 +1556,11 @@ export async function handleTelegramUpdate(env: Env, update: TgUpdate): Promise<
   try {
     if (update.message) {
       const msg = update.message;
-      if (msg.chat.type === 'private') await handlePrivateText(env, msg);
+      if (msg.chat.type === 'private') {
+        // статистика медиакита: сколько чатов работает бот (не ждём и не падаем)
+        await logBotChat(env, String(msg.chat.id)).catch(() => undefined);
+        await handlePrivateText(env, msg);
+      }
       else await handleGroupText(env, msg);
     } else if (update.channel_post) {
       await handleGroupText(env, update.channel_post);

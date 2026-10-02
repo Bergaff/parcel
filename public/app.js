@@ -1056,6 +1056,10 @@ async function loadAdmin() {
     await renderAdminSeo();
     return;
   }
+  if (adminTab === 'settings') {
+    await renderAdminSettings();
+    return;
+  }
   try {
     const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
     if (res.status === 401) {
@@ -2065,6 +2069,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
   $('#admin-tab-stats').classList.toggle('on', tab === 'stats');
   $('#admin-tab-seo').classList.toggle('on', tab === 'seo');
+  $('#admin-tab-settings').classList.toggle('on', tab === 'settings');
   loadAdmin();
 }
 
@@ -2217,6 +2222,86 @@ async function adminSeoCheck(path) {
   }
 }
 
+/* ---------- настройки: доступ партнёров к статистике ---------- */
+
+async function renderAdminSettings() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'Настройки сайта.';
+  listEl.replaceChildren(el('p', { class: 'empty-note', text: 'загружаю…' }));
+  let data;
+  try {
+    const res = await adminApi('/api/admin/mediakit-creds');
+    if (!res.ok) throw new Error('network');
+    data = await res.json();
+  } catch {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».',
+    }));
+    return;
+  }
+
+  const status = data.source === 'db'
+    ? `задан здесь · логин: ${data.login}`
+    : data.source === 'env'
+      ? 'задан секретами воркера (MEDIA_LOGIN / MEDIA_PASSWORD)'
+      : 'не задан — страница закрыта для всех';
+  const card = el('section', { class: 'admin-card' }, [
+    el('h3', { text: 'Медиакит — вход для партнёров' }),
+    el('p', { class: 'empty-note' }, [
+      el('b', { text: 'Сейчас: ' }),
+      status,
+    ]),
+    el('p', { class: 'empty-note' }, [
+      'Страница статистики для рекламных бирж: ',
+      el('a', { href: '/mediakit', target: '_blank', rel: 'noopener', text: 'pop-utka.app/mediakit' }),
+      ' — аудитория, география, устройства, источники и сводка доски.',
+    ]),
+    el('p', { class: 'empty-note', text: 'Задайте логин и пароль — они сработают сразу, деплой не нужен. Пароль хранится только хешем.' }),
+    el('label', {}, [
+      'логин ',
+      el('input', { type: 'text', id: 'media-login', autocomplete: 'off', placeholder: 'например, partner' }),
+    ]),
+    el('label', {}, [
+      'пароль ',
+      el('input', { type: 'text', id: 'media-password', autocomplete: 'off', placeholder: 'минимум 4 символа' }),
+    ]),
+    el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, [
+      el('button', { class: 'btn btn-ink btn-sm', type: 'button', text: 'сохранить', onclick: () => adminSaveMediaCreds(false) }),
+      el('button', {
+        class: 'btn btn-line btn-sm', type: 'button', text: 'сбросить (вернуться к секретам воркера)',
+        onclick: () => adminSaveMediaCreds(true),
+      }),
+    ]),
+  ]);
+  listEl.replaceChildren(card);
+}
+
+async function adminSaveMediaCreds(reset) {
+  const body = reset
+    ? { reset: true }
+    : {
+        login: String($('#media-login').value || '').trim(),
+        password: String($('#media-password').value || ''),
+      };
+  try {
+    const res = await adminApi('/api/admin/mediakit-creds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || 'Не получилось сохранить.');
+      return;
+    }
+    toast(reset ? 'Сброшено — работают секреты воркера.' : 'Сохранено — новые логин и пароль уже действуют.');
+    await renderAdminSettings();
+  } catch {
+    toast('Не получилось сохранить. Попробуйте ещё раз.');
+  }
+}
+
 async function adminSetStatus(id, status) {
   try {
     const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/status`, {
@@ -2257,6 +2342,7 @@ function bindAdmin() {
   $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
   $('#admin-tab-stats').addEventListener('click', () => switchAdminTab('stats'));
   $('#admin-tab-seo').addEventListener('click', () => switchAdminTab('seo'));
+  $('#admin-tab-settings').addEventListener('click', () => switchAdminTab('settings'));
   $('#admin-key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('#admin-key').value.trim();
@@ -2286,6 +2372,11 @@ async function init() {
   bindBoard();
   bindForm();
   bindAdmin();
+
+  // маячок статистики: «этот браузер живой» (роботы JS не исполняют).
+  // Сервер пометит посетителя дня как подтверждённого — на /mediakit это
+  // доля «подтверждены браузером»
+  try { fetch('/api/visit-confirm', { keepalive: true }).catch(() => {}); } catch { /* не важно */ }
 
   // Сервер вставил объявления и карточку прямо в HTML (src/ssr.ts) и передал
   // данные сюда: кладём их в кэш, чтобы первый же клик открыл карточку без

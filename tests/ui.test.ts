@@ -52,6 +52,7 @@ const server = {
   cleanedIds: [] as string[],
   reports: [] as string[],
   pendingNoContact: false, // вторая заявка в очереди — без контакта
+  mediaCreds: null as Loose | null, // сохранённые в админке логин/пароль медиакита
   pendingTotal: 0, // настоящее число очереди с сервера (COUNT), 0 — не подменять
   dupesPruned: 0, // сколько явных повторов отклонено до показа очереди
   replacedWith: null as { id: string; deleteId: string } | null,
@@ -184,6 +185,16 @@ function makeFetch(calls: string[]) {
           return { body: { items, pruned: 1, ...(server.dupesPruned ? { dupesPruned: server.dupesPruned } : {}), ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
         }
         return { body: { items: [listing()] } };
+      }
+      if (path === '/api/admin/mediakit-creds') {
+        if (method === 'POST') {
+          calls.push(`SAVED ${String(init.body ?? '')}`);
+          server.mediaCreds = JSON.parse(String(init.body ?? '{}')) as Loose;
+          return { body: { ok: true, source: 'db', login: server.mediaCreds.login } };
+        }
+        return server.mediaCreds
+          ? { body: { login: server.mediaCreds.login, source: 'db' } }
+          : { body: { login: null, source: 'env' } };
       }
       if (path === '/api/admin/seo') {
         return {
@@ -634,6 +645,31 @@ describe('админка', () => {
     expect(win.document.querySelector(`#admin-list .admin-card[data-id="${NOCONTACT}"]`)).toBeTruthy();
     expect(text('admin-count')).toContain('Необработано заявок: 1');
     server.pendingNoContact = false;
+  });
+
+  it('вкладка «настройки»: логин и пароль медиакита задаются из админки', async () => {
+    byId('admin-tab-settings').click();
+    await settle(80);
+    // форма с текущим состоянием (секреты воркера)
+    expect(win.document.querySelector('#admin-list')?.textContent).toContain('задан секретами воркера');
+    const loginInput = win.document.querySelector('#media-login') as HTMLInputElement | null;
+    const passInput = win.document.querySelector('#media-password') as HTMLInputElement | null;
+    expect(loginInput).toBeTruthy();
+    expect(passInput).toBeTruthy();
+    // сохраняем новую пару — уходит POST с логином и паролем
+    loginInput!.value = 'partner';
+    passInput!.value = 's3cret';
+    const save = Array.from(win.document.querySelectorAll('#admin-list button')).find((b) => b.textContent === 'сохранить') as HTMLElement;
+    save.click();
+    await settle(150);
+    expect(calls.some((c) => String(c).startsWith('SAVED') && c.includes('partner'))).toBe(true);
+    expect(text('toast')).toContain('Сохранено');
+    // перерисовка показывает новую пару
+    expect(win.document.querySelector('#admin-list')?.textContent).toContain('логин: partner');
+    server.mediaCreds = null;
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(150);
   });
 
   it('счётчик показывает, сколько повторов вычищено из очереди до показа', async () => {

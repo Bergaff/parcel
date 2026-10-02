@@ -1,10 +1,14 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
-import { gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage, renderMediaPage } from './mediakit';
+import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
+import {
+  confirmJsVisit, gatherVisitStats, isTrackablePage, pruneVisitStats, renderAudiencePage,
+  renderDailyCsv, trackPageView,
+} from './visit-stats';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -42,6 +46,39 @@ app.use('/api/*', async (c, next) => {
     return c.body(null, 204);
   }
   await next();
+});
+
+/* ------------- Статистика аудитории (медиакит) ---------------- */
+/* Каждый просмотр контентной страницы пишем в stat_views: воркер видит
+   запросы и при попадании edge-кэша (кэш программный, внутри воркера).
+   Роботы тоже пишутся (bot=1) — считаются «отфильтрованными». Пишем
+   после ответа (waitUntil), чтобы не задерживать страницу. */
+app.use('*', async (c, next) => {
+  await next();
+  try {
+    if (c.req.method !== 'GET' || c.res.status >= 400 || c.res.status < 200) return;
+    const path = new URL(c.req.url).pathname;
+    if (!isTrackablePage(path)) return;
+    const cf = (c.req.raw as { cf?: { country?: string; asOrganization?: string } }).cf;
+    c.executionCtx.waitUntil(trackPageView(c.env, {
+      path,
+      ip: getIp(c),
+      ua: c.req.header('user-agent') ?? '',
+      country: cf?.country ?? null,
+      asOrg: cf?.asOrganization ?? null,
+      referer: c.req.header('referer') ?? null,
+    }));
+  } catch { /* статистика не должна ломать сайт */ }
+});
+
+/* Маячок «браузер живой»: app.js дёргает его при загрузке страницы —
+   посетитель дня помечается как подтверждённый JavaScript-ом */
+app.get('/api/visit-confirm', (c) => {
+  c.header('Cache-Control', 'no-store');
+  c.executionCtx.waitUntil(
+    confirmJsVisit(c.env, { ip: getIp(c), ua: c.req.header('user-agent') ?? '' })
+  );
+  return c.body(null, 204);
 });
 
 /* ---------------- Edge-кэш публичных страниц ---------------- */
@@ -575,13 +612,37 @@ app.get('/mediakit', async (c) => {
   c.header('Cache-Control', 'no-store');
   const authed = await isMediaAuthed(getCookie(c.req.raw, 'media'), c.env);
   if (!authed) return c.html(renderLoginPage());
+  const daysRaw = Number(c.req.query('days') ?? 7);
+  const days = [1, 7, 30].includes(daysRaw) ? daysRaw : 7;
   try {
-    const stats = await gatherMediaStats(c.env);
-    return c.html(renderMediaPage(stats, { contact: c.env.MEDIA_CONTACT ?? null }));
+    // сводка доски может не собраться (например, колонки ещё не созданы) —
+    // страница аудитории в этом не нуждается
+    const board = await gatherMediaStats(c.env).then((s) => ({
+      onBoard: s.onBoard.offer + s.onBoard.request,
+      last30Arrived: s.last30.arrived,
+      last30Cities: s.last30.cities,
+      viewsTotal: s.viewsTotal,
+    })).catch(() => null);
+    const audience = await gatherVisitStats(c.env, days);
+    return c.html(renderAudiencePage({ audience, board }));
   } catch (e) {
     console.error('mediakit failed', e);
     return c.html(renderLoginPage('Статистика временно недоступна — попробуйте позже.'), 503);
   }
+});
+
+app.get('/mediakit/export.csv', async (c) => {
+  c.header('X-Robots-Tag', 'noindex, nofollow');
+  const authed = await isMediaAuthed(getCookie(c.req.raw, 'media'), c.env);
+  if (!authed) return c.redirect('/mediakit');
+  const daysRaw = Number(c.req.query('days') ?? 7);
+  const days = [1, 7, 30].includes(daysRaw) ? daysRaw : 7;
+  const audience = await gatherVisitStats(c.env, days);
+  return c.body(renderDailyCsv(audience.daily), 200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="poputka-stats-${days}d.csv"`,
+    'Cache-Control': 'no-store',
+  });
 });
 
 app.post('/mediakit/login', async (c) => {
@@ -595,10 +656,9 @@ app.post('/mediakit/login', async (c) => {
   const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
   const login = String(form.login ?? '');
   const password = String(form.password ?? '');
-  const ok = Boolean(c.env.MEDIA_LOGIN && c.env.MEDIA_PASSWORD
-    && login === c.env.MEDIA_LOGIN && password === c.env.MEDIA_PASSWORD);
-  if (!ok) return c.html(renderLoginPage('Неверный логин или пароль.'), 401);
-  const value = await mediaCookieValue(login, password);
+  // пара задаётся в админке (настройки) или секретами MEDIA_LOGIN/MEDIA_PASSWORD
+  const value = await checkMediaCredentials(login, password, c.env);
+  if (!value) return c.html(renderLoginPage('Неверный логин или пароль.'), 401);
   const secure = c.req.url.startsWith('https') ? '; Secure' : '';
   c.header('Set-Cookie', `media=${value}; Path=/mediakit; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}${secure}`);
   return c.redirect('/mediakit');
@@ -607,6 +667,34 @@ app.post('/mediakit/login', async (c) => {
 app.post('/mediakit/logout', (c) => {
   c.header('Set-Cookie', 'media=; Path=/mediakit; HttpOnly; SameSite=Lax; Max-Age=0');
   return c.redirect('/mediakit');
+});
+
+/* ---------- Медиакит: логин/пароль задаётся в админке ---------- */
+
+app.get('/api/admin/mediakit-creds', async (c) => {
+  const [login, hash] = await Promise.all([
+    getSetting(c.env, 'mediakit_login').catch(() => null),
+    getSetting(c.env, 'mediakit_hash').catch(() => null),
+  ]);
+  const source = hash ? 'db' : (c.env.MEDIA_LOGIN && c.env.MEDIA_PASSWORD) ? 'env' : 'none';
+  return c.json({ login: hash ? login : null, source });
+});
+
+app.post('/api/admin/mediakit-creds', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { login?: unknown; password?: unknown; reset?: unknown };
+  if (b.reset === true) {
+    await deleteSetting(c.env, 'mediakit_login');
+    await deleteSetting(c.env, 'mediakit_hash');
+    const source = (c.env.MEDIA_LOGIN && c.env.MEDIA_PASSWORD) ? 'env' : 'none';
+    return c.json({ ok: true, source });
+  }
+  const login = String(b.login ?? '').trim();
+  const password = String(b.password ?? '');
+  if (login.length < 3) return c.json({ error: 'Логин — минимум 3 символа.' }, 400);
+  if (password.length < 4) return c.json({ error: 'Пароль — минимум 4 символа.' }, 400);
+  await setSetting(c.env, 'mediakit_login', login);
+  await setSetting(c.env, 'mediakit_hash', await mediaCookieValue(login, password));
+  return c.json({ ok: true, source: 'db', login });
 });
 
 /* ---------- SEO-видимость: корпуса ИИ + позиции ---------- */
@@ -1134,6 +1222,13 @@ const worker = {
     }
     const res = await archiveExpired(env);
     console.log('archiveExpired:', JSON.stringify(res));
+
+    // сырая статистика аудитории живёт 90 дней — дальше удаляется
+    try {
+      await pruneVisitStats(env);
+    } catch (e) {
+      console.error('prune visit stats failed', e);
+    }
 
     // SEO-видимость раз в неделю: краулы Common Crawl выходят примерно раз в
     // месяц-два, позиции достаточно мерить еженедельно (20 запросов ≈ 85/мес —
