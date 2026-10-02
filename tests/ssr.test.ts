@@ -13,6 +13,7 @@ import {
   renderShell, setView, sourceLabel, todayLine,
 } from '../src/ssr';
 import { extractFaq, itemDescription, itemTitle, siteOrigin, STATIC_PAGES } from '../src/pages';
+import { SITE_VERSION } from '../src/version';
 import {
   breadcrumbsLd, citySlug, faqPageLd, headMeta, itemListLd, jsonForScript, jsonLd, routeSlug, translit,
 } from '../src/seo';
@@ -463,6 +464,7 @@ describe('фавикон', () => {
   it('настоящие файлы вместо data-URI — поисковики показывают значок, а не глобус', () => {
     // Яндекс и Google не читают data-URI из <link rel="icon">: в выдаче был глобус.
     // Нужны файлы: /favicon.ico в корне (его ищет Яндекс) + ico/svg/apple-touch в link.
+    // В статику версию не зашиваем — её добавляет renderShell (?v=, см. тест выше).
     for (const html of [INDEX_HTML, NOT_FOUND_HTML]) {
       expect(html).toContain('<link rel="icon" href="/favicon.ico"');
       expect(html).toContain('href="/favicon.svg"');

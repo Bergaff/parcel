@@ -24,6 +24,7 @@ import {
   type CityStat, type RoutePair,
 } from './store';
 import { fmtDayShort, plural } from './format';
+import { SITE_VERSION } from './version';
 import {
   breadcrumbsLd, citySlug, faqPageLd, headMeta, itemListLd, jsonLdAll, routeSlug, SITE_NAME,
   type Crumb,
@@ -292,10 +293,12 @@ export function seoPageShell(opts: {
     imageAlt: opts.imageAlt,
   })}
   ${jsonLdAll(opts.jsonLd ?? [])}
-  <!-- реальный фавикон: поисковики не читают data-URI, в выдаче был глобус -->
-  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <!-- реальный фавикон: поисковики не читают data-URI, в выдаче был глобус.
+       ?v= меняется с каждым релизом: поисковик видит «новую» иконку и
+       не держит в кэше старую (или закэшированный 404 времён data-URI) -->
+  <link rel="icon" href="/favicon.ico?v=${SITE_VERSION}" sizes="16x16 32x32 48x48" />
+  <link rel="icon" href="/favicon.svg?v=${SITE_VERSION}" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=${SITE_VERSION}" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>

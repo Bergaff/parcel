@@ -253,6 +253,8 @@ export function todayLine(now: Date): string {
   return `${wd}, ${msk.getUTCDate()} ${month}`;
 }
 
+import { SITE_VERSION } from './version';
+
 /**
  * Собрать страницу: index.html + SEO-блок + нужная секция + SSR-контент.
  * Всё, что не передано, остаётся как в статике (страница продолжает работать
@@ -260,6 +262,14 @@ export function todayLine(now: Date): string {
  */
 export async function renderShell(env: Env, opts: ShellOptions): Promise<string> {
   let html = await readShellTemplate(env);
+
+  // Фавиконы — с версией сборки в URL: каждый релиз меняет адрес, и поисковик
+  // пере-скачивает иконку вместо закэшированной старой (приём подсмотрен на
+  // threadsviewer.online, у которого иконка в выдаче появляется быстро)
+  html = html.replace(
+    /href="(\/favicon\.ico|\/favicon\.svg|\/apple-touch-icon\.png)"/g,
+    `href="$1?v=${SITE_VERSION}"`
+  );
 
   const head = [
     `<title>${escapeHtml(opts.title)}</title>`,

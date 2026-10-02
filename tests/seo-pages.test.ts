@@ -38,6 +38,7 @@ import {
   footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routePathFor, SEO_ROUTES,
 } from '../src/seo-routes';
 import { citySlug, routeSlug } from '../src/seo';
+import { SITE_VERSION } from '../src/version';
 
 const ORIGIN = 'https://pop-utka.app';
 const env = {} as Env;
@@ -164,7 +165,7 @@ describe('страница маршрута', () => {
     // статистика пары попала в подпись под заголовком
     expect(html).toContain('4 заявки на доске');
     // фавикон — реальными файлами (см. tests/ssr.test.ts), не только на главной
-    expect(html).toContain('<link rel="icon" href="/favicon.ico"');
+    expect(html).toContain(`<link rel="icon" href="/favicon.ico?v=${SITE_VERSION}"`);
   });
 
   it('живые заявки маршрута отрендерены ссылками на карточки', async () => {

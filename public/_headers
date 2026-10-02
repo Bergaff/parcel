@@ -10,10 +10,12 @@
   Cache-Control: public, max-age=300
   Content-Type: text/javascript; charset=utf-8
 
-# Фавиконы не меняются — держим в кэше неделю
+# Фавиконы: в HTML ссылки идут с ?v=<версия> (новый релиз = новый адрес),
+# а сам файл по прямому пути Яндекс может качать и без версии — держим
+# кэш коротким, чтобы поисковик быстро увидел замену
 /favicon.ico
-  Cache-Control: public, max-age=604800
+  Cache-Control: public, max-age=3600
 /favicon.svg
-  Cache-Control: public, max-age=604800
+  Cache-Control: public, max-age=3600
 /apple-touch-icon.png
-  Cache-Control: public, max-age=604800
+  Cache-Control: public, max-age=3600
