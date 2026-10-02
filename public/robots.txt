@@ -2,6 +2,7 @@ User-agent: *
 Disallow: /api/
 Disallow: /admin
 Disallow: /og-debug/
+Disallow: /mediakit
 
 Allow: /
 

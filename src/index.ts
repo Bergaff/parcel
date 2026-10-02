@@ -4,6 +4,7 @@ import { normalizeCity, parseRecurring } from './parser';
 import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
+import { gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage, renderMediaPage } from './mediakit';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
@@ -565,6 +566,47 @@ app.get('/api/admin/pending', async (c) => {
   const items = await listPending(c.env, 200);
   const total = await countPending(c.env);
   return c.json({ items, total });
+});
+
+/* ---------- Медиакит: статистика для рекламных бирж ---------- */
+
+app.get('/mediakit', async (c) => {
+  c.header('X-Robots-Tag', 'noindex, nofollow');
+  c.header('Cache-Control', 'no-store');
+  const authed = await isMediaAuthed(getCookie(c.req.raw, 'media'), c.env);
+  if (!authed) return c.html(renderLoginPage());
+  try {
+    const stats = await gatherMediaStats(c.env);
+    return c.html(renderMediaPage(stats, { contact: c.env.MEDIA_CONTACT ?? null }));
+  } catch (e) {
+    console.error('mediakit failed', e);
+    return c.html(renderLoginPage('Статистика временно недоступна — попробуйте позже.'), 503);
+  }
+});
+
+app.post('/mediakit/login', async (c) => {
+  c.header('X-Robots-Tag', 'noindex, nofollow');
+  // брутфорс-щит: 10 попыток за 15 минут с одного адреса
+  const ip = c.req.header('CF-Connecting-IP') ?? 'local';
+  const rl = await rateLimit(c.env, `media-login:${ip}`, 10, 900);
+  if (!rl.allowed) {
+    return c.html(renderLoginPage('Слишком много попыток входа — подождите 15 минут.'), 429);
+  }
+  const form = await c.req.parseBody().catch(() => ({}) as Record<string, unknown>);
+  const login = String(form.login ?? '');
+  const password = String(form.password ?? '');
+  const ok = Boolean(c.env.MEDIA_LOGIN && c.env.MEDIA_PASSWORD
+    && login === c.env.MEDIA_LOGIN && password === c.env.MEDIA_PASSWORD);
+  if (!ok) return c.html(renderLoginPage('Неверный логин или пароль.'), 401);
+  const value = await mediaCookieValue(login, password);
+  const secure = c.req.url.startsWith('https') ? '; Secure' : '';
+  c.header('Set-Cookie', `media=${value}; Path=/mediakit; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}${secure}`);
+  return c.redirect('/mediakit');
+});
+
+app.post('/mediakit/logout', (c) => {
+  c.header('Set-Cookie', 'media=; Path=/mediakit; HttpOnly; SameSite=Lax; Max-Age=0');
+  return c.redirect('/mediakit');
 });
 
 /* ---------- SEO-видимость: корпуса ИИ + позиции ---------- */

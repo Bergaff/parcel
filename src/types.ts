@@ -21,6 +21,11 @@ export interface Env {
   AI_BASE_URL?: string;
   /** Ключ serpapi.com — включает трекер позиций (бесплатный тариф: 100 поисков/мес). */
   SERPAPI_KEY?: string;
+  /** Логин и пароль страницы /mediakit (статистика для рекламных бирж). */
+  MEDIA_LOGIN?: string;
+  MEDIA_PASSWORD?: string;
+  /** Контакты для рекламы на странице /mediakit (текст, например «@user в Telegram»). */
+  MEDIA_CONTACT?: string;
 }
 
 export type ListingType = 'offer' | 'request';
