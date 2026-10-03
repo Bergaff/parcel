@@ -204,13 +204,22 @@ export async function buildHomePage(env: Env, origin: string, url: URL): Promise
   // раскрывающиеся вопросы в выдаче заметно поднимают кликабельность сниппета
   const homeFaq = filtered ? [] : extractFaq(await readShellTemplate(env), 'list');
 
+  // Фильтр по паре городов — это та же страница, что и /r/<слаг>: Гугл и сам
+  // выбирает её каноником (в GSC это «копия: канонические версии не
+  // совпадают»), поэтому подтверждаем его выбор вместо canonical на главную.
+  // Фильтры без пары (тип, дата, один город) остаются на главной.
+  const routeCanonical = f.from && f.to
+    ? await routePathFor(env, f.from, f.to)
+    : null;
+
   const html = await renderShell(env, {
     view: 'list',
     title,
     description,
-    canonical: filtered ? `${origin}/` : `${origin}/`,
+    canonical: `${origin}${routeCanonical ?? '/'}`,
     origin,
-    // фильтры — не самостоятельная страница: canonical на главную, в индекс не пускаем
+    // фильтры — не самостоятельная страница: canonical на маршрут или главную,
+    // в индекс не пускаем
     robots: filtered ? 'noindex, follow' : undefined,
     total,
     counts,

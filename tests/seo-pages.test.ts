@@ -5,6 +5,8 @@
  * пар появляются сами, города склоняются по-русски, sitemap-индекс ссылается
  * на три карты, а пустые страницы (без заявок) в индекс не попадают.
  */
+import { readFileSync } from 'node:fs';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Env, Listing } from '../src/types';
@@ -37,6 +39,7 @@ import {
   buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml, cityPathFor, clearRouteIndexCache,
   footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routePathFor, SEO_ROUTES,
 } from '../src/seo-routes';
+import { buildHomePage } from '../src/pages';
 import { citySlug, routeSlug } from '../src/seo';
 import { SITE_VERSION } from '../src/version';
 
@@ -369,5 +372,39 @@ describe('вся витрина рендерится', () => {
       if (!html || !html.includes('<h1 class="page-title">') || html.includes('undefined')) broken.push(`${city} (${slug})`);
     }
     expect(broken).toEqual([]);
+  });
+});
+
+describe('каноник фильтрованной главной', () => {
+  /** buildHomePage рендерит оболочку через ASSETS — даём ей public/index.html. */
+  function envWithAssets(): Env {
+    const index = readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+    return {
+      ASSETS: { fetch: async () => new Response(index, { status: 200 }) },
+    } as unknown as Env;
+  }
+
+  it('пара городов со страницей маршрута: canonical на /r/<слаг> — как выбирает Google', async () => {
+    const html = (await buildHomePage(envWithAssets(), ORIGIN, new URL(`${ORIGIN}/?from=Варшава&to=Минск`))).html;
+    expect(html).toContain(`rel="canonical" href="${ORIGIN}/r/varshava-minsk"`);
+    expect(html).toContain('name="robots" content="noindex, follow"');
+  });
+
+  it('фильтр без пары (тип, дата): canonical на главную', async () => {
+    const html = (await buildHomePage(envWithAssets(), ORIGIN, new URL(`${ORIGIN}/?type=offer&date=2030-05-20`))).html;
+    expect(html).toContain(`rel="canonical" href="${ORIGIN}/"`);
+    expect(html).toContain('name="robots" content="noindex, follow"');
+  });
+
+  it('пара без страницы маршрута: canonical на главную', async () => {
+    db.pairs = [];
+    const html = (await buildHomePage(envWithAssets(), ORIGIN, new URL(`${ORIGIN}/?from=Париж&to=Лиссабон`))).html;
+    expect(html).toContain(`rel="canonical" href="${ORIGIN}/"`);
+  });
+
+  it('главная без фильтров: canonical на саму себя', async () => {
+    const html = (await buildHomePage(envWithAssets(), ORIGIN, new URL(`${ORIGIN}/`))).html;
+    expect(html).toContain(`rel="canonical" href="${ORIGIN}/"`);
+    expect(html).not.toContain('name="robots"');
   });
 });
