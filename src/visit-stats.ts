@@ -28,7 +28,10 @@ const BOT_UA = new RegExp(
 );
 
 /** Организации VPN и дата-центров в Cloudflare asOrganization. */
-const DC_ORG = /(google cloud|amazon|digitalocean|\bovh\b|hetzner|m247|datacamp|linode|vultr|leaseweb|selectel|contabo|scaleway|oracle cloud|microsoft azure|zscaler|nordvpn|surfshark|cyberghost|windscribe)/i;
+/** Организации VPN и дата-центров в Cloudflare asOrganization. Список — не панацея
+ *  (боты ходят и с резидентных прокси), поэтому таблицы аудитории считаются
+ *  ещё и по JS-маячку: см. LIVE_JOIN ниже. */
+const DC_ORG = /(google cloud|google llc|amazon|digitalocean|\bovh\b|hetzner|m247|datacamp|linode|vultr|leaseweb|selectel|contabo|scaleway|oracle cloud|microsoft azure|zscaler|nordvpn|surfshark|cyberghost|windscribe|proton|mullvad|aeza|serverius|stark industries|ip volume|poney|melbikomas|g-?core|flokinet|avantice|pinewater|hostkey|myloc|first root)/i;
 
 export interface UaInfo { bot: boolean; device: string; os: string }
 
@@ -230,12 +233,17 @@ export async function pruneVisitStats(env: Env): Promise<void> {
 
 export interface AudienceDaily { day: string; uniques: number; views: number; js: number; bots: number }
 
+/** Просмотры живой аудитории: посетитель в этот день подтверждён JS-маячком. */
+const LIVE_JOIN = 'JOIN stat_js j ON j.day = v.day AND j.vid = v.vid';
+
 export interface AudienceStats {
   days: number;
   generatedAt: string;
   coveredDays: number;
   avgUniques: number;
   views: number;
+  /** Просмотры подтверждённых посетителей — знаменатель таблиц ниже. */
+  liveViews: number;
   uniquesSum: number;
   pagesPerVisitor: string;
   jsSharePct: number;
@@ -267,7 +275,7 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
   const dayList = lastDays(days);
   const from = dayList[0]!;
 
-  const [byDay, jsByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
+  const [byDay, jsByDay, liveRes, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
     env.DB.prepare(
       `SELECT day, SUM(CASE WHEN bot = 0 THEN 1 ELSE 0 END) AS views,
               COUNT(DISTINCT CASE WHEN bot = 0 THEN vid END) AS uniques,
@@ -275,32 +283,34 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
        FROM stat_views WHERE day >= ? GROUP BY day`
     ).bind(from).all(),
     env.DB.prepare('SELECT day, COUNT(*) AS n FROM stat_js WHERE day >= ? GROUP BY day').bind(from).all(),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0`).bind(from).first(),
     env.DB.prepare(
-      `SELECT COALESCE(country, '—') AS country, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 GROUP BY country ORDER BY n DESC LIMIT 15`
+      `SELECT COALESCE(v.country, '—') AS country, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0
+       GROUP BY country ORDER BY n DESC LIMIT 15`
     ).bind(from).all(),
-    env.DB.prepare('SELECT COUNT(*) AS n FROM stat_views WHERE day >= ? AND bot = 0 AND dc = 1').bind(from).first(),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.dc = 1`).bind(from).first(),
     env.DB.prepare(
-      `SELECT COALESCE(device, '—') AS name, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 GROUP BY device ORDER BY n DESC`
-    ).bind(from).all(),
-    env.DB.prepare(
-      `SELECT COALESCE(os, '—') AS name, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 GROUP BY os ORDER BY n DESC`
+      `SELECT COALESCE(v.device, '—') AS name, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY device ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
-      `SELECT ref_group AS name, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 AND ref_group IS NOT NULL AND ref_group != 'Внутренние'
-       GROUP BY ref_group ORDER BY n DESC`
+      `SELECT COALESCE(v.os, '—') AS name, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY os ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
-      `SELECT ref_host AS host, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 AND ref_host IS NOT NULL
-       GROUP BY ref_host ORDER BY n DESC LIMIT 10`
+      `SELECT v.ref_group AS name, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.ref_group IS NOT NULL AND v.ref_group != 'Внутренние'
+       GROUP BY v.ref_group ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
-      `SELECT kind AS name, COUNT(*) AS n FROM stat_views
-       WHERE day >= ? AND bot = 0 GROUP BY kind ORDER BY n DESC`
+      `SELECT v.ref_host AS host, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.ref_host IS NOT NULL
+       GROUP BY v.ref_host ORDER BY n DESC LIMIT 10`
+    ).bind(from).all(),
+    env.DB.prepare(
+      `SELECT v.kind AS name, COUNT(*) AS n FROM stat_views v
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY v.kind ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS active FROM stat_bot_chats')
       .bind(new Date(Date.now() - days * 86400e3).toISOString()).first(),
@@ -324,6 +334,8 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
 
   const views = daily.reduce((a, d) => a + d.views, 0);
   const uniquesSum = daily.reduce((a, d) => a + d.uniques, 0);
+  // просмотры живой аудитории: знаменатель долей в таблицах (гео/устройства/…)
+  const liveViews = Number((liveRes as { n: number } | null)?.n ?? 0);
   // день «покрыт», только если были живые посетители: день с одними
   // ботами данными не считаем (иначе «1 из 30» при нулевых людях)
   const coveredDays = daily.filter((d) => d.uniques > 0 || d.views > 0).length;
@@ -338,24 +350,25 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
     coveredDays,
     avgUniques: coveredDays > 0 ? Math.round(uniquesSum / coveredDays) : 0,
     views,
+    liveViews,
     uniquesSum,
     pagesPerVisitor: uniquesSum > 0 ? (views / uniquesSum).toFixed(1).replace('.', ',') : '0',
     jsSharePct: uniquesSum > 0 ? Math.round((jsSum / uniquesSum) * 100) : 0,
     botsFiltered: daily.reduce((a, d) => a + d.bots, 0),
     daily,
     countries: withShare(((geo.results ?? []) as unknown as Array<{ country: string; n: number }>)
-      .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, liveViews),
     dcViews: Number((dcRes as { n: number } | null)?.n ?? 0),
     devices: withShare(((devRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
     os: withShare(((osRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
     sources: withShare(((srcRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
     referrers: withShare(((refRes.results ?? []) as unknown as Array<{ host: string; n: number }>)
-      .map((r) => ({ host: String(r.host), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ host: String(r.host), views: Number(r.n) })), (r) => r.views, liveViews),
     pages: withShare(((pageRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
     bot: {
       total: Number((botRes as { total: number } | null)?.total ?? 0),
       active: Number((botRes as { active: number } | null)?.active ?? 0),
@@ -494,12 +507,14 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   .media-tile span { font-size: 12.5px; color: var(--ink-soft); }
   .media-chart { display: flex; align-items: flex-end; gap: 4px; height: 150px; border-bottom: 1px solid var(--line-strong); padding-top: 8px; margin: 12px 0 4px; }
   .media-day { flex: 1; display: flex; align-items: flex-end; gap: 2px; height: 100%; }
-  .media-bar { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+  /* print-color-adjust: без него Chrome/Сафари при печати выкидывают фоны — столбики
+     графика превращаются в пустоту (жалоба с прода). exact = печатать как на экране. */
+  .media-bar { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .media-bar-views { background: var(--line-strong); opacity: .45; }
   .media-ticks { display: flex; gap: 4px; font-size: 11px; color: var(--ink-soft); }
   .media-ticks span { flex: 1; text-align: center; }
   .media-legend { font-size: 13px; color: var(--ink-soft); margin-bottom: 6px; }
-  .media-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: middle; font-style: normal; }
+  .media-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 10px; vertical-align: middle; font-style: normal; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   @media print { .media-actions { display: none; } }
 </style>
 </head>
@@ -525,6 +540,9 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   <div class="media-chart">${bars}</div>
   <div class="media-ticks">${ticks}</div>
 
+  ${a.liveViews > 0
+    ? '<p class="plain">Таблицы ниже — только живая аудитория: посетители, чей браузер исполнил JavaScript страницы («подтверждены браузером»). Автоматический трафик с браузерными User-Agent сюда не попадает: по сырым логам географию «красят» роботы из дата-центров.</p>'
+    : '<p class="plain">За период не зафиксировано живых посетителей (браузер с JavaScript) — таблицы ниже пусты. Сырые просмотры и отфильтрованные роботы видны выше: в плитках и таблице по дням.</p>'}
   ${geo}${dcNote}
   ${devices}
   ${os}
@@ -547,6 +565,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
     <li>Уникальный посетитель — обезличенный суточный идентификатор (хеш соли, даты, IP-адреса и браузера; сам IP не хранится). За период выводится сумма и среднее суточных значений.</li>
     <li>Просмотр страницы засчитывается при каждом открытии страниц доски, включая ответы из CDN-кэша.</li>
     <li>«Подтверждены браузером» — посетители, чей браузер выполнил JavaScript страницы. Это отсекает большинство автоматического трафика.</li>
+    <li>География, устройства, операционные системы, источники и страницы считаются только по живой аудитории (подтверждённой маячком): боты, подделывающие браузерные User-Agent, приходят в основном из дата-центров и сильно искажают сырую картину.</li>
     <li>География — по IP-адресу (Cloudflare). Посетители через VPN учитываются по стране VPN-сервера и отмечаются отдельной строкой.</li>
     <li>Источник трафика определяется по заголовку Referer при входе на сайт; переходы внутри сайта не считаются.</li>
     <li>Даты — по UTC. Сырые данные хранятся 90 дней, затем удаляются.</li>

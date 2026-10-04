@@ -364,6 +364,11 @@ describe('вся витрина рендерится', () => {
     expect(broken).toEqual([]);
   });
 
+  it('на SEO-странице работает маячок живого браузера (app.js тут нет)', async () => {
+    const html = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(html).toContain("/api/visit-confirm");
+  });
+
   it('каждый известный город отдаёт страницу', async () => {
     const broken: string[] = [];
     for (const city of knownCities()) {

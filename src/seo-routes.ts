@@ -350,6 +350,9 @@ ${opts.body}
     <button type="button" id="cookie-ok">понятно</button>
   </div>
   <script>
+    // маячок статистики: «браузер живой» — тот же сигнал, что app.js отправляет
+    // с доски. У SEO-страниц своего app.js нет, поэтому шлём прямо отсюда.
+    try { fetch('/api/visit-confirm', { keepalive: true }).catch(function () {}); } catch (e) { /* не важно */ }
     try {
       if (!localStorage.getItem('poputka_cookie_ok')) {
         var cookieNote = document.getElementById('cookie-note');

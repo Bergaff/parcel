@@ -17,6 +17,7 @@ import {
   classifyRef,
   classifyUserAgent,
   countryFlag,
+  gatherVisitStats,
   isDatacenterOrg,
   isTrackablePage,
   lastDays,
@@ -194,6 +195,7 @@ describe('страница и CSV', () => {
     coveredDays: 3,
     avgUniques: 28,
     views: 48,
+    liveViews: 31,
     uniquesSum: 84,
     pagesPerVisitor: '1,7',
     jsSharePct: 32,
@@ -259,5 +261,64 @@ describe('страница и CSV', () => {
     expect(csv).toContain('day;uniques;views;js_confirmed;bots_filtered');
     expect(csv).toContain('2026-10-01;28;48;9;10');
     expect(csv.split('\n')).toHaveLength(5); // заголовок + 3 строки + пустой хвост
+  });
+
+  it('график печатается: цвета столбиков не пропадают в PDF', () => {
+    const html = renderAudiencePage({ audience, board: null });
+    // без print-color-adjust браузеры при печати выкидывают фоны — гистограммы пустые
+    expect(html.match(/print-color-adjust: exact/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(html).toContain('-webkit-print-color-adjust: exact');
+  });
+
+  it('таблицы помечены как живая аудитория — и объясняют пустой случай', () => {
+    const html = renderAudiencePage({ audience, board: null });
+    expect(html).toContain('только живая аудитория');
+    const empty = renderAudiencePage({ audience: { ...audience, liveViews: 0 }, board: null });
+    expect(empty).toContain('не зафиксировано живых посетителей');
+  });
+
+  it('методика предупреждает про ботов с браузерными User-Agent', () => {
+    const html = renderAudiencePage({ audience, board: null });
+    expect(html).toContain('подделывающие браузерные User-Agent');
+  });
+});
+
+describe('агрегаты — только живая аудитория', () => {
+  it('запросы таблиц (гео/устройства/ОС/источники/страницы) джойнят stat_js', async () => {
+    const sqls: string[] = [];
+    const stmt = {
+      bind: () => stmt,
+      first: async () => null,
+      all: async () => ({ results: [] }),
+      run: async () => ({ meta: {} }),
+    };
+    const env = {
+      DB: {
+        prepare: (sql: string) => { sqls.push(sql); return stmt; },
+        batch: async (s: unknown[]) => Promise.all(s as never),
+      },
+    } as unknown as Env;
+    await gatherVisitStats(env, 7);
+    const breakdowns = sqls.filter((s) => s.startsWith('SELECT')
+      && /country|device|\bos\b|ref_group|ref_host|kind|dc = 1/.test(s));
+    // гео + дата-центры + устройства + ОС + источники + рефереры + страницы
+    expect(breakdowns.length).toBeGreaterThanOrEqual(7);
+    for (const sql of breakdowns) {
+      expect(sql, sql).toContain('stat_js');
+    }
+    // а разбивка по дням остаётся сырой — там свой столбец «подтверждены»
+    const byDay = sqls.find((s) => s.includes('GROUP BY day'));
+    expect(byDay).toBeTruthy();
+    expect(byDay).not.toContain('stat_js');
+  });
+
+  it('дата-центры и VPN опознаются по AS-организации', () => {
+    for (const org of ['AEZA International Ltd.', 'Stark Industries Solutions Ltd',
+      'PONEY TELECOM', 'M247 Europe SRL', 'Google LLC', 'Melbikomas UAB', 'G-Core Labs']) {
+      expect(isDatacenterOrg(org), org).toBe(true);
+    }
+    for (const org of ['BELTELECOM', 'MTS Belarus', 'Deutsche Telekom', 'Orange Polska']) {
+      expect(isDatacenterOrg(org), org).toBe(false);
+    }
   });
 });
