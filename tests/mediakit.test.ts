@@ -195,15 +195,14 @@ describe('страница и CSV', () => {
     coveredDays: 3,
     avgUniques: 28,
     views: 48,
-    liveViews: 31,
+    rawViews: 91,
     uniquesSum: 84,
     pagesPerVisitor: '1,7',
-    jsSharePct: 32,
     botsFiltered: 30,
     daily: [
-      { day: '2026-09-30', uniques: 20, views: 33, js: 6, bots: 3 },
-      { day: '2026-10-01', uniques: 28, views: 48, js: 9, bots: 10 },
-      { day: '2026-10-02', uniques: 36, views: 60, js: 12, bots: 17 },
+      { day: '2026-09-30', uniques: 20, views: 33, bots: 3 },
+      { day: '2026-10-01', uniques: 28, views: 48, bots: 10 },
+      { day: '2026-10-02', uniques: 36, views: 60, bots: 17 },
     ],
     countries: [
       { country: 'RU', views: 12, share: 25 },
@@ -228,8 +227,8 @@ describe('страница и CSV', () => {
     });
     for (const marker of [
       'посетителей в день (среднее)', '28', 'просмотров страниц', '48',
-      'страниц на посетителя', '1,7', 'подтверждены браузером', '32%',
-      'отфильтровано роботов', '30',
+      'страниц на посетителя', '1,7', 'отфильтровано роботов', '30',
+      'Сырых просмотров за период — 91', 'Роботов отфильтровано',
       'Динамика по дням', 'География', '🇷🇺 Россия', 'Из них через VPN / дата-центры: 13',
       'Устройства', 'Операционные системы', 'Источники трафика', 'Основные источники',
       'Страницы', 'Telegram-бот (@parcel_transfer_bot)', 'Методика подсчёта',
@@ -240,6 +239,8 @@ describe('страница и CSV', () => {
       expect(html).toContain(marker);
     }
     expect(html).toContain('noindex');
+    // вся страница в одной методике: сырой плитки «подтверждены %» больше нет
+    expect(html).not.toContain('подтверждены браузером');
   });
 
   it('пустые разделы — «Пока нет данных», страница не падает', () => {
@@ -258,8 +259,8 @@ describe('страница и CSV', () => {
   it('CSV: заголовок, строки, BOM для Excel', () => {
     const csv = renderDailyCsv(audience.daily);
     expect(csv.startsWith('\uFEFF')).toBe(true);
-    expect(csv).toContain('day;uniques;views;js_confirmed;bots_filtered');
-    expect(csv).toContain('2026-10-01;28;48;9;10');
+    expect(csv).toContain('day;visitors_live;views_live;bots_filtered');
+    expect(csv).toContain('2026-10-01;28;48;10');
     expect(csv.split('\n')).toHaveLength(5); // заголовок + 3 строки + пустой хвост
   });
 
@@ -270,10 +271,11 @@ describe('страница и CSV', () => {
     expect(html).toContain('-webkit-print-color-adjust: exact');
   });
 
-  it('таблицы помечены как живая аудитория — и объясняют пустой случай', () => {
+  it('плитки и примечание — живая аудитория; пустой случай объяснён', () => {
     const html = renderAudiencePage({ audience, board: null });
     expect(html).toContain('только живая аудитория');
-    const empty = renderAudiencePage({ audience: { ...audience, liveViews: 0 }, board: null });
+    expect(html).toContain('Сырых просмотров за период — 91');
+    const empty = renderAudiencePage({ audience: { ...audience, views: 0 }, board: null });
     expect(empty).toContain('не зафиксировано живых посетителей');
   });
 
@@ -299,17 +301,13 @@ describe('агрегаты — только живая аудитория', () =
       },
     } as unknown as Env;
     await gatherVisitStats(env, 7);
-    const breakdowns = sqls.filter((s) => s.startsWith('SELECT')
-      && /country|device|\bos\b|ref_group|ref_host|kind|dc = 1/.test(s));
-    // гео + дата-центры + устройства + ОС + источники + рефереры + страницы
-    expect(breakdowns.length).toBeGreaterThanOrEqual(7);
-    for (const sql of breakdowns) {
-      expect(sql, sql).toContain('stat_js');
-    }
-    // а разбивка по дням остаётся сырой — там свой столбец «подтверждены»
-    const byDay = sqls.find((s) => s.includes('GROUP BY day'));
-    expect(byDay).toBeTruthy();
-    expect(byDay).not.toContain('stat_js');
+    const selects = sqls.filter((s) => s.startsWith('SELECT'));
+    // динамика по дням, гео, дата-центры, устройства, ОС, источники,
+    // рефереры, страницы — всё живая аудитория (джойн с stat_js)
+    const live = selects.filter((s) => s.includes('stat_js'));
+    expect(live.length).toBeGreaterThanOrEqual(8);
+    // сырой подсчёт роботов — без джойна: боты маячок не шлют
+    expect(selects.some((s) => s.includes('SUM(bot)') && !s.includes('stat_js'))).toBe(true);
   });
 
   it('дата-центры и VPN опознаются по AS-организации', () => {

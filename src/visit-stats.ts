@@ -231,7 +231,9 @@ export async function pruneVisitStats(env: Env): Promise<void> {
 /* Агрегаты                                                            */
 /* ------------------------------------------------------------------ */
 
-export interface AudienceDaily { day: string; uniques: number; views: number; js: number; bots: number }
+/** День динамики: посетители и просмотры — живая аудитория (JS-маячок),
+ *  bots — сколько роботов отфильтровано в этот день. */
+export interface AudienceDaily { day: string; uniques: number; views: number; bots: number }
 
 /** Просмотры живой аудитории: посетитель в этот день подтверждён JS-маячком. */
 const LIVE_JOIN = 'JOIN stat_js j ON j.day = v.day AND j.vid = v.vid';
@@ -241,12 +243,12 @@ export interface AudienceStats {
   generatedAt: string;
   coveredDays: number;
   avgUniques: number;
+  /** Просмотры страниц — только живая аудитория. */
   views: number;
-  /** Просмотры подтверждённых посетителей — знаменатель таблиц ниже. */
-  liveViews: number;
+  /** Все просмотры за период, включая роботов и непрошедших JS-маячок. */
+  rawViews: number;
   uniquesSum: number;
   pagesPerVisitor: string;
-  jsSharePct: number;
   botsFiltered: number;
   daily: AudienceDaily[];
   countries: Array<{ country: string; views: number; share: number }>;
@@ -275,15 +277,14 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
   const dayList = lastDays(days);
   const from = dayList[0]!;
 
-  const [byDay, jsByDay, liveRes, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
+  const [liveByDay, rawByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
     env.DB.prepare(
-      `SELECT day, SUM(CASE WHEN bot = 0 THEN 1 ELSE 0 END) AS views,
-              COUNT(DISTINCT CASE WHEN bot = 0 THEN vid END) AS uniques,
-              SUM(bot) AS bots
-       FROM stat_views WHERE day >= ? GROUP BY day`
+      `SELECT v.day, COUNT(DISTINCT v.vid) AS uniques, COUNT(*) AS views
+       FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY v.day`
     ).bind(from).all(),
-    env.DB.prepare('SELECT day, COUNT(*) AS n FROM stat_js WHERE day >= ? GROUP BY day').bind(from).all(),
-    env.DB.prepare(`SELECT COUNT(*) AS n FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0`).bind(from).first(),
+    env.DB.prepare(
+      `SELECT day, COUNT(*) AS total, SUM(bot) AS bots FROM stat_views WHERE day >= ? GROUP BY day`
+    ).bind(from).all(),
     env.DB.prepare(
       `SELECT COALESCE(v.country, '—') AS country, COUNT(*) AS n FROM stat_views v
        ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0
@@ -316,30 +317,30 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
       .bind(new Date(Date.now() - days * 86400e3).toISOString()).first(),
   ]);
 
-  const dayMap = new Map<string, { views: number; uniques: number; bots: number }>();
-  for (const r of (byDay.results ?? []) as unknown as Array<{ day: string; views: number; uniques: number; bots: number }>) {
-    dayMap.set(String(r.day), { views: Number(r.views), uniques: Number(r.uniques ?? 0), bots: Number(r.bots ?? 0) });
+  // динамика по дням — живая аудитория; роботы идут отдельным столбцом
+  const liveMap = new Map<string, { views: number; uniques: number }>();
+  for (const r of (liveByDay.results ?? []) as unknown as Array<{ day: string; views: number; uniques: number }>) {
+    liveMap.set(String(r.day), { views: Number(r.views), uniques: Number(r.uniques ?? 0) });
   }
-  const jsMap = new Map<string, number>();
-  for (const r of (jsByDay.results ?? []) as unknown as Array<{ day: string; n: number }>) {
-    jsMap.set(String(r.day), Number(r.n));
+  const rawMap = new Map<string, { total: number; bots: number }>();
+  for (const r of (rawByDay.results ?? []) as unknown as Array<{ day: string; total: number; bots: number }>) {
+    rawMap.set(String(r.day), { total: Number(r.total ?? 0), bots: Number(r.bots ?? 0) });
   }
   const daily: AudienceDaily[] = dayList.map((day) => ({
     day,
-    uniques: dayMap.get(day)?.uniques ?? 0,
-    views: dayMap.get(day)?.views ?? 0,
-    bots: dayMap.get(day)?.bots ?? 0,
-    js: jsMap.get(day) ?? 0,
+    uniques: liveMap.get(day)?.uniques ?? 0,
+    views: liveMap.get(day)?.views ?? 0,
+    bots: rawMap.get(day)?.bots ?? 0,
   }));
 
   const views = daily.reduce((a, d) => a + d.views, 0);
   const uniquesSum = daily.reduce((a, d) => a + d.uniques, 0);
-  // просмотры живой аудитории: знаменатель долей в таблицах (гео/устройства/…)
-  const liveViews = Number((liveRes as { n: number } | null)?.n ?? 0);
+  // сырые просмотры (всё, что пришло на сервер, включая роботов) — фон
+  // для примечания под плитками
+  const rawViews = dayList.reduce((a, day) => a + (rawMap.get(day)?.total ?? 0), 0);
   // день «покрыт», только если были живые посетители: день с одними
   // ботами данными не считаем (иначе «1 из 30» при нулевых людях)
   const coveredDays = daily.filter((d) => d.uniques > 0 || d.views > 0).length;
-  const jsSum = daily.reduce((a, d) => a + d.js, 0);
   // доля каждой строки от общего числа просмотров (один знак после запятой)
   const withShare = <T extends object>(rows: T[], count: (r: T) => number, total: number) =>
     rows.map((r) => ({ ...r, share: total > 0 ? Math.round((count(r) / total) * 1000) / 10 : 0 }));
@@ -350,25 +351,24 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
     coveredDays,
     avgUniques: coveredDays > 0 ? Math.round(uniquesSum / coveredDays) : 0,
     views,
-    liveViews,
+    rawViews,
     uniquesSum,
     pagesPerVisitor: uniquesSum > 0 ? (views / uniquesSum).toFixed(1).replace('.', ',') : '0',
-    jsSharePct: uniquesSum > 0 ? Math.round((jsSum / uniquesSum) * 100) : 0,
     botsFiltered: daily.reduce((a, d) => a + d.bots, 0),
     daily,
     countries: withShare(((geo.results ?? []) as unknown as Array<{ country: string; n: number }>)
-      .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, views),
     dcViews: Number((dcRes as { n: number } | null)?.n ?? 0),
     devices: withShare(((devRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
     os: withShare(((osRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
     sources: withShare(((srcRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
     referrers: withShare(((refRes.results ?? []) as unknown as Array<{ host: string; n: number }>)
-      .map((r) => ({ host: String(r.host), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ host: String(r.host), views: Number(r.n) })), (r) => r.views, views),
     pages: withShare(((pageRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
-      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, liveViews),
+      .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
     bot: {
       total: Number((botRes as { total: number } | null)?.total ?? 0),
       active: Number((botRes as { active: number } | null)?.active ?? 0),
@@ -382,9 +382,9 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
 
 /** Ежедневная таблица в CSV (для Excel — с BOM и точкой с запятой). */
 export function renderDailyCsv(daily: AudienceDaily[]): string {
-  const lines = ['day;uniques;views;js_confirmed;bots_filtered'];
+  const lines = ['day;visitors_live;views_live;bots_filtered'];
   for (const d of daily) {
-    lines.push(`${d.day};${d.uniques};${d.views};${d.js};${d.bots}`);
+    lines.push(`${d.day};${d.uniques};${d.views};${d.bots}`);
   }
   return `\uFEFF${lines.join('\n')}\n`;
 }
@@ -455,7 +455,6 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
     [String(a.views), 'просмотров страниц'],
     [String(a.uniquesSum), 'сумма суточных посетителей'],
     [a.pagesPerVisitor, 'страниц на посетителя'],
-    [`${a.jsSharePct}%`, 'подтверждены браузером'],
     [String(a.botsFiltered), 'отфильтровано роботов'],
   ].map(([n, label]) => `<div class="media-tile"><b>${n}</b><span>${label}</span></div>`).join('');
 
@@ -473,6 +472,11 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
     a: `${countryFlag(c.country)} ${esc(countryName(c.country))}`, b: String(c.views), c: String(c.share).replace('.', ','),
   })));
   const dcNote = a.dcViews > 0 ? `<p class="plain">Из них через VPN / дата-центры: ${a.dcViews} просмотров.</p>` : '';
+  // примечание под плитками: живая аудитория на фоне сырых логов,
+  // чтобы цифры не «мозолили глаза» без объяснения
+  const rawNote = a.views > 0
+    ? `<p class="plain">Все цифры на странице — только живая аудитория: посетители, чей браузер исполнил JavaScript. Сырых просмотров за период — ${a.rawViews}, из них живых — ${a.views}; остальные — роботы и скрипты (${a.botsFiltered} отфильтровано по User-Agent, часть идёт с браузерными User-Agent и отсечена маячком) и посетители с выключенным JavaScript.</p>`
+    : `<p class="plain">За период не зафиксировано живых посетителей (браузер с JavaScript) — показывать нечего. Сырых просмотров — ${a.rawViews}, роботов отфильтровано — ${a.botsFiltered}.</p>`;
   const devices = sectionTable('Устройства', a.devices.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
   const os = sectionTable('Операционные системы', a.os.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
   const sources = sectionTable('Источники трафика', a.sources.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
@@ -480,7 +484,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   const pages = sectionTable('Страницы', a.pages.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
 
   const dayRows = a.daily.slice().reverse().map((d) =>
-    `<tr><td class="mono">${d.day}</td><td>${d.uniques}</td><td>${d.views}</td><td>${d.js}</td></tr>`).join('');
+    `<tr><td class="mono">${d.day}</td><td>${d.uniques}</td><td>${d.views}</td><td>${d.bots}</td></tr>`).join('');
 
   const period = (n: number) => `<a class="media-period${a.days === n ? ' on' : ''}" href="/mediakit?days=${n}">${n === 1 ? '24 часа' : `${n} дней`}</a>`;
 
@@ -532,6 +536,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   <p class="plain">Период покрыт данными на ${a.coveredDays} из ${a.days} дн. Статистика по текущей методике собирается с первого дня после обновления.</p>
 
   <div class="media-grid">${tiles}</div>
+  ${rawNote}
 
   ${board}
 
@@ -540,9 +545,6 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   <div class="media-chart">${bars}</div>
   <div class="media-ticks">${ticks}</div>
 
-  ${a.liveViews > 0
-    ? '<p class="plain">Таблицы ниже — только живая аудитория: посетители, чей браузер исполнил JavaScript страницы («подтверждены браузером»). Автоматический трафик с браузерными User-Agent сюда не попадает: по сырым логам географию «красят» роботы из дата-центров.</p>'
-    : '<p class="plain">За период не зафиксировано живых посетителей (браузер с JavaScript) — таблицы ниже пусты. Сырые просмотры и отфильтрованные роботы видны выше: в плитках и таблице по дням.</p>'}
   ${geo}${dcNote}
   ${devices}
   ${os}
@@ -555,7 +557,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
 
   <h2 class="rule-head">Динамика по дням (таблица)</h2>
   <table class="stats-table stats-table-wide">
-    <thead><tr><th>Дата</th><th>Уникальные посетители</th><th>Просмотры страниц</th><th>Подтверждены браузером</th></tr></thead>
+    <thead><tr><th>Дата</th><th>Живые посетители</th><th>Просмотры страниц</th><th>Роботов отфильтровано</th></tr></thead>
     <tbody>${dayRows}</tbody>
   </table>
 
@@ -563,8 +565,8 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   <ul class="plain-list">
     <li>Учитываются только люди: поисковые роботы, превью ссылок в мессенджерах, ИИ-краулеры, скрипты и мониторинги определяются по User-Agent и исключаются (но считаются в «отфильтровано роботов»).</li>
     <li>Уникальный посетитель — обезличенный суточный идентификатор (хеш соли, даты, IP-адреса и браузера; сам IP не хранится). За период выводится сумма и среднее суточных значений.</li>
-    <li>Просмотр страницы засчитывается при каждом открытии страниц доски, включая ответы из CDN-кэша.</li>
-    <li>«Подтверждены браузером» — посетители, чей браузер выполнил JavaScript страницы. Это отсекает большинство автоматического трафика.</li>
+    <li>Просмотр страницы засчитывается при каждом открытии страниц доски (включая ответы из CDN-кэша), если браузер посетителя подтвердил себя JavaScript-маячком.</li>
+    <li>Живой посетитель — чей браузер выполнил JavaScript страницы (маячок в app.js и на SEO-страницах). Все показатели страницы — плитки, график, таблицы и CSV — считаются по живой аудитории; сырые просмотры и отфильтрованные роботы — в примечании под плитками.</li>
     <li>География, устройства, операционные системы, источники и страницы считаются только по живой аудитории (подтверждённой маячком): боты, подделывающие браузерные User-Agent, приходят в основном из дата-центров и сильно искажают сырую картину.</li>
     <li>География — по IP-адресу (Cloudflare). Посетители через VPN учитываются по стране VPN-сервера и отмечаются отдельной строкой.</li>
     <li>Источник трафика определяется по заголовку Referer при входе на сайт; переходы внутри сайта не считаются.</li>
