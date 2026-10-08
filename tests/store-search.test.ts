@@ -385,7 +385,10 @@ describe('очередь модерации: автоочистка явных �
     ];
     const { env, updates } = pruneDb(pending, pending);
     expect(await pruneDuplicatePending(env)).toBe(2);
-    const rejectedIds = updates.filter((u) => /UPDATE listings SET status/i.test(u.sql)).map((u) => u.params[2]);
+    // повторы отклоняются с причиной: reject_reason = 'duplicate', id — params[3]
+    const rejectedIds = updates
+      .filter((u) => /UPDATE listings SET status/i.test(u.sql) && /reject_reason/i.test(u.sql))
+      .map((u) => u.params[3]);
     expect(rejectedIds).toContain('p2');
     expect(rejectedIds).toContain('p3');
     expect(rejectedIds).not.toContain('p1');

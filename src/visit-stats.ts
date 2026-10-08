@@ -258,7 +258,7 @@ export interface AudienceStats {
   sources: Array<{ name: string; views: number; share: number }>;
   referrers: Array<{ host: string; views: number; share: number }>;
   pages: Array<{ name: string; views: number; share: number }>;
-  bot: { total: number; active: number };
+  bot: { total: number; active: number; groups: number; privates: number };
 }
 
 /** Последние N дней (UTC), включая сегодня — для нулей в графике. */
@@ -313,8 +313,14 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
       `SELECT v.kind AS name, COUNT(*) AS n FROM stat_views v
        ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY v.kind ORDER BY n DESC`
     ).bind(from).all(),
-    env.DB.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS active FROM stat_bot_chats')
-      .bind(new Date(Date.now() - days * 86400e3).toISOString()).first(),
+    // группы в Telegram имеют отрицательные id, личные диалоги — положительные:
+    // «чатов, с которыми работал бот» ≠ «группы-источники» (их показывают в админке)
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN last_seen >= ? THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN CAST(chat_id AS INTEGER) < 0 THEN 1 ELSE 0 END) AS groups
+       FROM stat_bot_chats`
+    ).bind(new Date(Date.now() - days * 86400e3).toISOString()).first(),
   ]);
 
   // динамика по дням — живая аудитория; роботы идут отдельным столбцом
@@ -372,6 +378,9 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
     bot: {
       total: Number((botRes as { total: number } | null)?.total ?? 0),
       active: Number((botRes as { active: number } | null)?.active ?? 0),
+      groups: Number((botRes as { groups: number } | null)?.groups ?? 0),
+      privates: Number((botRes as { total: number } | null)?.total ?? 0)
+        - Number((botRes as { groups: number } | null)?.groups ?? 0),
     },
   };
 }
@@ -553,7 +562,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   ${pages}
 
   <h2 class="rule-head">Telegram-бот (@parcel_transfer_bot)</h2>
-  <p class="plain">Чатов, с которыми бот работал: <b>${a.bot.total}</b> · активных за период: <b>${a.bot.active}</b></p>
+  <p class="plain">Чатов, с которыми бот работал: <b>${a.bot.total}</b> (групп — ${a.bot.groups}, личных диалогов — ${a.bot.privates}) · активных за период: <b>${a.bot.active}</b></p>
 
   <h2 class="rule-head">Динамика по дням (таблица)</h2>
   <table class="stats-table stats-table-wide">

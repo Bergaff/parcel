@@ -717,6 +717,7 @@ function bindForm() {
   $('#form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const err = $('#form-error');
+    $('#form-done').hidden = true; // прошлый успех не должен висеть при повторной подаче
     err.hidden = true;
 
     const fd = new FormData(e.target);
@@ -768,7 +769,26 @@ function bindForm() {
       const dupeId = data.duplicate && data.item && data.item.id ? data.item.id : null;
       toast(data.message || 'Ушло на проверку.');
       e.target.reset();
-      if (dupeId) {
+      const done = $('#form-done');
+      if (data.notify && data.notify.url) {
+        // заявка на модерации и есть бот — предлагаем (не настаивая) узнать
+        // об одобрении: ссылка открывает личку бота с watch-диплинком
+        done.replaceChildren(
+          el('p', {}, [
+            el('b', { text: 'Заявка отправлена на проверку.' }),
+            ' Появится на доске после модерации — обычно в течение пары часов.',
+          ]),
+          el('p', { class: 'plain' }, [
+            'Хотите узнать, когда её опубликуют? Напишите нашему боту — он пришлёт сообщение:',
+          ]),
+          el('p', {}, [
+            el('a', { class: 'btn btn-ink btn-sm', href: data.notify.url, text: 'сообщить об одобрении в Telegram' }),
+            ' ',
+            el('a', { class: 'link-btn', href: '/', text: 'на доску →' }),
+          ]),
+        );
+        done.hidden = false;
+      } else if (dupeId) {
         navTo(`/item/${dupeId}`); // вторая заявка не нужна — показываем ту, что уже есть
       } else if (data.hidden && data.item && data.item.id) {
         // заявка без контакта опубликована, но скрыта с доски — показываем её
@@ -790,7 +810,7 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'stats'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'rejected' | 'stats'
 let statsMonth = null; // выбранный месяц на вкладке «итоги»
 let statsFlowUnit = 'day'; // 'day' | 'week' | 'month' — поток заявок в итогах
 let adminEditId = null; // id заявки, открытой на редактирование
@@ -1046,6 +1066,10 @@ async function loadAdmin() {
   }
   if (adminTab === 'dupes') {
     await renderAdminDupes();
+    return;
+  }
+  if (adminTab === 'rejected') {
+    await renderAdminRejected();
     return;
   }
   if (adminTab === 'stats') {
@@ -1758,6 +1782,92 @@ async function adminDelete(id) {
 
 /* ---------- итоги месяца: текст для поста и цифры ---------- */
 
+/* ---------- вкладка «отклонённые»: ведро для настройки фильтров ---------- */
+
+const REJECT_REASONS = {
+  admin: 'модератор',
+  duplicate: 'повтор',
+  reports: 'жалобы (3+)',
+};
+
+function rejectedText(l) {
+  const contact = l.phone || l.telegram ? `контакт: ${[l.phone, l.telegram].filter(Boolean).join(', ')}` : 'без контакта';
+  return [
+    `№ ${l.id.slice(0, 8)} · ${l.fromCity} → ${l.toCity}` + (l.departureDate ? ` · ${l.departureDate}` : ''),
+    `${l.type === 'offer' ? 'водитель везёт' : 'нужно передать'}` + (l.weightKg ? ` · ${l.weightKg} кг` : '') + (l.price ? ` · ${l.price}` : ''),
+    l.description,
+    contact,
+    `источник: ${l.sourceChat || l.source}`,
+    `причина: ${REJECT_REASONS[l.rejectReason] || l.rejectReason || 'не указана'}`,
+    `подана: ${l.createdAt}`,
+  ].join('\n');
+}
+
+// копирование — общий copyText() выше (с fallback на textarea)
+
+async function renderAdminRejected() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'Отклонённые заявки — «ведро»: тексты для настройки фильтров, можно копировать.';
+  let data;
+  try {
+    const res = await adminApi('/api/admin/rejected');
+    if (!res.ok) throw new Error('network');
+    data = await res.json();
+  } catch {
+    listEl.replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
+    return;
+  }
+  const items = data.items || [];
+  if (items.length === 0) {
+    listEl.replaceChildren(el('p', { class: 'empty-note', text: 'Ведро пустое — отклонённых заявок нет.' }));
+    return;
+  }
+  listEl.replaceChildren(
+    el('section', { class: 'admin-card' }, [
+      el('h3', { text: `Отклонённых заявок: ${items.length}` }),
+      el('p', { class: 'empty-note', text: 'Хранятся 90 дней. Причины: повтор — автодубль, жалобы — 3+ репортов, модератор — вручную.' }),
+      el('button', {
+        class: 'btn btn-ink btn-sm', type: 'button', text: 'скопировать всё',
+        onclick: () => copyText(items.map(rejectedText).join('\n\n---\n\n'), { ok: 'Всё ведро скопировано.' }),
+      }),
+      ' ',
+      el('button', {
+        class: 'btn btn-line btn-sm', type: 'button', text: 'очистить ведро',
+        onclick: async (ev) => {
+          if (!confirm('Удалить все отклонённые заявки без возврата?')) return;
+          ev.target.disabled = true;
+          try {
+            const res = await adminApi('/api/admin/rejected', { method: 'DELETE' });
+            if (!res.ok) throw new Error('network');
+            toast('Ведро вычищено.');
+            loadAdmin();
+          } catch {
+            toast('Не получилось — попробуйте ещё раз.');
+            ev.target.disabled = false;
+          }
+        },
+      }),
+    ])
+  );
+  for (const l of items) {
+    listEl.append(
+      el('details', { class: 'admin-card dupe-group' }, [
+        el('summary', {}, [
+          `${l.fromCity} → ${l.toCity}`,
+          l.departureDate ? ` · ${fmtDate(l.departureDate)}` : '',
+          ` · ${REJECT_REASONS[l.rejectReason] || l.rejectReason || 'без причины'}`,
+          ` · ${ago(l.createdAt)}`,
+        ].filter(Boolean)),
+        el('pre', { class: 'plain', style: 'white-space:pre-wrap;margin:8px 0', text: rejectedText(l) }),
+        el('button', {
+          class: 'link-btn', type: 'button', text: 'скопировать',
+          onclick: () => copyText(rejectedText(l), { ok: 'Скопировано.' }),
+        }),
+      ])
+    );
+  }
+}
+
 /* ---------- поток заявок и самые просматриваемые (вкладка «итоги») ---------- */
 
 function flowLabel(row, unit) {
@@ -2067,6 +2177,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-chats').classList.toggle('on', tab === 'chats');
   $('#admin-tab-match').classList.toggle('on', tab === 'match');
   $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
+  $('#admin-tab-rejected').classList.toggle('on', tab === 'rejected');
   $('#admin-tab-stats').classList.toggle('on', tab === 'stats');
   $('#admin-tab-seo').classList.toggle('on', tab === 'seo');
   $('#admin-tab-settings').classList.toggle('on', tab === 'settings');
@@ -2340,6 +2451,7 @@ function bindAdmin() {
   $('#admin-tab-chats').addEventListener('click', () => switchAdminTab('chats'));
   $('#admin-tab-match').addEventListener('click', () => switchAdminTab('match'));
   $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
+  $('#admin-tab-rejected').addEventListener('click', () => switchAdminTab('rejected'));
   $('#admin-tab-stats').addEventListener('click', () => switchAdminTab('stats'));
   $('#admin-tab-seo').addEventListener('click', () => switchAdminTab('seo'));
   $('#admin-tab-settings').addEventListener('click', () => switchAdminTab('settings'));

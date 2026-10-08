@@ -125,8 +125,40 @@ export async function getListingById(env: Env, id: string, opts: { hitView?: boo
   return row ? mapRow(row) : null;
 }
 
-export async function updateListingStatus(env: Env, id: string, status: ListingStatus): Promise<boolean> {
+/** Колонка reject_reason («почему отклонено») — создаётся воркером на лету,
+ *  как recurring/by_admin/hidden: миграция не нужна. */
+let rejectReasonReady: Promise<void> | null = null;
+function ensureRejectReasonColumn(env: Env): Promise<void> {
+  if (!rejectReasonReady) {
+    rejectReasonReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('reject_reason')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN reject_reason TEXT`).run();
+      }
+    })();
+    rejectReasonReady.catch(() => { rejectReasonReady = null; });
+  }
+  return rejectReasonReady;
+}
+
+export async function updateListingStatus(
+  env: Env,
+  id: string,
+  status: ListingStatus,
+  reason?: string
+): Promise<boolean> {
   const publishedAt = status === 'published' ? new Date().toISOString() : null;
+  // причина — только для отклонённых: опубликованная заявка из «ведра» уходит сама
+  if (reason && status === 'rejected') {
+    await ensureRejectReasonColumn(env).catch(() => undefined);
+    const res = await env.DB.prepare(
+      'UPDATE listings SET status = ?, published_at = COALESCE(?, published_at), reject_reason = ? WHERE id = ?'
+    ).bind(status, publishedAt, reason, id).run();
+    return (res.meta.changes ?? 0) > 0;
+  }
   const res = await env.DB.prepare(
     'UPDATE listings SET status = ?, published_at = COALESCE(?, published_at) WHERE id = ?'
   ).bind(status, publishedAt, id).run();
@@ -201,7 +233,7 @@ export async function pruneDuplicatePending(env: Env): Promise<number> {
     );
     const hit = pickDuplicate(visible, l);
     if (hit && hit.kind === 'duplicate') {
-      await updateListingStatus(env, l.id, 'rejected');
+      await updateListingStatus(env, l.id, 'rejected', 'duplicate');
       rejected += 1;
     } else {
       keptIds.add(l.id);
@@ -375,6 +407,55 @@ export async function updateListing(
   return row ? mapRow(row) : null;
 }
 
+/** «Ведро» отклонённых: заявка со статусом rejected остаётся в базе и видна
+ *  админу на вкладке «отклонённые» — можно пересмотреть текст и подтянуть
+ *  фильтры (что и зачем отклоняется). Плюс причины: duplicate/reports/admin. */
+export interface RejectedItem {
+  id: string; type: string; fromCity: string; toCity: string; departureDate: string | null;
+  description: string; phone: string | null; telegram: string | null;
+  price: string | null; weightKg: number | null;
+  source: string; sourceChat: string | null; rejectReason: string | null;
+  createdAt: string; publishedAt: string | null;
+}
+
+export async function listRejected(env: Env, limit = 200): Promise<RejectedItem[]> {
+  const res = await env.DB.prepare(
+    `SELECT id, type, from_city, to_city, departure_date, description, phone, telegram,
+            price, weight_kg, source, source_chat, reject_reason, created_at, published_at
+     FROM listings WHERE status = 'rejected' ORDER BY created_at DESC LIMIT ?`
+  ).bind(Math.min(500, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    type: String(r.type ?? ''),
+    fromCity: String(r.from_city ?? ''),
+    toCity: String(r.to_city ?? ''),
+    departureDate: r.departure_date ? String(r.departure_date) : null,
+    description: String(r.description ?? ''),
+    phone: r.phone ? String(r.phone) : null,
+    telegram: r.telegram ? String(r.telegram) : null,
+    price: r.price ? String(r.price) : null,
+    weightKg: r.weight_kg != null ? Number(r.weight_kg) : null,
+    source: String(r.source ?? ''),
+    sourceChat: r.source_chat ? String(r.source_chat) : null,
+    rejectReason: r.reject_reason ? String(r.reject_reason) : null,
+    createdAt: String(r.created_at ?? ''),
+    publishedAt: r.published_at ? String(r.published_at) : null,
+  }));
+}
+
+/** Вычистить ведро целиком (кнопка в админке). */
+export async function clearRejected(env: Env): Promise<number> {
+  const res = await env.DB.prepare("DELETE FROM listings WHERE status = 'rejected'").run();
+  return res.meta.changes ?? 0;
+}
+
+/** Cron: отклонённые старше 90 дней не нужны никому. */
+export async function pruneRejected(env: Env): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM listings WHERE status = 'rejected' AND COALESCE(published_at, created_at) < date('now', '-90 days')"
+  ).run();
+}
+
 /** Разово создать таблицу chat_links, если её нет (тот же DDL, что в миграции 0002).
  *  Идемпотентно: IF NOT EXISTS, существующие данные не затрагиваются. */
 export async function ensureChatLinksTable(env: Env): Promise<void> {
@@ -385,6 +466,40 @@ export async function ensureChatLinksTable(env: Env): Promise<void> {
        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
      )`
   ).run();
+}
+
+/** Таблица «хочу узнать, когда заявку опубликуют»: ссылку на бота с
+ *  ?start=watch_<id> человек получает после подачи заявки с сайта (по желанию).
+ *  Одноразовая: после публикации запись забирается и удаляется. */
+export async function ensureWatchersTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS listing_watchers (
+       listing_id TEXT NOT NULL,
+       chat_id TEXT NOT NULL,
+       created_at TEXT NOT NULL,
+       PRIMARY KEY (listing_id, chat_id)
+     )`
+  ).run();
+}
+
+export async function addWatcher(env: Env, listingId: string, chatId: string): Promise<void> {
+  await ensureWatchersTable(env);
+  await env.DB.prepare(
+    'INSERT OR IGNORE INTO listing_watchers (listing_id, chat_id, created_at) VALUES (?, ?, ?)'
+  ).bind(listingId, chatId, new Date().toISOString()).run();
+}
+
+/** Забрать и удалить всех наблюдателей заявки (one-shot). */
+export async function takeWatchers(env: Env, listingId: string): Promise<string[]> {
+  await ensureWatchersTable(env);
+  const res = await env.DB.prepare(
+    'SELECT chat_id FROM listing_watchers WHERE listing_id = ?'
+  ).bind(listingId).all();
+  const ids = ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.chat_id));
+  if (ids.length > 0) {
+    await env.DB.prepare('DELETE FROM listing_watchers WHERE listing_id = ?').bind(listingId).run();
+  }
+  return ids;
 }
 
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
@@ -491,7 +606,7 @@ export async function addReport(env: Env, listingId: string, reason: string | nu
   const count = Number((countRes as { n?: number } | null)?.n ?? 0);
   let autoRejected = false;
   if (count >= 3) {
-    await updateListingStatus(env, listingId, 'rejected');
+    await updateListingStatus(env, listingId, 'rejected', 'reports');
     autoRejected = true;
   }
   return { ok: true, autoRejected, count };

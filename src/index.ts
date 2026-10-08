@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -12,7 +12,7 @@ import {
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport } from './telegram';
+import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport, notifyListingPublished } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import { cacheableStatus, edgeCache, edgeCacheControl, edgeCacheKey, edgeCacheTtl } from './edge-cache';
 import { SITE_VERSION } from './version';
@@ -351,9 +351,15 @@ app.post('/api/listings', async (c) => {
     );
   }
 
+  // ждёт модерации и есть имя бота — предлагаем (не навязываем) узнавать
+  // об одобрении: ссылка открывает личку бота с watch-диплинком
+  const notifyUrl = listing.status === 'pending' && c.env.BOT_USERNAME
+    ? `https://t.me/${c.env.BOT_USERNAME}?start=watch_${listing.id}`
+    : undefined;
   return c.json(
     {
       item: listing,
+      ...(notifyUrl ? { notify: { url: notifyUrl } } : {}),
       message: (input.status === 'published'
         ? 'Объявление опубликовано.'
         : 'Объявление отправлено на модерацию и появится после проверки.')
@@ -772,7 +778,8 @@ app.post('/api/admin/listings/:id/status', async (c) => {
     return c.json({ error: 'status должен быть published, rejected или expired' }, 400);
   }
   const id = c.req.param('id');
-  const ok = await updateListingStatus(c.env, id, body.status as 'published' | 'rejected' | 'expired');
+  // ручное решение модератора — причина для «ведра» отклонённых
+  const ok = await updateListingStatus(c.env, id, body.status as 'published' | 'rejected' | 'expired', body.status === 'rejected' ? 'admin' : undefined);
   if (!ok) return c.json({ error: 'not_found' }, 404);
 
   // Публикуем — проверим, нет ли уже такой заявки на доске (дубль одобрили по забывчивости)
@@ -784,9 +791,25 @@ app.post('/api/admin/listings/:id/status', async (c) => {
       if (dup && dup.listing.id !== id && dup.listing.status === 'published') {
         duplicate = { id: dup.listing.id, why: dup.why };
       }
+      // автору, который попросил уведомление (ссылка после подачи с сайта),
+      // и автору из лички бота — «опубликована»
+      c.executionCtx.waitUntil(
+        notifyListingPublished(c.env, listing).catch((e) => console.error('notifyListingPublished failed', e))
+      );
     }
   }
   return c.json({ ok: true, duplicate });
+});
+
+/* «Ведро» отклонённых: смотреть тексты и причины, копировать для настройки фильтров. */
+app.get('/api/admin/rejected', async (c) => {
+  const items = await listRejected(c.env);
+  return c.json({ items });
+});
+
+app.delete('/api/admin/rejected', async (c) => {
+  const deleted = await clearRejected(c.env);
+  return c.json({ ok: true, deleted });
 });
 
 /* Список заявок для админ-панели: tab=pending (очередь модерации)
@@ -874,6 +897,11 @@ app.post('/api/admin/listings/:id/replace', async (c) => {
   const deleted = await deleteListing(c.env, deleteId);
   await updateListingStatus(c.env, id, 'published');
   const item = await getListingById(c.env, id);
+  if (item) {
+    c.executionCtx.waitUntil(
+      notifyListingPublished(c.env, item).catch((e) => console.error('notifyListingPublished failed', e))
+    );
+  }
   return c.json({ ok: true, deleted, item });
 });
 
@@ -1228,6 +1256,13 @@ const worker = {
       await pruneVisitStats(env);
     } catch (e) {
       console.error('prune visit stats failed', e);
+    }
+
+    // отклонённые заявки в «ведре» тоже живут 90 дней
+    try {
+      await pruneRejected(env);
+    } catch (e) {
+      console.error('prune rejected failed', e);
     }
 
     // SEO-видимость раз в неделю: краулы Common Crawl выходят примерно раз в

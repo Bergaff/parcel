@@ -3,8 +3,8 @@ import { isMultiRoute, looksLikeListing, parseTelegramMessage, parseDate, parseR
 import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
-  addReport, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  countPending, listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
+  addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
+  countPending, listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, takeWatchers, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -840,6 +840,14 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     switch (cmd) {
       case '/start':
       case '/help': {
+        // диплинк с сайта (t.me/bot?start=watch_<id>): человек попросил
+        // сообщить, когда его заявку опубликуют. Отвечаем по делу, без простыни /help
+        const deep = cmd === '/start' ? (parts[1] ?? '') : '';
+        if (deep.startsWith('watch_')) {
+          await handleWatchStart(env, chatId, deep.slice('watch_'.length));
+          await setWizard(env, chatId, null);
+          break;
+        }
         const site = env.SITE_URL ?? 'ваш сайт';
         await sendText(env, chatId,
           `Привет! Я бот доски попутных передач посылок.\n\n` +
@@ -1289,6 +1297,59 @@ function repeatReply(repeats: Repeat[]): string {
     '\n\nЕсли это другой человек или другой рейс — добавьте отдельно: /post.';
 }
 
+/* ---------- уведомления авторам заявок ---------- */
+
+/** Диплинк watch_<id> с сайта: «сообщите, когда опубликуют». */
+async function handleWatchStart(env: Env, chatId: number, listingId: string): Promise<void> {
+  let listing: Listing | null = null;
+  try {
+    listing = await getListingById(env, listingId);
+  } catch {
+    listing = null;
+  }
+  if (!listing) {
+    await sendText(env, chatId, 'Заявку не нашёл — возможно, её уже сняли. Опишите рейс ещё раз: /post');
+    return;
+  }
+  if (listing.status === 'published') {
+    const site = (env.SITE_URL ?? '').replace(/\/$/, '');
+    await sendText(env, chatId, `Эта заявка уже на доске ✅\n\n${formatListing(listing)}`
+      + (site ? `\n\n${site}/item/${encodeURIComponent(listing.id)}` : ''));
+    return;
+  }
+  if (listing.status !== 'pending') {
+    await sendText(env, chatId, 'Эта заявка уже не на модерации — её сняли. Если это ваша, подайте ещё раз: /post');
+    return;
+  }
+  try {
+    await addWatcher(env, listingId, String(chatId));
+  } catch {
+    await sendText(env, chatId, 'Не получилось запомнить — попробуйте ещё раз через минуту.');
+    return;
+  }
+  await sendText(env, chatId, 'Понял! Напишу сюда, как только заявку опубликуют. Обычно проверка занимает пару часов.');
+}
+
+/** Заявка опубликована: сообщаем всем, кто попросил (watch_<id> с сайта),
+ *  и автору, если он подавал заявку через бота в личке. */
+export async function notifyListingPublished(env: Env, listing: Listing): Promise<void> {
+  const site = (env.SITE_URL ?? '').replace(/\/$/, '');
+  const link = site ? `${site}/item/${encodeURIComponent(listing.id)}` : '';
+  const chatIds = new Set<string>(await takeWatchers(env, listing.id).catch(() => [] as string[]));
+  // положительный id — личный диалог с ботом; группы (отрицательные) не дёргаем
+  if (listing.source === 'telegram' && listing.sourceChatId && Number(listing.sourceChatId) > 0) {
+    chatIds.add(String(listing.sourceChatId));
+  }
+  for (const chatId of chatIds) {
+    // один недоступный чат не должен срывать остальные
+    await sendText(env, Number(chatId),
+      `✅ <b>Ваша заявка опубликована на доске.</b>\n\n${formatListing(listing)}`
+      + (link ? `\n\n${link}` : '')
+      + '\n\nЕсли что-то поменялось — напишите мне, поправлю или сниму.')
+      .catch((e) => console.error(`notify chat ${chatId} failed`, e));
+  }
+}
+
 /** Короткая заметка модератору: пришёл повтор, дубль не создан. */
 export async function notifyAdminsRepeat(env: Env, listing: Listing, why: string): Promise<void> {
   // Антишторм: чаты автоперепощивают объявление каждые 10 минут, и на каждый
@@ -1510,7 +1571,7 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
     }
     const id = (appr ?? rej)![1]!;
     const status = appr ? 'published' : 'rejected';
-    await updateListingStatus(env, id, status);
+    await updateListingStatus(env, id, status, appr ? undefined : 'admin');
     await answerCallback(env, cb.id, appr ? 'Одобрено' : 'Отклонено');
     if (cb.message?.message_id) {
       await api(env, 'editMessageReplyMarkup', {
@@ -1525,6 +1586,8 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
         for (const adminId of admins(env)) {
           await sendText(env, Number(adminId), `Опубликовано на доске:\n${formatListing(listing)}`);
         }
+        // автору (если просил уведомление) — «опубликована», см. notifyListingPublished
+        await notifyListingPublished(env, listing).catch((e) => console.error('notify watchers failed', e));
       }
     }
     return;
