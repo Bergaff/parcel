@@ -32,6 +32,11 @@ body {
 
 .wrap { width: min(880px, 100% - 40px); margin: 0 auto; }
 .narrow { max-width: 640px; }
+/* на широком мониторе колонка чуть свободнее: 880px на 1920-экране смотрится
+   тесно, а доска спокойно живёт и в 1000px */
+@media (min-width: 1200px) {
+  .wrap { width: min(1000px, 100% - 40px); }
+}
 
 a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
 a:hover { color: var(--accent); }
@@ -148,6 +153,9 @@ button { font-family: inherit; }
   margin: 0 0 12px;
 }
 .lead { color: var(--ink-soft); font-size: 16px; max-width: 62ch; margin: 0; }
+/* вводный абзац доски — на всю колонку, как заголовок над ним: ограничение
+   62ch на десктопе сжимало его в узкий столбик под широким h1 */
+.board-head .lead { max-width: none; }
 
 /* поиск маршрута */
 .route-search {

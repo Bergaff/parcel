@@ -6,4 +6,4 @@
  * синхронизировано с package.json — тест (tests/version.test.ts) падает,
  * если забыли поднять.
  */
-export const SITE_VERSION = '0.4.7';
+export const SITE_VERSION = '0.4.8';
