@@ -33,13 +33,11 @@ vi.mock('../src/store', () => ({
   saveMatchRun: async () => undefined,
   searchByCity: async () => [],
   setSeenListing: async () => undefined,
-  takeWatchers: async (_e: unknown, listingId: string) => {
-    const out = db.watchers.filter((w) => w.listingId === listingId).map((w) => w.chatId);
-    for (const c of out) {
-      const i = db.watchers.findIndex((w) => w.listingId === listingId && w.chatId === c);
-      if (i >= 0) db.watchers.splice(i, 1);
-    }
-    return out;
+  listWatchers: async (_e: unknown, listingId: string) =>
+    db.watchers.filter((w) => w.listingId === listingId).map((w) => w.chatId),
+  removeWatcher: async (_e: unknown, listingId: string, chatId: string) => {
+    const i = db.watchers.findIndex((w) => w.listingId === listingId && w.chatId === chatId);
+    if (i >= 0) db.watchers.splice(i, 1);
   },
   updateListingStatus: async (_e: unknown, id: string, status: string, reason?: string) => {
     db.statusUpdates.push({ id, status, reason });
@@ -181,6 +179,15 @@ describe('notifyListingPublished — момент публикации', () => {
     await notifyListingPublished(env, l);
     const again = sent.filter((s) => s.method === 'sendMessage').map((s) => s.chatId);
     expect(again).toEqual([333]);
+  });
+
+  it('сбой отправки не съедает наблюдателя — уведомление не теряется', async () => {
+    db.watchers.push({ listingId: 'x3', chatId: '111' });
+    const l = listing({ id: 'x3', status: 'published' });
+    // сеть упала: fetch бросает исключение
+    global.fetch = vi.fn(async () => { throw new Error('network down'); }) as unknown as typeof fetch;
+    await notifyListingPublished(env, l);
+    expect(db.watchers).toContainEqual({ listingId: 'x3', chatId: '111' });
   });
 
   it('группу-источник (отрицательный id) не дёргаем', async () => {

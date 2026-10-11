@@ -489,17 +489,22 @@ export async function addWatcher(env: Env, listingId: string, chatId: string): P
   ).bind(listingId, chatId, new Date().toISOString()).run();
 }
 
-/** Забрать и удалить всех наблюдателей заявки (one-shot). */
-export async function takeWatchers(env: Env, listingId: string): Promise<string[]> {
+/** Наблюдатели заявки (кому сообщить, когда опубликуют). */
+export async function listWatchers(env: Env, listingId: string): Promise<string[]> {
   await ensureWatchersTable(env);
   const res = await env.DB.prepare(
     'SELECT chat_id FROM listing_watchers WHERE listing_id = ?'
   ).bind(listingId).all();
-  const ids = ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.chat_id));
-  if (ids.length > 0) {
-    await env.DB.prepare('DELETE FROM listing_watchers WHERE listing_id = ?').bind(listingId).run();
-  }
-  return ids;
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.chat_id));
+}
+
+/** Убрать наблюдателя — только после успешной отправки: сбой сети не должен
+ *  съедать уведомление (человек нажал кнопку, а сообщения так и не будет). */
+export async function removeWatcher(env: Env, listingId: string, chatId: string): Promise<void> {
+  await ensureWatchersTable(env);
+  await env.DB.prepare(
+    'DELETE FROM listing_watchers WHERE listing_id = ? AND chat_id = ?'
+  ).bind(listingId, chatId).run();
 }
 
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */

@@ -372,11 +372,14 @@ button { font-family: inherit; }
 .pair { display: grid; grid-template-columns: 1fr auto 1fr; align-items: end; gap: 12px; }
 .pair-arrow { padding-bottom: 11px; color: var(--muted); font-size: 13px; }
 
-.form-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px 16px; }
+.form-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
 
 .field { display: grid; gap: 6px; min-width: 0; }
 .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-soft); font-weight: 700; }
 .opt { font-style: normal; text-transform: none; letter-spacing: 0; color: var(--muted); font-weight: 400; }
+/* поля всегда занимают свою ячейку и умеют сжиматься: без width/min-width
+   инпут живёт по внутренней ширине и распирает сетку — страница уезжает вбок */
+.form .q { width: 100%; min-width: 0; }
 .form textarea.q { resize: vertical; min-height: 120px; }
 
 .form-grey { font-size: 13px; color: var(--muted); margin: 0; }

@@ -4,7 +4,7 @@ import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  countPending, listPending, markSeen, saveMatchRun, searchByCity, setSeenListing, takeWatchers, updateListingStatus,
+  countPending, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -858,6 +858,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/подбор</b> (для администратора): найти пары «водитель везёт» ↔ «нужно передать»; можно сузить городами и окном по датам: <code>/подбор Варшава Минск 7 дней</code>\n` +
           `• <b>/статистика</b> (для администратора): итоги месяца — сколько объявлений, какие направления и средняя цена; текст готов к публикации в канале\n` +
           `• Заявки с прошедшей датой уходят в архив на месяц — видны в /поиск, потом удаляются\n` +
+          `• Подали заявку с сайта и хотите узнать, когда её опубликуют? На странице после отправки нажмите «сообщить об одобрении в Telegram» — и я напишу, как только модератор одобрит\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
           `• Сайт: ${site}`
@@ -1335,18 +1336,24 @@ async function handleWatchStart(env: Env, chatId: number, listingId: string): Pr
 export async function notifyListingPublished(env: Env, listing: Listing): Promise<void> {
   const site = (env.SITE_URL ?? '').replace(/\/$/, '');
   const link = site ? `${site}/item/${encodeURIComponent(listing.id)}` : '';
-  const chatIds = new Set<string>(await takeWatchers(env, listing.id).catch(() => [] as string[]));
+  const chatIds = new Set<string>(await listWatchers(env, listing.id).catch(() => [] as string[]));
   // положительный id — личный диалог с ботом; группы (отрицательные) не дёргаем
   if (listing.source === 'telegram' && listing.sourceChatId && Number(listing.sourceChatId) > 0) {
     chatIds.add(String(listing.sourceChatId));
   }
   for (const chatId of chatIds) {
-    // один недоступный чат не должен срывать остальные
-    await sendText(env, Number(chatId),
-      `✅ <b>Ваша заявка опубликована на доске.</b>\n\n${formatListing(listing)}`
-      + (link ? `\n\n${link}` : '')
-      + '\n\nЕсли что-то поменялось — напишите мне, поправлю или сниму.')
-      .catch((e) => console.error(`notify chat ${chatId} failed`, e));
+    try {
+      await sendText(env, Number(chatId),
+        `✅ <b>Ваша заявка опубликована на доске.</b>\n\n${formatListing(listing)}`
+        + (link ? `\n\n${link}` : '')
+        + '\n\nЕсли что-то поменялось — напишите мне, поправлю или сниму.');
+      // наблюдение одноразовое: снимаем только после успешной отправки
+      await removeWatcher(env, listing.id, chatId).catch(() => undefined);
+    } catch (e) {
+      // один недоступный чат не должен срывать остальные; наблюдатель
+      // остаётся — вдруг публикация повторится (вернули с отклонения)
+      console.error(`notify chat ${chatId} failed`, e);
+    }
   }
 }
 
