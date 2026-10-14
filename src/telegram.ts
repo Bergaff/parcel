@@ -4,7 +4,7 @@ import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  countPending, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, updateListingStatus,
+  countPending, getSetting, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -19,13 +19,15 @@ import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './s
 /* ------------------------------------------------------------------ */
 
 interface TgUser { id: number; first_name?: string; username?: string; is_bot?: boolean }
-interface TgChat { id: number; type: string; title?: string; username?: string }
+interface TgChat { id: number; type: string; title?: string; username?: string; is_forum?: boolean }
 interface TgMessage {
   message_id: number;
   from?: TgUser;
   chat: TgChat;
   date: number;
   text?: string;
+  /** Тема форум-группы, куда пишет человек (Bot API). */
+  message_thread_id?: number;
   reply_to_message?: TgMessage;
   /** Признак пересланного сообщения (Bot API: forward_origin). */
   forward_origin?: unknown;
@@ -861,6 +863,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• Подали заявку с сайта и хотите узнать, когда её опубликуют? На странице после отправки нажмите «сообщить об одобрении в Telegram» — и я напишу, как только модератор одобрит\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
+          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (или <code>/здесь прочее</code>) — одобренные заявки будут публиковаться там ссылками с превью\n` +
           `• Сайт: ${site}`
         );
         await setWizard(env, chatId, null);
@@ -1152,9 +1155,16 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
 async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   if (!text) return;
-  // Не реагируем на собственные сообщения и ботов
-  if (msg.from?.username === env.BOT_USERNAME || msg.from?.is_bot) return;
+  // Не реагируем на собственные сообщения и ботов. username сверки не должен
+  // ловить «undefined === undefined» (нет ника и нет BOT_USERNAME — это не мы)
+  if ((msg.from?.username && msg.from.username === env.BOT_USERNAME) || msg.from?.is_bot) return;
 
+  // /здесь — настройка «комнат» форум-канала (см. cmdForumTopic): админ
+  // пишет команду в нужной теме, бот запоминает тему за маршрутом
+  if (/^\/(здесь|тема|zdes)(\s|$)/i.test(text)) {
+    await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
+    return;
+  }
   // /поиск, /search, /серч работают и в группах
   if (isSearchCommand(text)) {
     await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
@@ -1298,6 +1308,100 @@ function repeatReply(repeats: Repeat[]): string {
     '\n\nЕсли это другой человек или другой рейс — добавьте отдельно: /post.';
 }
 
+/* ---------- форум-канал: «комнаты» по направлениям ---------- */
+
+/** Настройки форум-канала в settings: { chat, fallback, routes }. */
+interface ForumBroadcast {
+  chat: string;
+  /** Тема для направлений без своей «комнаты»; 1 — «Общая». */
+  fallback: number;
+  /** «варшава|минск» → id темы. */
+  routes: Record<string, number>;
+}
+
+const FORUM_SETTING = 'forum_broadcast';
+
+async function loadForumConfig(env: Env): Promise<ForumBroadcast | null> {
+  const raw = await getSetting(env, FORUM_SETTING).catch(() => null);
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<ForumBroadcast>;
+    if (!v.chat) return null;
+    return { chat: String(v.chat), fallback: Number(v.fallback ?? 1), routes: v.routes ?? {} };
+  } catch {
+    return null;
+  }
+}
+
+/** Ключ маршрута: нормализованные города через «|», в нижнем регистре. */
+export function forumRouteKey(from: string, to: string): string {
+  return `${normalizeCity(from).toLowerCase()}|${normalizeCity(to).toLowerCase()}`;
+}
+
+/** «Варшава → Минск» / «Варшава - Минск» / «Варшава-Минск» → ключ маршрута;
+ *  «прочее» → комната по умолчанию; пустое/непонятное → null. */
+export function parseForumRouteLabel(label: string): { key: string } | { fallback: true } | null {
+  const s = label.trim().replace(/\s+/g, ' ');
+  if (!s) return null;
+  if (/^(прочее|остальное|другое|общее|всё|все)$/i.test(s)) return { fallback: true };
+  // разделитель — стрелка (надёжнее всего), « - » с пробелами, затем обычный
+  // дефис. «Ивано-Франковск-Киев» режем по последнему дефису: город с дефисом
+  // остаётся целиком в «откуда»
+  let parts: string[];
+  if (s.includes('→')) parts = s.split('→');
+  else if (s.includes(' - ')) parts = s.split(' - ');
+  else if (s.includes('-')) {
+    const i = s.lastIndexOf('-');
+    parts = [s.slice(0, i), s.slice(i + 1)];
+  } else return null;
+  if (parts.length !== 2) return null;
+  const from = normalizeCity(parts[0] ?? '');
+  const to = normalizeCity(parts[1] ?? '');
+  if (!from || !to) return null;
+  return { key: forumRouteKey(from, to) };
+}
+
+/** /здесь в теме форум-группы: запомнить тему за маршрутом (админ). */
+async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<void> {
+  const reply = (text: string) => sendText(env, msg.chat.id, text, {
+    message_thread_id: msg.message_thread_id,
+  });
+  if (!isAdminChat(env, msg)) return; // команда админская — молчим
+  if (!msg.chat.is_forum) {
+    await reply('Это работает в форум-группе — группе с включёнными «Тематами». Создайте группу, в настройках включите «Темы», добавьте меня админом и повторите команду в нужной теме.');
+    return;
+  }
+  const parsed = parseForumRouteLabel(label);
+  if (!parsed) {
+    await reply('Напишите направление и я запомню эту тему за ним: <code>/здесь Варшава → Минск</code>. Для темы-«комнаты» всего остального: <code>/здесь прочее</code>.');
+    return;
+  }
+  const cfg = (await loadForumConfig(env)) ?? { chat: String(msg.chat.id), fallback: 1, routes: {} };
+  cfg.chat = String(msg.chat.id); // последняя группа — рабочая
+  const thread = msg.message_thread_id ?? 1;
+  if ('fallback' in parsed) cfg.fallback = thread;
+  else cfg.routes[parsed.key] = thread;
+  await setSetting(env, FORUM_SETTING, JSON.stringify(cfg));
+  const what = 'fallback' in parsed
+    ? 'тема для направлений без своей комнаты'
+    : `маршрут <b>${escapeHtml(label.trim())}</b>`;
+  await reply(`Готово: ${what} закреплён за этой темой. Новые заявки будут появляться здесь ссылкой с превью.`);
+}
+
+/** Опубликованная заявка → ссылка в «комнату» направления форум-канала. */
+export async function broadcastListingToForum(env: Env, listing: Listing): Promise<void> {
+  const cfg = await loadForumConfig(env);
+  if (!cfg) return;
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  if (!site) return;
+  const thread = cfg.routes[forumRouteKey(listing.fromCity, listing.toCity)] ?? cfg.fallback;
+  await sendText(env, Number(cfg.chat), `${site}/item/${encodeURIComponent(listing.id)}`, {
+    message_thread_id: thread,
+    // превью обязательно: в нём вся карточка (картинка и маршрут)
+    disable_web_page_preview: false,
+  });
+}
+
 /* ---------- уведомления авторам заявок ---------- */
 
 /** Диплинк watch_<id> с сайта: «сообщите, когда опубликуют». */
@@ -1334,6 +1438,8 @@ async function handleWatchStart(env: Env, chatId: number, listingId: string): Pr
 /** Заявка опубликована: сообщаем всем, кто попросил (watch_<id> с сайта),
  *  и автору, если он подавал заявку через бота в личке. */
 export async function notifyListingPublished(env: Env, listing: Listing): Promise<void> {
+  // ссылка с превью в «комнату» направления (форум-канал, если настроен)
+  await broadcastListingToForum(env, listing).catch((e) => console.error('forum broadcast failed', e));
   const site = (env.SITE_URL ?? '').replace(/\/$/, '');
   const link = site ? `${site}/item/${encodeURIComponent(listing.id)}` : '';
   const chatIds = new Set<string>(await listWatchers(env, listing.id).catch(() => [] as string[]));
