@@ -27,6 +27,7 @@ function mapRow(row: Record<string, unknown>): Listing {
     byAdmin: Number(row.by_admin ?? 0) === 1,
     fromPerson: Number(row.by_admin ?? 0) === 2,
     hidden: Number(row.hidden ?? 0) === 1,
+    pinnedUntil: row.pinned_until ? String(row.pinned_until) : null,
     createdAt: String(row.created_at),
     publishedAt: row.published_at ? String(row.published_at) : null,
     views: Number(row.views ?? 0),
@@ -88,6 +89,7 @@ export async function listListings(
   // показываем и с прошедшей датой) — на свежей базе колонку создаёт воркер,
   // поэтому чтение тоже обязано её гарантировать, а не только запись.
   await ensureRecurringColumn(env);
+  await ensurePinColumn(env);
   if (f.from || f.to || f.q) await ensureSearchColumns(env);
   const { sql, params } = buildWhere(f);
   let fullSql = `SELECT * FROM listings${sql}`;
@@ -95,7 +97,8 @@ export async function listListings(
 
   const page = Math.max(1, f.page ?? 1);
   const perPage = Math.min(50, Math.max(1, f.perPage ?? 20));
-  fullSql += ' ORDER BY COALESCE(published_at, created_at) DESC LIMIT ? OFFSET ?';
+  // закреплённые — вверху доски (пока не истёк срок), затем свежие как обычно
+  fullSql += ' ORDER BY (CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime(\'now\') THEN 0 ELSE 1 END), COALESCE(published_at, created_at) DESC LIMIT ? OFFSET ?';
   params.push(perPage + 1, (page - 1) * perPage);
 
   const res = await env.DB.prepare(fullSql).bind(...params).all();
@@ -123,6 +126,33 @@ export async function getListingById(env: Env, id: string, opts: { hitView?: boo
     | Record<string, unknown>
     | null;
   return row ? mapRow(row) : null;
+}
+
+/** Колонка pinned_until («закреплено до») — тот же сценарий, что у hidden:
+ *  ALTER делает сам воркер, миграция не нужна. */
+let pinColumnReady: Promise<void> | null = null;
+function ensurePinColumn(env: Env): Promise<void> {
+  if (!pinColumnReady) {
+    pinColumnReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('pinned_until')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN pinned_until TEXT`).run();
+      }
+    })();
+    pinColumnReady.catch(() => { pinColumnReady = null; });
+  }
+  return pinColumnReady;
+}
+
+/** Закрепить заявку вверху доски на месяц (on) или снять закрепление (off). */
+export async function setListingPin(env: Env, id: string, on: boolean): Promise<string | null> {
+  await ensurePinColumn(env);
+  const until = on ? new Date(Date.now() + 30 * 86400e3).toISOString() : null;
+  await env.DB.prepare('UPDATE listings SET pinned_until = ? WHERE id = ?').bind(until, id).run();
+  return until;
 }
 
 /** Колонка reject_reason («почему отклонено») — создаётся воркером на лету,
@@ -368,11 +398,27 @@ export async function findByIdPrefix(env: Env, prefix: string): Promise<Listing[
 }
 
 /** Заявки на доске (действующие + архив) — для админ-панели сайта. */
-export async function listAdminBoard(env: Env, limit = 200): Promise<Listing[]> {
+export async function listAdminBoard(env: Env, limit = 200, q?: string): Promise<Listing[]> {
+  await ensurePinColumn(env);
+  // поиск по контакту: телефон или @username — как записаны, так и «только цифры»
+  // (номер в базе может быть с пробелами и дефисами, а ищут обычно слитно)
+  const query = (q ?? '').trim();
+  const like = `%${query.toLowerCase()}%`;
+  const digits = query.replace(/\D/g, '');
+  const where = query
+    ? `AND (LOWER(telegram) LIKE ?
+         OR phone LIKE ?
+         OR LOWER(REPLACE(REPLACE(telegram, '@', ''), ' ', '')) LIKE ?
+         ${digits.length >= 4 ? "OR REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', '') LIKE ?" : ''})`
+    : '';
+  const params = query
+    ? [like, like, like, ...(digits.length >= 4 ? [`%${digits}%`] : [])]
+    : [];
   const res = await env.DB.prepare(
-    `SELECT * FROM listings WHERE status IN ('published', 'expired')
-     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
-  ).bind(limit).all();
+    `SELECT * FROM listings WHERE status IN ('published', 'expired') ${where}
+     ORDER BY (CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime('now') THEN 0 ELSE 1 END),
+              COALESCE(published_at, created_at) DESC LIMIT ?`
+  ).bind(...params, limit).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 

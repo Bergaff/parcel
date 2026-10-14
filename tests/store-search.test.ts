@@ -13,8 +13,8 @@ import type { Env } from '../src/types';
 import {
   autoStatusFor, countPending, ensureSearchColumns, findDuplicateCandidates, getCounts, isAdminOrigin, isHiddenRequestInput,
   isPersonOrigin, likeContains, pruneDuplicatePending,
-  listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
-  searchByCity, sqlLowerCyr,
+  listAdminBoard, listListings, listSitemapItems, pruneStalePending, resetSearchColumnsCache,
+  searchByCity, setListingPin, sqlLowerCyr,
 } from '../src/store';
 
 interface Call { sql: string; params: unknown[] }
@@ -402,5 +402,71 @@ describe('очередь модерации: автоочистка явных �
     const { env, updates } = pruneDb(pending, [...board, ...pending]);
     expect(await pruneDuplicatePending(env)).toBe(0);
     expect(updates.filter((u) => /UPDATE listings SET status/i.test(u.sql))).toHaveLength(0);
+  });
+});
+
+describe('закрепления и поиск по контактам (админка)', () => {
+  /** Память вместо D1: помним SQL и параметры; PRAGMA говорит, что все колонки есть. */
+  function dbFake() {
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const make = (sql: string) => {
+      const call = { sql, params: [] as unknown[] };
+      calls.push(call);
+      const stmt = {
+        bind(...params: unknown[]) { call.params = params; return stmt; },
+        async all() {
+          if (/PRAGMA table_info/i.test(sql)) {
+            return { results: ['id', 'recurring', 'pinned_until', 'reject_reason', 'hidden'].map((name) => ({ name })) };
+          }
+          return { results: [] };
+        },
+        async run() { return { meta: { changes: 1 } }; },
+        async first() { return null; },
+      };
+      return stmt;
+    };
+    return {
+      env: { DB: { prepare: make, batch: async (s: unknown[]) => Promise.all(s as never) } } as unknown as Env,
+      calls,
+    };
+  }
+
+  it('закрепление пишет дату +30 дней, снятие — null', async () => {
+    const { env, calls } = dbFake();
+    const until = await setListingPin(env, 'p1', true);
+    const on = calls.find((c) => c.sql.includes('UPDATE listings SET pinned_until'));
+    expect(on).toBeTruthy();
+    expect(on!.params[0]).toBe(until);
+    expect(Date.parse(String(until))).toBeGreaterThan(Date.now() + 29 * 86400e3);
+
+    await setListingPin(env, 'p1', false);
+    const off = [...calls].reverse().find((c) => c.sql.includes('UPDATE listings SET pinned_until'));
+    expect(off!.params[0]).toBeNull();
+  });
+
+  it('доска сортирует закреплённые вверху', async () => {
+    const { env, calls } = dbFake();
+    await listListings(env, {});
+    const select = calls.find((c) => c.sql.startsWith('SELECT * FROM listings'));
+    expect(select?.sql).toContain('CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime');
+  });
+
+  it('админская доска ищет по контакту: телефон и @username, включая голые цифры', async () => {
+    const { env, calls } = dbFake();
+    await listAdminBoard(env, 200, '@Ivan');
+    const withQ = calls.find((c) => c.sql.includes('LIKE'));
+    expect(withQ?.sql).toContain('LOWER(telegram) LIKE');
+    expect(withQ?.params[0]).toBe('%@ivan%');
+
+    await listAdminBoard(env, 200, '48 601 234 567');
+    const byDigits = [...calls].reverse().find((c) => c.sql.includes('LIKE'));
+    expect(byDigits?.sql).toContain("REPLACE(REPLACE(REPLACE(phone, ' ', ''), '-', ''), '+', '')");
+    expect(byDigits!.params).toContain('%48601234567%');
+  });
+
+  it('без запроса — никакого LIKE, просто доска', async () => {
+    const { env, calls } = dbFake();
+    await listAdminBoard(env, 200);
+    expect(calls.some((c) => c.sql.includes('LIKE'))).toBe(false);
   });
 });

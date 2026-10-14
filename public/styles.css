@@ -283,6 +283,11 @@ button { font-family: inherit; }
 .stamp-request { color: var(--accent); border-color: var(--accent); }
 .stamp-expired { color: #8a8172; border-color: #8a8172; }
 .stamp-recur { color: #35507a; border-color: #35507a; }
+.stamp-pinned { color: var(--paper); border-color: var(--ink); background: var(--ink); }
+
+/* поиск по контакту на вкладке «на доске» */
+.admin-search { display: flex; gap: 8px; align-items: center; margin: 0 0 16px; }
+.admin-search .q { flex: 1; }
 /* Происхождение заявки в очереди модерации: админ или посторонний человек */
 .stamp-admin { color: #35507a; border-color: #35507a; background: rgba(53, 80, 122, .08); }
 .stamp-origin { color: #6f675a; border-color: #6f675a; }

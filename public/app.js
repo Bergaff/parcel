@@ -359,6 +359,9 @@ function buildRow(l) {
     ]),
     el('div', { class: 'row-side' }, [
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      l.pinnedUntil && l.pinnedUntil > new Date().toISOString()
+        ? el('span', { class: 'stamp stamp-pinned', text: 'закреплено' })
+        : null,
       l.recurring ? el('span', { class: 'stamp stamp-recur', text: 'регулярно' }) : null,
       // Регулярный рейс архивом не помечаем: дату катит cron (archiveExpired)
       (l.status === 'expired' || (l.departureDate && l.departureDate < mskTodayIso() && !l.recurring))
@@ -818,6 +821,7 @@ let adminItems = [];   // список открытой вкладки — пр�
 let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
 let adminPendingTotal = 0; // сколько заявок реально ждёт в очереди (COUNT на сервере, не длина списка)
 let adminDupesPruned = 0; // сколько явных повторов отклонено из очереди до показа
+let adminBoardQuery = ''; // поиск по контакту на вкладке «на доске»
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -937,11 +941,18 @@ function adminCard(l, mode = 'pending') {
     : [
         editBtn,
         relBtn,
+        l.status === 'published'
+          ? el('button', {
+              class: 'btn btn-line btn-sm', text: l.pinnedUntil ? 'открепить' : 'закрепить',
+              title: l.pinnedUntil ? 'снять закрепление' : 'закрепить вверху доски на месяц',
+              onclick: () => adminTogglePin(l.id, !l.pinnedUntil),
+            })
+          : null,
         l.status === 'expired'
           ? el('button', { class: 'btn btn-ink btn-sm', text: 'на доску', onclick: () => adminSetStatus(l.id, 'published') })
           : el('button', { class: 'btn btn-line btn-sm', text: 'в архив', onclick: () => adminSetStatus(l.id, 'expired') }),
         el('button', { class: 'btn btn-line btn-sm danger', text: 'удалить', onclick: () => adminDelete(l.id) }),
-      ];
+      ].filter(Boolean);
   return el('article', { class: 'admin-card', 'data-id': l.id }, [
     duplicateNote(l),
     el('h3', { class: 'route-line' }, [
@@ -953,6 +964,7 @@ function adminCard(l, mode = 'pending') {
       originStamp(l),
       personStamp(l),
       l.hidden ? el('span', { class: 'stamp stamp-hidden', text: 'скрыта · только подбор' }) : null,
+      l.pinnedUntil ? el('span', { class: 'stamp stamp-pinned', text: 'закреплено' }) : null,
       l.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     ].filter(Boolean)),
     el('div', { class: 'meta-line' }, [
@@ -1085,7 +1097,10 @@ async function loadAdmin() {
     return;
   }
   try {
-    const res = await adminApi(`/api/admin/listings?tab=${adminTab}`);
+    const listUrl = adminTab === 'board' && adminBoardQuery
+      ? `/api/admin/listings?tab=board&q=${encodeURIComponent(adminBoardQuery)}`
+      : `/api/admin/listings?tab=${adminTab}`;
+    const res = await adminApi(listUrl);
     if (res.status === 401) {
       localStorage.removeItem(ADMIN_KEY_STORAGE);
       $('#admin-login').hidden = false;
@@ -1116,6 +1131,12 @@ async function loadAdmin() {
 function updateAdminCount() {
   if (adminTab !== 'pending') {
     const n = adminItems.length;
+    if (adminTab === 'board' && adminBoardQuery) {
+      $('#admin-count').textContent = n === 0
+        ? `По контакту «${adminBoardQuery}» ничего не нашлось.`
+        : `По контакту «${adminBoardQuery}»: ${n} — действующие и архив`;
+      return;
+    }
     $('#admin-count').textContent = n === 0
       ? 'На доске пока пусто.'
       : `На доске: ${n} — действующие и архив`;
@@ -1138,10 +1159,31 @@ function updateAdminCount() {
   $('#admin-count').textContent = `⏳ Необработано заявок: ${adminPendingTotal}${shownNote}${cleanNote}`;
 }
 
+/** Поиск по контакту на вкладке «на доске»: @username или телефон —
+ *  сервер ищет и «как записано», и по голым цифрам номера. */
+function adminBoardSearch() {
+  const input = el('input', {
+    class: 'q', type: 'search', autocomplete: 'off',
+    placeholder: 'найти по контакту: @username или телефон',
+    value: adminBoardQuery,
+  });
+  return el('form', {
+    class: 'admin-search',
+    onsubmit: (e) => { e.preventDefault(); adminBoardQuery = input.value.trim(); loadAdmin(); },
+  }, [
+    input,
+    el('button', { class: 'btn btn-ink btn-sm', type: 'submit', text: 'найти' }),
+    adminBoardQuery
+      ? el('button', { class: 'link-btn', type: 'button', text: 'сброс', onclick: () => { adminBoardQuery = ''; loadAdmin(); } })
+      : null,
+  ]);
+}
+
 /** Нарисовать список заявок из adminItems — без сети. */
 function renderAdminItems() {
   const listEl = $('#admin-list');
   listEl.replaceChildren();
+  if (adminTab === 'board') listEl.append(adminBoardSearch());
   if (adminItems.length === 0) {
     listEl.append(el('p', {
       class: 'empty-note',
@@ -1428,6 +1470,23 @@ function matchHiddenBox() {
       ]),
       ' ',
     ])),
+    el('p', {}, [
+      el('button', {
+        class: 'btn btn-line btn-sm', type: 'button', text: 'вернуть всех',
+        onclick: async () => {
+          if (!confirm('Вернуть в подбор все скрытые контакты?')) return;
+          try {
+            const res = await adminApi('/api/admin/match/hidden', { method: 'DELETE' });
+            if (!res.ok) throw new Error();
+            matchHidden = [];
+            renderMatchTab();
+            toast('Все контакты возвращены — пары появятся в новых прогонах.');
+          } catch {
+            toast('Не получилось. Попробуйте ещё раз.');
+          }
+        },
+      }),
+    ]),
   ]);
 }
 
@@ -2410,6 +2469,24 @@ async function adminSaveMediaCreds(reset) {
     await renderAdminSettings();
   } catch {
     toast('Не получилось сохранить. Попробуйте ещё раз.');
+  }
+}
+
+async function adminTogglePin(id, on) {
+  try {
+    const res = await adminApi(`/api/admin/listings/${encodeURIComponent(id)}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+    });
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    const item = adminItems.find((x) => x.id === id);
+    if (item) item.pinnedUntil = data.pinnedUntil ?? null;
+    toast(on ? 'Закреплено на месяц — заявка вверху доски.' : 'Закрепление снято.');
+    renderAdminItems();
+  } catch {
+    toast('Не получилось. Попробуйте ещё раз.');
   }
 }
 

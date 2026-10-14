@@ -103,6 +103,7 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
 
   const side = [
     `<span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>`,
+    l.pinnedUntil && l.pinnedUntil > new Date().toISOString() ? '<span class="stamp stamp-pinned">закреплено</span>' : null,
     l.recurring ? '<span class="stamp stamp-recur">регулярно</span>' : null,
     archived ? '<span class="stamp stamp-expired">архив</span>' : null,
     contact

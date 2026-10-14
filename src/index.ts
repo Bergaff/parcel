@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -801,6 +801,13 @@ app.post('/api/admin/listings/:id/status', async (c) => {
   return c.json({ ok: true, duplicate });
 });
 
+/* Закрепление заявки вверху доски: на месяц, снять можно раньше. */
+app.post('/api/admin/listings/:id/pin', async (c) => {
+  const b = (await c.req.json().catch(() => ({}))) as { on?: unknown };
+  const pinnedUntil = await setListingPin(c.env, c.req.param('id'), b.on !== false);
+  return c.json({ ok: true, pinnedUntil });
+});
+
 /* «Ведро» отклонённых: смотреть тексты и причины, копировать для настройки фильтров. */
 app.get('/api/admin/rejected', async (c) => {
   const items = await listRejected(c.env);
@@ -850,7 +857,7 @@ app.get('/api/admin/listings', async (c) => {
   // заявок» застревал на 50. Настоящее число очереди приходит отдельно
   // (pendingTotal) — оно не зависит от размера выборки.
   const items = isBoard
-    ? await listAdminBoard(c.env, 200)
+    ? await listAdminBoard(c.env, 200, c.req.query('q'))
     : await listPending(c.env, 200);
   // происхождение заявки — штампы «от админа» / «с сайта» / «из чата» /
   // «от другого человека» в карточке
@@ -1199,6 +1206,12 @@ app.post('/api/admin/stats/summary', async (c) => {
  *  но заявки не удаляем. */
 app.get('/api/admin/match/hidden', async (c) => {
   return c.json({ hidden: await loadHiddenContacts(c.env) });
+});
+
+/* Вернуть всех скрытых в подборе разом. */
+app.delete('/api/admin/match/hidden', async (c) => {
+  await setHiddenContacts(c.env, []);
+  return c.json({ ok: true, hidden: [] });
 });
 
 app.post('/api/admin/match/hide', async (c) => {

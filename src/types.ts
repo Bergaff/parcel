@@ -70,6 +70,9 @@ export interface Listing extends ListingInput {
   publishedAt: string | null;
   views: number;
   fromPerson: boolean;
+  /** До какой даты заявка закреплена вверху доски (ISO). Закрепляет админ,
+   *  живёт месяц, снять можно раньше. В базе — колонка pinned_until. */
+  pinnedUntil?: string | null;
 }
 
 export interface ListFilters {
