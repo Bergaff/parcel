@@ -2,21 +2,33 @@
  * Форум-канал: «комнаты» (темы) по направлениям, куда бот публикует ссылки
  * на одобренные заявки — превью показывает карточку.
  *
- * Настройка — командой /здесь в самой теме форум-группы (админ), хранение —
- * settings.forum_broadcast. Публикация — из notifyListingPublished.
+ * Правила трёх видов: точная пара («Варшава → Минск»), регион («Польша ↔
+ * Беларусь»), город-хаб («Дубай»); «прочее» — комната по умолчанию.
+ * Статистика /комнаты показывает, какую комнату дробить, какую сливать.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Env, Listing } from '../src/types';
 
+interface StatRow { routeKey: string; fromCity: string; toCity: string; thread: number; posts: number; lastAt: string }
+
 const db = vi.hoisted(() => ({
   listings: new Map<string, Listing>(),
   settings: new Map<string, string>(),
+  forumStats: new Map<string, StatRow>(),
 }));
 
 vi.mock('../src/store', () => ({
   addReport: async () => ({ ok: true, autoRejected: false, count: 0 }),
   addWatcher: async () => undefined,
+  bumpForumStat: async (_e: unknown, routeKey: string, fromCity: string, toCity: string, thread: number) => {
+    const cur = db.forumStats.get(routeKey);
+    if (cur) {
+      cur.posts += 1; cur.thread = thread; cur.lastAt = '2026-10-14T09:00:00.000Z';
+    } else {
+      db.forumStats.set(routeKey, { routeKey, fromCity, toCity, thread, posts: 1, lastAt: '2026-10-14T09:00:00.000Z' });
+    }
+  },
   createListing: async () => { throw new Error('не нужен'); },
   createListingSafe: async () => { throw new Error('не нужен'); },
   findByIdPrefix: async () => null,
@@ -25,6 +37,7 @@ vi.mock('../src/store', () => ({
   getSetting: async (_e: unknown, key: string) => db.settings.get(key) ?? null,
   setSetting: async (_e: unknown, key: string, value: string) => { db.settings.set(key, value); },
   listForMatching: async () => [],
+  listForumStats: async () => [...db.forumStats.values()].sort((a, b) => b.posts - a.posts),
   countPending: async () => 0,
   listPending: async () => [],
   listWatchers: async () => [],
@@ -36,7 +49,8 @@ vi.mock('../src/store', () => ({
   updateListingStatus: async () => true,
 }));
 
-import { broadcastListingToForum, handleTelegramUpdate, notifyListingPublished, parseForumRouteLabel } from '../src/telegram';
+import { broadcastListingToForum, forumThreadFor, handleTelegramUpdate, parseForumRouteLabel } from '../src/telegram';
+import type { ForumBroadcast } from '../src/telegram';
 
 const env = {
   BOT_TOKEN: 'test-token',
@@ -74,6 +88,10 @@ function listing(over: Partial<Listing> = {}): Listing {
   } as Listing;
 }
 
+function cfg(over: Partial<ForumBroadcast> = {}): ForumBroadcast {
+  return { chat: '-100777', fallback: 99, pairs: {}, countries: {}, cities: {}, ...over };
+}
+
 /** Сообщение в теме форум-группы. */
 async function forumMessage(text: string, fromId: number, threadId = 55) {
   await handleTelegramUpdate(env, {
@@ -92,6 +110,7 @@ async function forumMessage(text: string, fromId: number, threadId = 55) {
 beforeEach(() => {
   db.listings.clear();
   db.settings.clear();
+  db.forumStats.clear();
   sent.length = 0;
   global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
@@ -117,37 +136,35 @@ afterEach(() => {
   global.fetch = realFetch;
 });
 
-describe('разбор названия направления', () => {
-  it('стрелка, дефисы и «прочее»', () => {
-    expect(parseForumRouteLabel('Варшава → Минск')).toEqual({ key: 'варшава|минск' });
-    expect(parseForumRouteLabel('Варшава - Минск')).toEqual({ key: 'варшава|минск' });
-    expect(parseForumRouteLabel('варшава-минск')).toEqual({ key: 'варшава|минск' });
+describe('разбор аргумента /здесь', () => {
+  it('пара городов, страны, одиночный город, прочее', () => {
+    expect(parseForumRouteLabel('Варшава → Минск')).toEqual({ pair: 'варшава|минск' });
+    expect(parseForumRouteLabel('Варшава - Минск')).toEqual({ pair: 'варшава|минск' });
+    expect(parseForumRouteLabel('варшава-минск')).toEqual({ pair: 'варшава|минск' });
+    expect(parseForumRouteLabel('Польша ↔ Беларусь')).toEqual({ country: 'беларусь|польша' });
+    expect(parseForumRouteLabel('Германия - Беларусь')).toEqual({ country: 'беларусь|германия' });
+    expect(parseForumRouteLabel('Дубай')).toEqual({ city: 'дубай' });
     expect(parseForumRouteLabel('прочее')).toEqual({ fallback: true });
     expect(parseForumRouteLabel('')).toBeNull();
-    expect(parseForumRouteLabel('просто слово')).toBeNull();
+    expect(parseForumRouteLabel('Польша')).toBeNull(); // страна без пары не имеет смысла
   });
 
   it('город с дефисом не режется пополам', () => {
-    expect(parseForumRouteLabel('Ивано-Франковск-Киев')).toEqual({ key: 'ивано-франковск|киев' });
+    expect(parseForumRouteLabel('Ивано-Франковск-Киев')).toEqual({ pair: 'ивано-франковск|киев' });
   });
 });
 
 describe('/здесь — настройка комнат', () => {
-  it('админ в теме: бот запоминает маршрут за темой и отвечает там же', async () => {
+  it('админ в теме: пара, регион и город пишутся в настройки', async () => {
     await forumMessage('/здесь Варшава → Минск', 42, 55);
-    const cfg = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
-    expect(cfg.chat).toBe('-100777');
-    expect(cfg.routes['варшава|минск']).toBe(55);
-    const reply = sent.find((s) => s.method === 'sendMessage');
-    expect(reply?.chatId).toBe(-100777);
-    expect(reply?.threadId).toBe(55);
-    expect(reply?.text).toContain('Готово');
-  });
-
-  it('«прочее» задаёт комнату по умолчанию', async () => {
-    await forumMessage('/здесь прочее', 42, 99);
-    const cfg = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
-    expect(cfg.fallback).toBe(99);
+    await forumMessage('/здесь Польша ↔ Беларусь', 42, 66);
+    await forumMessage('/здесь Дубай', 42, 77);
+    const c = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c.chat).toBe('-100777');
+    expect(c.pairs['варшава|минск']).toBe(55);
+    expect(c.countries['беларусь|польша']).toBe(66);
+    expect(c.cities['дубай']).toBe(77);
+    expect(sent.some((s) => s.threadId === 66 && s.text.includes('Готово'))).toBe(true);
   });
 
   it('не админ — тишина: настроек не появилось', async () => {
@@ -155,46 +172,71 @@ describe('/здесь — настройка комнат', () => {
     expect(db.settings.size).toBe(0);
     expect(sent).toHaveLength(0);
   });
+});
 
-  it('вторая тема добавляется к первой, не затирая', async () => {
-    await forumMessage('/здесь Варшава → Минск', 42, 55);
-    await forumMessage('/здесь Минск → Москва', 42, 77);
-    const cfg = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
-    expect(cfg.routes).toEqual({ 'варшава|минск': 55, 'минск|москва': 77 });
+describe('выбор темы: точная пара → страны → город → прочее', () => {
+  it('приоритеты правил', () => {
+    const c = cfg({
+      pairs: { 'варшава|минск': 11 },
+      countries: { 'беларусь|польша': 22 },
+      cities: { 'варшава': 33 },
+    });
+    expect(forumThreadFor(c, 'Варшава', 'Минск')).toBe(11); // пара главнее всего
+    expect(forumThreadFor(c, 'Гданьск', 'Гродно')).toBe(22); // страны накрывают остальную Польшу↔Беларусь
+    expect(forumThreadFor(c, 'Варшава', 'Берлин')).toBe(33); // город ловит, страны не совпали
+    expect(forumThreadFor(c, 'Прага', 'Будапешт')).toBe(99); // ничего — прочее
+  });
+
+  it('страны работают в обе стороны (сортированный ключ)', () => {
+    const c = cfg({ countries: { 'беларусь|польша': 22 } });
+    expect(forumThreadFor(c, 'Минск', 'Варшава')).toBe(22);
+    expect(forumThreadFor(c, 'Белосток', 'Брест')).toBe(22);
   });
 });
 
-describe('публикация ссылки в комнату', () => {
-  it('свой маршрут — своя тема, чужой — комната по умолчанию', async () => {
-    db.settings.set('forum_broadcast', JSON.stringify({
-      chat: '-100777', fallback: 99, routes: { 'варшава|минск': 55 },
-    }));
+describe('публикация и статистика', () => {
+  it('ссылка в нужную тему + счётчик направления растёт', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg({ countries: { 'беларусь|польша': 55 } })));
     await broadcastListingToForum(env, listing());
     const post = sent.find((s) => s.method === 'sendMessage');
     expect(post?.chatId).toBe(-100777);
     expect(post?.threadId).toBe(55);
     expect(post?.text).toBe('https://pop-utka.app/item/aaaaaaaa-1111-2222-3333-444444444444');
-    expect(post?.previewDisabled).toBe(false); // превью включено
+    expect(post?.previewDisabled).toBe(false);
+    const stat = db.forumStats.get('варшава|минск');
+    expect(stat).toMatchObject({ fromCity: 'Варшава', toCity: 'Минск', thread: 55, posts: 1 });
 
     sent.length = 0;
-    await broadcastListingToForum(env, listing({ fromCity: 'Гродно', toCity: 'Минск' }));
-    expect(sent.find((s) => s.method === 'sendMessage')?.threadId).toBe(99);
+    await broadcastListingToForum(env, listing());
+    expect(db.forumStats.get('варшава|минск')?.posts).toBe(2); // +1
   });
 
   it('форум не настроен — тишина', async () => {
     await broadcastListingToForum(env, listing());
     expect(sent).toHaveLength(0);
+    expect(db.forumStats.size).toBe(0);
   });
 
-  it('одобрение заявки публикует ссылку и пишет автору', async () => {
-    db.settings.set('forum_broadcast', JSON.stringify({
-      chat: '-100777', fallback: 99, routes: { 'варшава|минск': 55 },
-    }));
-    db.listings.set('w1', listing({ id: 'w1', status: 'pending', source: 'telegram', sourceChatId: '333' }));
-    await notifyListingPublished(env, db.listings.get('w1')!);
-    const toForum = sent.find((s) => s.threadId === 55);
-    expect(toForum?.text).toContain('https://pop-utka.app/item/w1');
-    const toAuthor = sent.find((s) => s.chatId === 333);
-    expect(toAuthor?.text).toContain('опубликована');
+  it('/комнаты показывает темы и топ направлений', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg({ countries: { 'беларусь|польша': 55 } })));
+    await broadcastListingToForum(env, listing()); // варшава → минск ×1
+    await broadcastListingToForum(env, listing({ fromCity: 'Гданьск', toCity: 'Гродно' })); // тема 55 ×1
+    await broadcastListingToForum(env, listing({ fromCity: 'Прага', toCity: 'Будапешт' })); // прочее ×1
+    sent.length = 0;
+
+    await handleTelegramUpdate(env, {
+      update_id: 2,
+      message: {
+        message_id: 10, date: 1789000001,
+        chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text: '/комнаты',
+      },
+    });
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('Тема 55 — 2 публикации');
+    expect(reply?.text).toContain('Варшава → Минск: 1');
+    expect(reply?.text).toContain('Тема 99 (прочее) — 1 публикация');
+    expect(reply?.text).toContain('кандидаты на новые комнаты');
   });
 });

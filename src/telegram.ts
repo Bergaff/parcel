@@ -4,14 +4,15 @@ import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  countPending, getSetting, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
+  bumpForumStat, countPending, getSetting, listForumStats, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
   normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
 } from './util';
 import { aiExtractListing, type AiFields } from './ai';
-import { currentPeriod, fmtPeriod, fmtPeriodGen } from './format';
+import { currentPeriod, fmtPeriod, fmtPeriodGen, plural } from './format';
+import { CITY_COUNTRY } from './seo-routes';
 import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './stats';
 
 /* ------------------------------------------------------------------ */
@@ -863,10 +864,15 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• Подали заявку с сайта и хотите узнать, когда её опубликуют? На странице после отправки нажмите «сообщить об одобрении в Telegram» — и я напишу, как только модератор одобрит\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
-          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (или <code>/здесь прочее</code>) — одобренные заявки будут публиковаться там ссылками с превью\n` +
+          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (пара), <code>/здесь Польша ↔ Беларусь</code> (регион), <code>/здесь Дубай</code> (город) или <code>/здесь прочее</code> — одобренные заявки будут публиковаться там ссылками с превью. <code>/комнаты</code> — статистика публикаций по комнатам\n` +
           `• Сайт: ${site}`
         );
         await setWizard(env, chatId, null);
+        break;
+      }
+      case '/комнаты':
+      case '/rooms': {
+        if (isAdminChat(env, msg)) await cmdForumStats(env, chatId);
         break;
       }
       case '/post': {
@@ -1165,6 +1171,11 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
     await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
     return;
   }
+  // /комнаты — статистика публикаций (админ)
+  if (/^\/(комнаты|rooms)(\s|$|$)/i.test(text)) {
+    if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
+    return;
+  }
   // /поиск, /search, /серч работают и в группах
   if (isSearchCommand(text)) {
     await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
@@ -1310,13 +1321,19 @@ function repeatReply(repeats: Repeat[]): string {
 
 /* ---------- форум-канал: «комнаты» по направлениям ---------- */
 
-/** Настройки форум-канала в settings: { chat, fallback, routes }. */
-interface ForumBroadcast {
+/** Настройки форум-канала в settings. Три вида правил + комната по умолчанию:
+ *  точная пара городов, страна ↔ страна (для «регион»-комнат) и одиночный
+ *  город (хабы дальнего зарубежья: Дубай, Стамбул…). Приоритет — сверху вниз. */
+export interface ForumBroadcast {
   chat: string;
-  /** Тема для направлений без своей «комнаты»; 1 — «Общая». */
+  /** Тема для направлений, не попавших ни в одно правило; 1 — «Общая». */
   fallback: number;
   /** «варшава|минск» → id темы. */
-  routes: Record<string, number>;
+  pairs: Record<string, number>;
+  /** «беларусь|польша» (сортировано) → id темы. */
+  countries: Record<string, number>;
+  /** «варшава» → id темы (город — откуда или куда). */
+  cities: Record<string, number>;
 }
 
 const FORUM_SETTING = 'forum_broadcast';
@@ -1325,9 +1342,15 @@ async function loadForumConfig(env: Env): Promise<ForumBroadcast | null> {
   const raw = await getSetting(env, FORUM_SETTING).catch(() => null);
   if (!raw) return null;
   try {
-    const v = JSON.parse(raw) as Partial<ForumBroadcast>;
+    const v = JSON.parse(raw) as Partial<ForumBroadcast> & { routes?: Record<string, number> };
     if (!v.chat) return null;
-    return { chat: String(v.chat), fallback: Number(v.fallback ?? 1), routes: v.routes ?? {} };
+    return {
+      chat: String(v.chat),
+      fallback: Number(v.fallback ?? 1),
+      pairs: v.pairs ?? v.routes ?? {}, // старый формат v0.4.12
+      countries: v.countries ?? {},
+      cities: v.cities ?? {},
+    };
   } catch {
     return null;
   }
@@ -1338,10 +1361,29 @@ export function forumRouteKey(from: string, to: string): string {
   return `${normalizeCity(from).toLowerCase()}|${normalizeCity(to).toLowerCase()}`;
 }
 
-/** «Варшава → Минск» / «Варшава - Минск» / «Варшава-Минск» → ключ маршрута;
- *  «прочее» → комната по умолчанию; пустое/непонятное → null. */
-export function parseForumRouteLabel(label: string): { key: string } | { fallback: true } | null {
-  const s = label.trim().replace(/\s+/g, ' ');
+/** Названия стран (из словаря городов) — для правил «страна ↔ страна». */
+const COUNTRY_NAMES = new Set(Object.values(CITY_COUNTRY).map((v) => v.name.toLowerCase()));
+
+/** Страна города по словарю витрины («Варшава» → «польша»), null — не знаем. */
+function countryOfCity(city: string): string | null {
+  const c = CITY_COUNTRY[normalizeCity(city)]?.name;
+  return c ? c.toLowerCase() : null;
+}
+
+/** Ключ пары стран — сортированный, чтобы «Польша ↔ Беларусь» и
+ *  «Беларусь ↔ Польша» были одним правилом. */
+export function countryPairKey(a: string, b: string): string {
+  return [a.toLowerCase(), b.toLowerCase()].sort().join('|');
+}
+
+/** Разбор аргумента /здесь:
+ *  «Варшава → Минск» → пара городов; «Польша ↔ Беларусь» → страны;
+ *  «Дубай» → город-хаб; «прочее» → комната по умолчанию; null → не понял. */
+export function parseForumRouteLabel(
+  label: string
+): { pair: string } | { country: string } | { city: string } | { fallback: true } | null {
+  // ↔ («в обе стороны») для парсинга — то же, что →
+  const s = label.trim().replace(/\s+/g, ' ').replace(/[↔⇄]/g, '→');
   if (!s) return null;
   if (/^(прочее|остальное|другое|общее|всё|все)$/i.test(s)) return { fallback: true };
   // разделитель — стрелка (надёжнее всего), « - » с пробелами, затем обычный
@@ -1353,12 +1395,21 @@ export function parseForumRouteLabel(label: string): { key: string } | { fallbac
   else if (s.includes('-')) {
     const i = s.lastIndexOf('-');
     parts = [s.slice(0, i), s.slice(i + 1)];
-  } else return null;
+  } else {
+    // одиночное слово: город-хаб (страна без пары не имеет смысла)
+    const city = normalizeCity(s);
+    if (city && !COUNTRY_NAMES.has(city.toLowerCase())) return { city: city.toLowerCase() };
+    return null;
+  }
   if (parts.length !== 2) return null;
   const from = normalizeCity(parts[0] ?? '');
   const to = normalizeCity(parts[1] ?? '');
   if (!from || !to) return null;
-  return { key: forumRouteKey(from, to) };
+  // обе части — страны: правило «страна ↔ страна» (регион-комната)
+  if (COUNTRY_NAMES.has(from.toLowerCase()) && COUNTRY_NAMES.has(to.toLowerCase())) {
+    return { country: countryPairKey(from, to) };
+  }
+  return { pair: forumRouteKey(from, to) };
 }
 
 /** /здесь в теме форум-группы: запомнить тему за маршрутом (админ). */
@@ -1376,16 +1427,46 @@ async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<v
     await reply('Напишите направление и я запомню эту тему за ним: <code>/здесь Варшава → Минск</code>. Для темы-«комнаты» всего остального: <code>/здесь прочее</code>.');
     return;
   }
-  const cfg = (await loadForumConfig(env)) ?? { chat: String(msg.chat.id), fallback: 1, routes: {} };
+  const cfg = (await loadForumConfig(env)) ?? { chat: String(msg.chat.id), fallback: 1, pairs: {}, countries: {}, cities: {} };
   cfg.chat = String(msg.chat.id); // последняя группа — рабочая
   const thread = msg.message_thread_id ?? 1;
-  if ('fallback' in parsed) cfg.fallback = thread;
-  else cfg.routes[parsed.key] = thread;
+  let what: string;
+  if ('fallback' in parsed) {
+    cfg.fallback = thread;
+    what = 'тема для направлений без своей комнаты';
+  } else if ('pair' in parsed) {
+    cfg.pairs[parsed.pair] = thread;
+    what = `маршрут <b>${escapeHtml(label.trim())}</b>`;
+  } else if ('country' in parsed) {
+    cfg.countries[parsed.country] = thread;
+    what = `направления <b>${escapeHtml(label.trim())}</b> (в обе стороны)`;
+  } else {
+    cfg.cities[parsed.city] = thread;
+    what = `город <b>${escapeHtml(label.trim())}</b> (откуда или куда)`;
+  }
   await setSetting(env, FORUM_SETTING, JSON.stringify(cfg));
-  const what = 'fallback' in parsed
-    ? 'тема для направлений без своей комнаты'
-    : `маршрут <b>${escapeHtml(label.trim())}</b>`;
   await reply(`Готово: ${what} закреплён за этой темой. Новые заявки будут появляться здесь ссылкой с превью.`);
+}
+
+/** Тема заявки по правилам: точная пара → страна ↔ страна → город → прочее. */
+export function forumThreadFor(
+  cfg: ForumBroadcast,
+  fromCity: string,
+  toCity: string
+): number {
+  const pair = cfg.pairs[forumRouteKey(fromCity, toCity)];
+  if (pair != null) return pair;
+  const fromCountry = countryOfCity(fromCity);
+  const toCountry = countryOfCity(toCity);
+  if (fromCountry && toCountry) {
+    const byCountry = cfg.countries[countryPairKey(fromCountry, toCountry)];
+    if (byCountry != null) return byCountry;
+  }
+  const fromCity2 = normalizeCity(fromCity).toLowerCase();
+  const toCity2 = normalizeCity(toCity).toLowerCase();
+  if (cfg.cities[fromCity2] != null) return cfg.cities[fromCity2]!;
+  if (cfg.cities[toCity2] != null) return cfg.cities[toCity2]!;
+  return cfg.fallback;
 }
 
 /** Опубликованная заявка → ссылка в «комнату» направления форум-канала. */
@@ -1394,12 +1475,52 @@ export async function broadcastListingToForum(env: Env, listing: Listing): Promi
   if (!cfg) return;
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   if (!site) return;
-  const thread = cfg.routes[forumRouteKey(listing.fromCity, listing.toCity)] ?? cfg.fallback;
+  const thread = forumThreadFor(cfg, listing.fromCity, listing.toCity);
+  // статистика комнат: считаем распределение заявок, даже если Telegram
+  // временно недоступен — для решений «дробить или сливать» важна классификация
+  await bumpForumStat(env, forumRouteKey(listing.fromCity, listing.toCity), listing.fromCity, listing.toCity, thread)
+    .catch((e) => console.error('forum stat failed', e));
   await sendText(env, Number(cfg.chat), `${site}/item/${encodeURIComponent(listing.id)}`, {
     message_thread_id: thread,
     // превью обязательно: в нём вся карточка (картинка и маршрут)
     disable_web_page_preview: false,
   });
+}
+
+/** /комнаты: куда сколько заявок разложилось — дробить комнату или сливать. */
+async function cmdForumStats(env: Env, chatId: number): Promise<void> {
+  const [cfg, stats] = await Promise.all([
+    loadForumConfig(env),
+    listForumStats(env).catch(() => []),
+  ]);
+  if (!cfg) {
+    await sendText(env, chatId, 'Форум-канал ещё не настроен: создайте группу с темами, добавьте меня админом и в нужной теме напишите /здесь &lt;направление&gt;.');
+    return;
+  }
+  if (stats.length === 0) {
+    await sendText(env, chatId, 'Публикаций ещё не было: одобрите пару заявок — здесь появится, сколько ушло в каждую комнату.');
+    return;
+  }
+  // группируем по темам, внутри — топ направлений
+  const byThread = new Map<number, { posts: number; lastAt: string; top: ForumStatRow[] }>();
+  type ForumStatRow = { label: string; posts: number };
+  for (const s of stats) {
+    const bucket = byThread.get(s.thread) ?? { posts: 0, lastAt: '', top: [] as ForumStatRow[] };
+    bucket.posts += s.posts;
+    if (s.lastAt > bucket.lastAt) bucket.lastAt = s.lastAt;
+    bucket.top.push({ label: `${s.fromCity} → ${s.toCity}`, posts: s.posts });
+    byThread.set(s.thread, bucket);
+  }
+  const lines: string[] = ['📊 <b>Комнаты форум-канала</b>', ''];
+  for (const [thread, bucket] of [...byThread.entries()].sort((a, b) => b[1].posts - a[1].posts)) {
+    const isFallback = thread === cfg.fallback;
+    lines.push(`Тема ${thread}${isFallback ? ' (прочее)' : ''} — ${bucket.posts} ${plural(bucket.posts, 'публикация', 'публикации', 'публикаций')}`);
+    for (const t of bucket.top.slice(0, 3)) lines.push(`  ${t.label}: ${t.posts}`);
+    if (bucket.top.length > 3) lines.push(`  … ещё ${bucket.top.length - 3}`);
+  }
+  lines.push('');
+  lines.push('Много заявок в одной теме с явным лидером — дробите комнату; почти пустая тема — сливайте. Топ «прочего» — кандидаты на новые комнаты.');
+  await sendText(env, chatId, lines.join('\n'));
 }
 
 /* ---------- уведомления авторам заявок ---------- */

@@ -553,6 +553,54 @@ export async function removeWatcher(env: Env, listingId: string, chatId: string)
   ).bind(listingId, chatId).run();
 }
 
+/** Статистика форум-канала: сколько заявок ушло в каждую комнату (тему).
+ *  Считаем по направлениям — видно, какую комнату дробить, какую сливать. */
+export interface ForumStat {
+  routeKey: string; fromCity: string; toCity: string;
+  thread: number; posts: number; lastAt: string;
+}
+
+export async function ensureForumStatsTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS forum_stats (
+       route_key TEXT PRIMARY KEY,
+       from_city TEXT NOT NULL,
+       to_city TEXT NOT NULL,
+       thread INTEGER NOT NULL,
+       posts INTEGER NOT NULL DEFAULT 0,
+       last_at TEXT NOT NULL
+     )`
+  ).run();
+}
+
+/** +1 публикация направления в комнату (тема могла перенастроиться — обновляем). */
+export async function bumpForumStat(
+  env: Env, routeKey: string, fromCity: string, toCity: string, thread: number
+): Promise<void> {
+  await ensureForumStatsTable(env);
+  await env.DB.prepare(
+    `INSERT INTO forum_stats (route_key, from_city, to_city, thread, posts, last_at)
+     VALUES (?, ?, ?, ?, 1, ?)
+     ON CONFLICT(route_key) DO UPDATE SET
+       posts = posts + 1, thread = excluded.thread, last_at = excluded.last_at`
+  ).bind(routeKey, fromCity, toCity, thread, new Date().toISOString()).run();
+}
+
+export async function listForumStats(env: Env, limit = 200): Promise<ForumStat[]> {
+  await ensureForumStatsTable(env);
+  const res = await env.DB.prepare(
+    'SELECT * FROM forum_stats ORDER BY posts DESC, last_at DESC LIMIT ?'
+  ).bind(Math.min(500, Math.max(1, limit))).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    routeKey: String(r.route_key),
+    fromCity: String(r.from_city),
+    toCity: String(r.to_city),
+    thread: Number(r.thread),
+    posts: Number(r.posts ?? 0),
+    lastAt: String(r.last_at ?? ''),
+  }));
+}
+
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
 export async function getChatLinks(env: Env): Promise<Record<string, string>> {
   const res = await env.DB.prepare('SELECT chat_id, url FROM chat_links').all();
