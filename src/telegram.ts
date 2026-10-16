@@ -4,7 +4,7 @@ import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  bumpForumStat, countPending, getSetting, listForumStats, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
+  bumpForumStat, countPending, getSetting, listForumStats, listForumStatEvents, listingFlowCounts, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
 } from './store';
 import {
   admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
@@ -1521,6 +1521,95 @@ async function cmdForumStats(env: Env, chatId: number): Promise<void> {
   lines.push('');
   lines.push('Много заявок в одной теме с явным лидером — дробите комнату; почти пустая тема — сливайте. Топ «прочего» — кандидаты на новые комнаты.');
   await sendText(env, chatId, lines.join('\n'));
+}
+
+/* ---------- статистика попадания в канал (админка) ---------- */
+
+/** Комната форум-канала в терминах человека: «Варшава → Минск»,
+ *  «Беларусь ↔ Польша», «Дубай», «прочее». */
+function forumRoomLabel(kind: 'pair' | 'country' | 'city', key: string): string {
+  const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+  const [a = '', b = ''] = key.split('|');
+  if (kind === 'city') return cap(a);
+  return `${cap(a)} ${kind === 'pair' ? '→' : '↔'} ${cap(b)}`;
+}
+
+export interface ForumRoomStat {
+  thread: number;
+  label: string;
+  kind: 'пара' | 'регион' | 'город' | 'прочее' | 'тема';
+  posts: number;
+}
+
+export interface ForumReach {
+  configured: boolean;
+  days: number;
+  /** заявок пришло за период (любой статус) */
+  arrived: number;
+  /** опубликовано за период */
+  published: number;
+  /** ушло в канал (события форум-канала) */
+  posted: number;
+  /** из них — в тематические комнаты */
+  inRooms: number;
+  /** из них — в «прочее» (нет своей комнаты) */
+  inFallback: number;
+  rooms: ForumRoomStat[];
+  /** топ направлений «прочего» — кандидаты на новые комнаты */
+  fallbackTop: Array<{ from: string; to: string; posts: number }>;
+}
+
+/** Статистика попадания заявок в Telegram-канал для админки (вкладка «канал»):
+ *  какой процент заявок доходит, сколько уходит в тематические комнаты против
+ *  «прочего» и какие направления чаще падают в «прочее» — их выносим в комнаты. */
+export async function forumReachStats(env: Env, days: number): Promise<ForumReach> {
+  const cfg = await loadForumConfig(env);
+  const sinceIso = days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
+  const [events, counts] = await Promise.all([
+    listForumStatEvents(env, sinceIso).catch(() => []),
+    listingFlowCounts(env, sinceIso).catch(() => ({ arrived: 0, published: 0 })),
+  ]);
+
+  // тема → человекочитаемое имя комнаты (из настроек /здесь)
+  const roomOf = new Map<number, { label: string; kind: ForumRoomStat['kind'] }>();
+  if (cfg) {
+    for (const [key, id] of Object.entries(cfg.pairs ?? {})) roomOf.set(id, { label: forumRoomLabel('pair', key), kind: 'пара' });
+    for (const [key, id] of Object.entries(cfg.countries ?? {})) roomOf.set(id, { label: forumRoomLabel('country', key), kind: 'регион' });
+    for (const [key, id] of Object.entries(cfg.cities ?? {})) roomOf.set(id, { label: forumRoomLabel('city', key), kind: 'город' });
+    roomOf.set(cfg.fallback, { label: 'прочее', kind: 'прочее' });
+  }
+
+  const byThread = new Map<number, ForumRoomStat>();
+  const fallbackTop = new Map<string, { from: string; to: string; posts: number }>();
+  let posted = 0, inRooms = 0, inFallback = 0;
+  for (const e of events) {
+    posted += e.posts;
+    const isFallback = cfg != null && e.thread === cfg.fallback;
+    if (isFallback) {
+      inFallback += e.posts;
+      const cur = fallbackTop.get(e.routeKey);
+      if (cur) cur.posts += e.posts;
+      else fallbackTop.set(e.routeKey, { from: e.fromCity, to: e.toCity, posts: e.posts });
+    } else {
+      inRooms += e.posts;
+    }
+    const meta = roomOf.get(e.thread) ?? { label: `тема ${e.thread}`, kind: 'тема' as const };
+    const room = byThread.get(e.thread) ?? { thread: e.thread, label: meta.label, kind: meta.kind, posts: 0 };
+    room.posts += e.posts;
+    byThread.set(e.thread, room);
+  }
+
+  return {
+    configured: cfg != null,
+    days,
+    arrived: counts.arrived,
+    published: counts.published,
+    posted,
+    inRooms,
+    inFallback,
+    rooms: [...byThread.values()].sort((a, b) => b.posts - a.posts),
+    fallbackTop: [...fallbackTop.values()].sort((a, b) => b.posts - a.posts).slice(0, 10),
+  };
 }
 
 /* ---------- уведомления авторам заявок ---------- */

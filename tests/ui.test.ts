@@ -251,6 +251,22 @@ function makeFetch(calls: string[]) {
           },
         };
       }
+      if (path === '/api/admin/forum-stats') {
+        return {
+          body: {
+            configured: true, days: 30, arrived: 50, published: 20, posted: 12, inRooms: 8, inFallback: 4,
+            rooms: [
+              { thread: 55, label: 'Беларусь ↔ Польша', kind: 'регион', posts: 6 },
+              { thread: 99, label: 'прочее', kind: 'прочее', posts: 4 },
+              { thread: 77, label: 'Дубай', kind: 'город', posts: 2 },
+            ],
+            fallbackTop: [
+              { from: 'Минск', to: 'Москва', posts: 3 },
+              { from: 'Прага', to: 'Будапешт', posts: 1 },
+            ],
+          },
+        };
+      }
       const mKey = (contact: string) => {
         const digits = String(contact).replace(/\D/g, '');
         return digits.length >= 9 ? `ph:${digits.slice(-9)}` : `tg:${String(contact).replace(/^@/, '').toLowerCase()}`;
@@ -367,6 +383,13 @@ afterAll(() => {
 });
 
 /* ---------- доска ---------- */
+
+describe('ссылка на Telegram-канал', () => {
+  it('в шапке, подвале и на странице бота — t.me/parcel_info', () => {
+    const links = htmlSource.match(/href="https:\/\/t\.me\/parcel_info"/g) ?? [];
+    expect(links.length, 'ссылок на канал должно быть минимум три').toBeGreaterThanOrEqual(3);
+  });
+});
 
 describe('доска: строка объявления', () => {
   it('строка — настоящая ссылка, а не div с onclick', () => {
@@ -696,6 +719,26 @@ describe('админка', () => {
     // корпуса: Common Crawl и Wayback
     expect(win.document.querySelector('#admin-list')?.textContent).toContain('CC-MAIN-2026-30: 12 стр.');
     expect(win.document.querySelector('#admin-list')?.textContent).toContain('Wayback: 3 стр.');
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «канал»: процент заявок, дошедших до Telegram, и топ «прочего»', async () => {
+    byId('admin-tab-forum').click();
+    await settle(80);
+    expect(text('admin-count')).toContain('Попадание заявок в Telegram-канал');
+    const body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    // сводные проценты: 12 из 20 опубликованных, 8 в комнаты, 4 в «прочее»
+    expect(body).toContain('ушло в канал 12');
+    expect(body).toContain('В тематические комнаты 8');
+    expect(body).toContain('в «прочее» 4');
+    // комнаты названы человечески, сортировка по публикациям
+    expect(body).toContain('Беларусь ↔ Польша');
+    expect(body).toContain('прочее');
+    // «что не попало» — кандидаты на новые комнаты
+    expect(body).toContain('Что не попало в свои комнаты');
+    expect(body).toContain('Минск → Москва');
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
     await settle(80);

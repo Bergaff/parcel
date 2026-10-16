@@ -16,6 +16,8 @@ const db = vi.hoisted(() => ({
   listings: new Map<string, Listing>(),
   settings: new Map<string, string>(),
   forumStats: new Map<string, StatRow>(),
+  forumEvents: [] as Array<{ thread: number; routeKey: string; fromCity: string; toCity: string; posts: number }>,
+  flowCounts: { arrived: 0, published: 0 },
 }));
 
 vi.mock('../src/store', () => ({
@@ -38,6 +40,8 @@ vi.mock('../src/store', () => ({
   setSetting: async (_e: unknown, key: string, value: string) => { db.settings.set(key, value); },
   listForMatching: async () => [],
   listForumStats: async () => [...db.forumStats.values()].sort((a, b) => b.posts - a.posts),
+  listForumStatEvents: async () => db.forumEvents.map((e) => ({ ...e })),
+  listingFlowCounts: async () => db.flowCounts,
   countPending: async () => 0,
   listPending: async () => [],
   listWatchers: async () => [],
@@ -49,7 +53,7 @@ vi.mock('../src/store', () => ({
   updateListingStatus: async () => true,
 }));
 
-import { broadcastListingToForum, forumThreadFor, handleTelegramUpdate, parseForumRouteLabel } from '../src/telegram';
+import { broadcastListingToForum, forumReachStats, forumThreadFor, handleTelegramUpdate, parseForumRouteLabel } from '../src/telegram';
 import type { ForumBroadcast } from '../src/telegram';
 
 const env = {
@@ -111,6 +115,8 @@ beforeEach(() => {
   db.listings.clear();
   db.settings.clear();
   db.forumStats.clear();
+  db.forumEvents.length = 0;
+  db.flowCounts = { arrived: 0, published: 0 };
   sent.length = 0;
   global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
@@ -238,5 +244,44 @@ describe('публикация и статистика', () => {
     expect(reply?.text).toContain('Варшава → Минск: 1');
     expect(reply?.text).toContain('Тема 99 (прочее) — 1 публикация');
     expect(reply?.text).toContain('кандидаты на новые комнаты');
+  });
+});
+describe('статистика попадания в канал (админка)', () => {
+  it('проценты от заявок, комнаты с именами, топ «прочего»', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg({
+      countries: { 'беларусь|польша': 55 },
+      cities: { 'дубай': 77 },
+    })));
+    db.flowCounts = { arrived: 100, published: 40 };
+    db.forumEvents = [
+      { thread: 55, routeKey: 'варшава|минск', fromCity: 'Варшава', toCity: 'Минск', posts: 20 },
+      { thread: 55, routeKey: 'гданьск|гродно', fromCity: 'Гданьск', toCity: 'Гродно', posts: 5 },
+      { thread: 77, routeKey: 'дубай|москва', fromCity: 'Дубай', toCity: 'Москва', posts: 5 },
+      { thread: 99, routeKey: 'минск|москва', fromCity: 'Минск', toCity: 'Москва', posts: 6 },
+      { thread: 99, routeKey: 'прага|будапешт', fromCity: 'Прага', toCity: 'Будапешт', posts: 4 },
+    ];
+
+    const r = await forumReachStats(env, 30);
+    expect(r.configured).toBe(true);
+    expect(r.arrived).toBe(100);
+    expect(r.published).toBe(40);
+    expect(r.posted).toBe(40);            // 20+5+5+6+4
+    expect(r.inRooms).toBe(30);           // 55-я и 77-я темы
+    expect(r.inFallback).toBe(10);        // «прочее» 99
+    // комнаты названы по настройкам, отсортированы по публикациям
+    expect(r.rooms[0]).toMatchObject({ thread: 55, label: 'Беларусь ↔ Польша', kind: 'регион', posts: 25 });
+    expect(r.rooms).toContainEqual(expect.objectContaining({ thread: 77, label: 'Дубай', kind: 'город', posts: 5 }));
+    expect(r.rooms).toContainEqual(expect.objectContaining({ thread: 99, label: 'прочее', kind: 'прочее', posts: 10 }));
+    // топ «прочего» — кандидат на новую комнату
+    expect(r.fallbackTop[0]).toMatchObject({ from: 'Минск', to: 'Москва', posts: 6 });
+  });
+
+  it('канал не настроен или пусто — аккуратные нули', async () => {
+    db.flowCounts = { arrived: 10, published: 0 };
+    const empty = await forumReachStats(env, 30);
+    expect(empty.configured).toBe(false);
+    expect(empty.posted).toBe(0);
+    expect(empty.rooms).toEqual([]);
+    expect(empty.fallbackTop).toEqual([]);
   });
 });

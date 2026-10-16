@@ -813,9 +813,10 @@ function bindForm() {
 /* ---------- админ-панель ---------- */
 
 const ADMIN_KEY_STORAGE = 'popoutka_admin_key';
-let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'rejected' | 'stats'
+let adminTab = 'pending'; // 'pending' | 'board' | 'chats' | 'match' | 'dupes' | 'rejected' | 'stats' | 'forum'
 let statsMonth = null; // выбранный месяц на вкладке «итоги»
 let statsFlowUnit = 'day'; // 'day' | 'week' | 'month' — поток заявок в итогах
+let forumDays = 30; // период статистики канала: 7 | 30 | 0 (всё время)
 let adminEditId = null; // id заявки, открытой на редактирование
 let adminItems = [];   // список открытой вкладки — правим на месте, без перезагрузки
 let adminPruned = 0;   // сколько просроченных заявок удалили при загрузке очереди
@@ -1086,6 +1087,10 @@ async function loadAdmin() {
   }
   if (adminTab === 'stats') {
     await renderAdminStats();
+    return;
+  }
+  if (adminTab === 'forum') {
+    await renderAdminForum();
     return;
   }
   if (adminTab === 'seo') {
@@ -2229,6 +2234,104 @@ function fmtMoney(n) {
   return String(r).replace('.', ',');
 }
 
+/* ---------- канал: попадание заявок в Telegram ---------- */
+
+async function renderAdminForum() {
+  const listEl = $('#admin-list');
+  $('#admin-count').textContent = 'Попадание заявок в Telegram-канал: комнаты и «прочее».';
+  listEl.replaceChildren(el('p', { class: 'empty-note', text: 'считаю…' }));
+  let data;
+  try {
+    const res = await adminApi(`/api/admin/forum-stats?days=${forumDays}`);
+    if (!res.ok) throw new Error('network');
+    data = await res.json();
+  } catch {
+    listEl.replaceChildren(el('p', {
+      class: 'empty-note',
+      text: 'Не получилось загрузить статистику канала. Проверьте связь и нажмите «обновить».',
+    }));
+    return;
+  }
+  const seg = (value, label) => el('button', {
+    class: `btn btn-sm seg-btn${forumDays === value ? ' btn-ink' : ' btn-line'}`,
+    type: 'button', text: label,
+    onclick: () => { forumDays = value; renderAdminForum(); },
+  });
+  const pct = (a, b) => (b > 0 ? `${Math.round((a / b) * 100)}%` : '—');
+  const period = forumDays === 0 ? 'за всё время' : `за ${forumDays} дней`;
+
+  if (!data.configured) {
+    listEl.replaceChildren(el('section', { class: 'admin-card' }, [
+      el('h3', { class: 'match-history-head', text: 'Форум-канал не настроен' }),
+      el('p', {
+        class: 'admin-contact',
+        text: 'Создайте группу с включёнными «Темами», добавьте бота админом и в нужной теме напишите /здесь <направление> — пара («Варшава → Минск»), регион («Польша ↔ Беларусь») или город («Дубай»); /здесь прочее — комната по умолчанию. После первой публикации здесь будет видно, какой процент заявок доходит до канала.',
+      }),
+    ]));
+    return;
+  }
+
+  const segs = el('div', { class: 'admin-card-actions' }, [
+    seg(7, '7 дней'), seg(30, '30 дней'), seg(0, 'всё время'),
+  ]);
+  const summary = el('p', {
+    class: 'admin-contact',
+    text: `Заявок ${period}: ${data.arrived} · опубликовано ${data.published} · ушло в канал ${data.posted}` +
+      ` (${pct(data.posted, data.published)} от опубликованных, ${pct(data.posted, data.arrived)} от всех заявок).` +
+      ` В тематические комнаты ${data.inRooms} (${pct(data.inRooms, data.posted)}), в «прочее» ${data.inFallback} (${pct(data.inFallback, data.posted)}).`,
+  });
+
+  if (!data.posted) {
+    listEl.replaceChildren(segs, summary, el('p', {
+      class: 'empty-note',
+      text: 'Публикаций в канал пока не было: одобрите заявку — она уйдёт в комнату своего направления и появится здесь.',
+    }));
+    return;
+  }
+
+  const roomsTable = el('table', { class: 'stats-table stats-table-wide' }, [
+    el('thead', {}, [el('tr', {}, [
+      el('th', { text: 'комната' }), el('th', { text: 'вид' }),
+      el('th', { text: 'тема' }), el('th', { text: 'публикаций' }), el('th', { text: 'доля' }),
+    ])]),
+    el('tbody', {}, (data.rooms || []).map((r) => el('tr', {}, [
+      el('th', { scope: 'row', text: r.label }),
+      el('td', { text: r.kind }),
+      el('td', { class: 'mono', text: String(r.thread) }),
+      el('td', { class: 'mono', text: String(r.posts) }),
+      el('td', { class: 'mono', text: pct(r.posts, data.posted) }),
+    ]))),
+  ]);
+
+  const fallbackBlock = data.inFallback > 0 ? el('section', { class: 'admin-card' }, [
+    el('h3', { class: 'match-history-head', text: 'Что не попало в свои комнаты' }),
+    el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'направление (в «прочем»)' }), el('th', { text: 'публикаций' }),
+      ])]),
+      el('tbody', {}, (data.fallbackTop || []).map((t) => el('tr', {}, [
+        el('th', { scope: 'row', text: `${t.from} → ${t.to}` }),
+        el('td', { class: 'mono', text: String(t.posts) }),
+      ]))),
+    ]),
+    el('p', {
+      class: 'form-note',
+      text: 'Верхние строки — кандидаты на новые комнаты: создайте тему и напишите в ней /здесь <направление>. Если в одной комнате топ-направление забирает большую часть публикаций — дробите её отдельной парой.',
+    }),
+  ]) : null;
+
+  const parts = [
+    segs,
+    summary,
+    el('section', { class: 'admin-card' }, [
+      el('h3', { class: 'match-history-head', text: 'Комнаты' }),
+      roomsTable,
+    ]),
+    fallbackBlock,
+  ].filter(Boolean);
+  listEl.replaceChildren(...parts);
+}
+
 function switchAdminTab(tab) {
   adminTab = tab;
   $('#admin-tab-pending').classList.toggle('on', tab === 'pending');
@@ -2238,6 +2341,7 @@ function switchAdminTab(tab) {
   $('#admin-tab-dupes').classList.toggle('on', tab === 'dupes');
   $('#admin-tab-rejected').classList.toggle('on', tab === 'rejected');
   $('#admin-tab-stats').classList.toggle('on', tab === 'stats');
+  $('#admin-tab-forum').classList.toggle('on', tab === 'forum');
   $('#admin-tab-seo').classList.toggle('on', tab === 'seo');
   $('#admin-tab-settings').classList.toggle('on', tab === 'settings');
   loadAdmin();
@@ -2530,6 +2634,7 @@ function bindAdmin() {
   $('#admin-tab-dupes').addEventListener('click', () => switchAdminTab('dupes'));
   $('#admin-tab-rejected').addEventListener('click', () => switchAdminTab('rejected'));
   $('#admin-tab-stats').addEventListener('click', () => switchAdminTab('stats'));
+  $('#admin-tab-forum').addEventListener('click', () => switchAdminTab('forum'));
   $('#admin-tab-seo').addEventListener('click', () => switchAdminTab('seo'));
   $('#admin-tab-settings').addEventListener('click', () => switchAdminTab('settings'));
   $('#admin-key-form').addEventListener('submit', (e) => {

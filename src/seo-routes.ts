@@ -317,6 +317,7 @@ export function seoPageShell(opts: {
       <a href="/routes">Маршруты</a>
       <a href="/gorod">Города</a>
       <a href="/itogi">Итоги</a>
+      <a href="https://t.me/parcel_info" target="_blank" rel="noopener">Канал</a>
       ${opts.botUsername ? '<a href="/bot">Бот</a>' : ''}
       <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
     </nav>

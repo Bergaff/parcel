@@ -12,7 +12,7 @@ import {
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
-import { handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport, notifyListingPublished } from './telegram';
+import { forumReachStats, handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport, notifyListingPublished } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import { cacheableStatus, edgeCache, edgeCacheControl, edgeCacheKey, edgeCacheTtl } from './edge-cache';
 import { SITE_VERSION } from './version';
@@ -1182,6 +1182,15 @@ async function statsPayload(env: Env, origin: string) {
 app.get('/api/admin/stats', async (c) => {
   const payload = await statsPayload(c.env, siteOrigin(c.env, c.req.url));
   return c.json(payload);
+});
+
+/* Статистика форум-канала (вкладка «канал»): какой % заявок доходит до
+ * Telegram, сколько в тематические комнаты против «прочего», топ «прочего».
+ * days=0 — за всё время. */
+app.get('/api/admin/forum-stats', async (c) => {
+  const raw = Number(c.req.query('days') ?? '30');
+  const days = Number.isFinite(raw) ? Math.min(365, Math.max(0, Math.floor(raw))) : 30;
+  return c.json(await forumReachStats(c.env, days));
 });
 
 app.post('/api/admin/stats/refresh', async (c) => {

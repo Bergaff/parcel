@@ -573,17 +573,43 @@ export async function ensureForumStatsTable(env: Env): Promise<void> {
   ).run();
 }
 
+/** События публикаций (по строчке на публикацию): по ним админка считает
+ *  «какой % заявок доходит до канала» за период — forum_stats только счётчик. */
+export async function ensureForumStatEventsTable(env: Env): Promise<void> {
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS forum_stat_events (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       route_key TEXT NOT NULL,
+       from_city TEXT NOT NULL,
+       to_city TEXT NOT NULL,
+       thread INTEGER NOT NULL,
+       created_at TEXT NOT NULL
+     )`
+  ).run();
+  await env.DB.prepare(
+    'CREATE INDEX IF NOT EXISTS idx_forum_stat_events_at ON forum_stat_events(created_at)'
+  ).run();
+}
+
 /** +1 публикация направления в комнату (тема могла перенастроиться — обновляем). */
 export async function bumpForumStat(
   env: Env, routeKey: string, fromCity: string, toCity: string, thread: number
 ): Promise<void> {
   await ensureForumStatsTable(env);
-  await env.DB.prepare(
-    `INSERT INTO forum_stats (route_key, from_city, to_city, thread, posts, last_at)
-     VALUES (?, ?, ?, ?, 1, ?)
-     ON CONFLICT(route_key) DO UPDATE SET
-       posts = posts + 1, thread = excluded.thread, last_at = excluded.last_at`
-  ).bind(routeKey, fromCity, toCity, thread, new Date().toISOString()).run();
+  await ensureForumStatEventsTable(env);
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO forum_stats (route_key, from_city, to_city, thread, posts, last_at)
+       VALUES (?, ?, ?, ?, 1, ?)
+       ON CONFLICT(route_key) DO UPDATE SET
+         posts = posts + 1, thread = excluded.thread, last_at = excluded.last_at`
+    ).bind(routeKey, fromCity, toCity, thread, now),
+    env.DB.prepare(
+      `INSERT INTO forum_stat_events (route_key, from_city, to_city, thread, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).bind(routeKey, fromCity, toCity, thread, now),
+  ]);
 }
 
 export async function listForumStats(env: Env, limit = 200): Promise<ForumStat[]> {
@@ -599,6 +625,51 @@ export async function listForumStats(env: Env, limit = 200): Promise<ForumStat[]
     posts: Number(r.posts ?? 0),
     lastAt: String(r.last_at ?? ''),
   }));
+}
+
+export interface ForumStatEventRow {
+  thread: number;
+  routeKey: string;
+  fromCity: string;
+  toCity: string;
+  posts: number;
+}
+
+/** Публикации в форум-канал за период (sinceIso = null — за всё время),
+ *  сгруппированные по темам и направлениям. */
+export async function listForumStatEvents(env: Env, sinceIso: string | null): Promise<ForumStatEventRow[]> {
+  await ensureForumStatEventsTable(env);
+  const stmt = env.DB.prepare(
+    `SELECT thread, route_key, from_city, to_city, COUNT(*) AS posts
+     FROM forum_stat_events ${sinceIso ? 'WHERE created_at >= ?' : ''}
+     GROUP BY thread, route_key, from_city, to_city`
+  );
+  const res = await (sinceIso ? stmt.bind(sinceIso) : stmt).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    thread: Number(r.thread),
+    routeKey: String(r.route_key),
+    fromCity: String(r.from_city),
+    toCity: String(r.to_city),
+    posts: Number(r.posts ?? 0),
+  }));
+}
+
+/** Заявки за период: сколько пришло (любой статус) и сколько опубликовано —
+ *  база для «% заявок, дошедших до канала». sinceIso = null — за всё время. */
+export async function listingFlowCounts(
+  env: Env, sinceIso: string | null
+): Promise<{ arrived: number; published: number }> {
+  const since = sinceIso ?? '0000-01-01';
+  const row = await env.DB.prepare(
+    `SELECT
+       SUM(CASE WHEN created_at >= ?1 THEN 1 ELSE 0 END) AS arrived,
+       SUM(CASE WHEN published_at IS NOT NULL AND published_at >= ?1 THEN 1 ELSE 0 END) AS published
+     FROM listings`
+  ).bind(since).first<Record<string, unknown> | null>();
+  return {
+    arrived: Number(row?.arrived ?? 0),
+    published: Number(row?.published ?? 0),
+  };
 }
 
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
