@@ -385,9 +385,13 @@ afterAll(() => {
 /* ---------- доска ---------- */
 
 describe('ссылка на Telegram-канал', () => {
-  it('в шапке, подвале и на странице бота — t.me/parcel_info', () => {
+  it('в шапке, подвале, странице бота и сноской под вводным абзацем', () => {
     const links = htmlSource.match(/href="https:\/\/t\.me\/parcel_info"/g) ?? [];
-    expect(links.length, 'ссылок на канал должно быть минимум три').toBeGreaterThanOrEqual(3);
+    expect(links.length, 'ссылок на канал должно быть минимум четыре').toBeGreaterThanOrEqual(4);
+    // сноска на главной: сразу под lead, ссылка — телеграм-синяя
+    expect(htmlSource).toContain('Одобренные заявки также публикуются в');
+    expect(htmlSource).toContain('lead-note');
+    expect(cssSource).toMatch(/\.lead-note a \{ color: #2481cc; \}/);
   });
 });
 

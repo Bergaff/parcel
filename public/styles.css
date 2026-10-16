@@ -157,6 +157,12 @@ button { font-family: inherit; }
    62ch на десктопе сжимало его в узкий столбик под широким h1 */
 .board-head .lead { max-width: none; }
 
+/* сноска о Telegram-канале под вводным абзацем: ссылка — телеграм-синяя,
+   как в самом Telegram, чтобы её сразу замечали */
+.lead-note { margin-top: 10px; }
+.lead-note a { color: #2481cc; }
+.lead-note a:hover { color: #1b6bb3; }
+
 /* поиск маршрута */
 .route-search {
   display: flex;
