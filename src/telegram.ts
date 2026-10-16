@@ -864,7 +864,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• Подали заявку с сайта и хотите узнать, когда её опубликуют? На странице после отправки нажмите «сообщить об одобрении в Telegram» — и я напишу, как только модератор одобрит\n` +
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
-          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (пара), <code>/здесь Польша ↔ Беларусь</code> (регион), <code>/здесь Дубай</code> (город) или <code>/здесь прочее</code> — одобренные заявки будут публиковаться там ссылками с превью. <code>/комнаты</code> — статистика публикаций по комнатам\n` +
+          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (пара), <code>/здесь Польша ↔ Беларусь</code> (регион), <code>/здесь Дубай</code> (город) или <code>/здесь прочее</code> — одобренные заявки будут публиковаться там ссылками с превью. <code>/комнаты</code> — статистика публикаций по комнатам. <code>/описание текст</code> — задать описание чата/канала (в личке: <code>/описание @канал текст</code>)\n` +
           `• Сайт: ${site}`
         );
         await setWizard(env, chatId, null);
@@ -904,6 +904,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         await sendParseReport(env, chatId, rest);
         break;
       }
+      case '/описание':
+      case '/opisanie':
+        await cmdSetChatDescription(env, msg, text.split(/\s+/).slice(1).join(' '));
+        break;
       case '/pending': {
         if (!admins(env).includes(String(msg.from?.id))) {
           await sendText(env, chatId, 'Команда доступна только администраторам.');
@@ -1174,6 +1178,11 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // /комнаты — статистика публикаций (админ)
   if (/^\/(комнаты|rooms)(\s|$|$)/i.test(text)) {
     if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
+    return;
+  }
+  // /описание — задать описание этого чата (бот должен быть админом)
+  if (/^\/(описание|opisanie)(\s|$)/i.test(text)) {
+    await cmdSetChatDescription(env, msg, text.split(/\s+/).slice(1).join(' '));
     return;
   }
   // /поиск, /search, /серч работают и в группах
@@ -1521,6 +1530,44 @@ async function cmdForumStats(env: Env, chatId: number): Promise<void> {
   lines.push('');
   lines.push('Много заявок в одной теме с явным лидером — дробите комнату; почти пустая тема — сливайте. Топ «прочего» — кандидаты на новые комнаты.');
   await sendText(env, chatId, lines.join('\n'));
+}
+
+/** /описание — задать описание чата или канала через бота (он админ).
+ *  В группе/канале: /описание <текст> — этому чату.
+ *  В личке: /описание @канал <текст> — названному чату. */
+async function cmdSetChatDescription(env: Env, msg: TgMessage, args: string): Promise<void> {
+  const reply = (text: string) => sendText(env, msg.chat.id, text, {
+    message_thread_id: msg.message_thread_id,
+  });
+  if (!isAdminChat(env, msg)) return; // команда админская — молчим
+  let target: number | string = msg.chat.id;
+  let description = args.trim();
+  if (msg.chat.type === 'private') {
+    // в личке целимся в названный чат: /описание @parcel_info <текст>
+    const parts = description.split(/\s+/);
+    const first = parts[0] ?? '';
+    if (!/^(@[\w]{4,64}|-100\d{6,})$/.test(first)) {
+      await reply('Напишите, какому чату ставить описание, и сам текст:\n<code>/описание @parcel_info Попутки и передача посылок — доска pop-utka.app</code>');
+      return;
+    }
+    target = first;
+    description = parts.slice(1).join(' ').trim();
+  }
+  if (!description) {
+    await reply('Напишите текст описания после команды: <code>/описание Попутки и попутный транспорт — доска pop-utka.app</code>');
+    return;
+  }
+  if (description.length > 255) {
+    await reply(`Описание ${description.length} символов — Telegram принимает максимум 255. Сократите.`);
+    return;
+  }
+  try {
+    await api(env, 'setChatDescription', { chat_id: target, description });
+    await reply('Готово, описание обновлено.');
+  } catch (e) {
+    console.error('setChatDescription failed', e);
+    await reply('Не получилось: бот должен быть админом этого чата с правом изменять описание (право «Change chat info» в настройках админа). Проверьте и повторите.');
+  }
 }
 
 /* ---------- статистика попадания в канал (админка) ---------- */

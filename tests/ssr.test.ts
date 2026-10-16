@@ -367,7 +367,7 @@ describe('карточка в SSR', () => {
 
 describe('маршруты SPA и разделы', () => {
   it('isAppPath отделяет SPA от серверных страниц', () => {
-    for (const p of ['/', '/new', '/how', '/bot', '/terms', '/privacy', '/admin', '/item/abc', '/item/abc/']) {
+    for (const p of ['/', '/new', '/how', '/bot', '/telegram', '/terms', '/privacy', '/admin', '/item/abc', '/item/abc/']) {
       expect(isAppPath(p), p).toBe(true);
     }
     for (const p of ['/r/varshava-minsk', '/routes', '/gorod/minsk', '/itogi', '/api/listings', '/styles.css', '/og/x.png']) {
@@ -376,7 +376,7 @@ describe('маршруты SPA и разделы', () => {
   });
 
   it('все разделы описаны и админка закрыта от индекса', () => {
-    expect(Object.keys(STATIC_PAGES).sort()).toEqual(['/admin', '/bot', '/how', '/new', '/privacy', '/terms']);
+    expect(Object.keys(STATIC_PAGES).sort()).toEqual(['/admin', '/bot', '/how', '/new', '/privacy', '/telegram', '/terms']);
     expect(STATIC_PAGES['/admin']!.robots).toBe('noindex, nofollow');
     for (const [path, page] of Object.entries(STATIC_PAGES)) {
       expect(page.title, path).toBeTruthy();

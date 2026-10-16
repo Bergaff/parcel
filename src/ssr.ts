@@ -17,14 +17,14 @@ import { escapeHtml, mskTodayIso, normalizeContacts } from './util';
 import { agoText, fmtDateWithYear, fmtDayShort, fmtWeight, plural, MONTHS_SHORT, WEEKDAY_NAMES } from './format';
 import { headMeta, jsonLdAll } from './seo';
 
-export type View = 'list' | 'item' | 'new' | 'how' | 'bot' | 'terms' | 'privacy' | 'admin';
+export type View = 'list' | 'item' | 'new' | 'how' | 'bot' | 'telegram' | 'terms' | 'privacy' | 'admin';
 
-export const APP_VIEWS: View[] = ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy', 'admin'];
+export const APP_VIEWS: View[] = ['list', 'item', 'new', 'how', 'bot', 'telegram', 'terms', 'privacy', 'admin'];
 
 /** Пути, которые обслуживает SPA (остальное — отдельные серверные страницы). */
 export function isAppPath(pathname: string): boolean {
   const p = pathname.replace(/\/+$/, '') || '/';
-  if (p === '/' || p === '/new' || p === '/how' || p === '/bot' || p === '/terms' || p === '/privacy' || p === '/admin') return true;
+  if (p === '/' || p === '/new' || p === '/how' || p === '/bot' || p === '/telegram' || p === '/terms' || p === '/privacy' || p === '/admin') return true;
   return p.startsWith('/item/');
 }
 

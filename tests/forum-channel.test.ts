@@ -63,7 +63,7 @@ const env = {
   KV: { get: async () => null, put: async () => undefined, delete: async () => undefined },
 } as unknown as Env;
 
-interface Sent { method: string; text: string; chatId: number; threadId?: number; previewDisabled?: boolean }
+interface Sent { method: string; text: string; chatId: number | string; threadId?: number; previewDisabled?: boolean }
 const sent: Sent[] = [];
 const realFetch = global.fetch;
 
@@ -125,8 +125,8 @@ beforeEach(() => {
       const b = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       sent.push({
         method: m[1] ?? '',
-        text: String(b.text ?? ''),
-        chatId: Number(b.chat_id ?? 0),
+        text: String(b.text ?? b.description ?? ''),
+        chatId: (b.chat_id ?? 0) as number | string,
         threadId: b.message_thread_id == null ? undefined : Number(b.message_thread_id),
         previewDisabled: b.disable_web_page_preview === true,
       });
@@ -283,5 +283,55 @@ describe('статистика попадания в канал (админка)
     expect(empty.posted).toBe(0);
     expect(empty.rooms).toEqual([]);
     expect(empty.fallbackTop).toEqual([]);
+  });
+});
+
+describe('/описание — задать описание чата/канала через бота', () => {
+  it('админ в группе: бот ставит описание этого чата', async () => {
+    await forumMessage('/описание Попутки и передача посылок — доска pop-utka.app', 42);
+    const call = sent.find((s) => s.method === 'setChatDescription');
+    expect(call).toBeTruthy();
+    expect(call?.chatId).toBe(-100777);
+    expect(call?.text).toContain('pop-utka.app');
+    expect(sent.some((s) => s.method === 'sendMessage' && s.text.includes('Готово'))).toBe(true);
+  });
+
+  it('не админ — тишина, описание не трогаем', async () => {
+    sent.length = 0;
+    await forumMessage('/описание не должно сработать', 111);
+    expect(sent.filter((s) => s.method === 'setChatDescription')).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('в личке админа: /описание @канал <текст> ставит описание каналу', async () => {
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 3,
+      message: {
+        message_id: 11, date: 1789000002,
+        chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text: '/описание @parcel_info Попутки и попутный транспорт: Беларусь — Польша — Россия. Доска pop-utka.app',
+      },
+    });
+    const call = sent.find((s) => s.method === 'setChatDescription');
+    expect(call).toBeTruthy();
+    expect(call?.chatId).toBe('@parcel_info');
+    expect(call?.text).toContain('pop-utka.app');
+  });
+
+  it('в личке без канала — подсказка, ничего не меняем', async () => {
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 4,
+      message: {
+        message_id: 12, date: 1789000003,
+        chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never,
+        text: '/описание просто текст без канала',
+      },
+    });
+    expect(sent.filter((s) => s.method === 'setChatDescription')).toHaveLength(0);
+    expect(sent.some((s) => s.method === 'sendMessage' && s.text.includes('какому чату'))).toBe(true);
   });
 });

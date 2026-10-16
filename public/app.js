@@ -215,8 +215,8 @@ function showView(name) {
    в индексе не существовали. Старые хеш-ссылки (их много в Telegram) на лету
    превращаются в пути — без перезагрузки и без потери контента. */
 
-const VIEWS = ['list', 'item', 'new', 'how', 'bot', 'terms', 'privacy', 'admin'];
-const APP_PATHS = ['/', '/new', '/how', '/bot', '/terms', '/privacy', '/admin'];
+const VIEWS = ['list', 'item', 'new', 'how', 'bot', 'telegram', 'terms', 'privacy', 'admin'];
+const APP_PATHS = ['/', '/new', '/how', '/bot', '/telegram', '/terms', '/privacy', '/admin'];
 
 function isAppPath(pathname) {
   const p = pathname.replace(/\/+$/, '') || '/';
@@ -228,7 +228,7 @@ function parsePath(pathname = location.pathname) {
   const m = /^\/item\/([^/]+)$/.exec(p);
   if (m) return { view: 'item', id: decodeURIComponent(m[1]) };
   const bare = p.slice(1);
-  if (['new', 'how', 'bot', 'terms', 'privacy', 'admin'].includes(bare)) return { view: bare };
+  if (['new', 'how', 'bot', 'telegram', 'terms', 'privacy', 'admin'].includes(bare)) return { view: bare };
   return { view: 'list' };
 }
 

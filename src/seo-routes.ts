@@ -925,6 +925,7 @@ export function buildPagesSitemap(
     ['/gorod', 'daily', '0.9'],
     ['/how', 'monthly', '0.6'],
     ['/bot', 'monthly', '0.6'],
+    ['/telegram', 'monthly', '0.7'],
     ['/new', 'monthly', '0.7'],
     ['/terms', 'yearly', '0.3'],
     ['/privacy', 'yearly', '0.3'],

@@ -333,6 +333,7 @@ describe('карта сайта', () => {
     expect(xml).toContain('<lastmod>2026-10-01</lastmod>');
     // без месяцев карта не ломается
     expect(buildPagesSitemap(ORIGIN, '2026-09-17')).toContain(`<loc>${ORIGIN}/itogi</loc>`);
+    expect(buildPagesSitemap(ORIGIN, '2026-09-17')).toContain(`<loc>${ORIGIN}/telegram</loc>`);
   });
 
   it('карта маршрутов: витрина, живые пары и города с заявками, все с lastmod', async () => {
