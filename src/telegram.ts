@@ -1630,9 +1630,19 @@ async function cmdForumDiagnostics(env: Env, msg: TgMessage): Promise<void> {
     return;
   }
   const here = String(msg.chat.id) === cfg.chat;
+  // как называется настроенная группа: человеку «-1004351748269» ни о чём
+  // не говорит, а название — сразу видно, куда публикуем
+  let groupTitle = '';
+  try {
+    const chat = (await api(env, 'getChat', { chat_id: cfg.chat })) as
+      | { ok?: boolean; result?: { title?: string; username?: string } } | null;
+    if (chat?.ok && chat.result) {
+      groupTitle = chat.result.title ?? (chat.result.username ? `@${chat.result.username}` : '');
+    }
+  } catch { /* Telegram недоступен — покажем просто id */ }
   const lines: string[] = [
     '🔧 <b>Диагностика форум-канала</b>',
-    `Публикуем в группу <code>${escapeHtml(cfg.chat)}</code>${here ? ' — эта группа' : ''}`,
+    `Публикуем в группу <code>${escapeHtml(cfg.chat)}</code>${groupTitle ? ` «${escapeHtml(groupTitle)}»` : ''}${here ? ' — эта группа' : ''}`,
     `Тема «прочее» (fallback): <b>${cfg.fallback}</b>`,
   ];
   const rooms = [
@@ -1641,7 +1651,9 @@ async function cmdForumDiagnostics(env: Env, msg: TgMessage): Promise<void> {
     ...Object.entries(cfg.cities).map(([k, id]) => `• город ${k} → тема ${id}`),
   ];
   lines.push(rooms.length ? `Комнаты:\n${rooms.join('\n')}` : 'Комнат пока нет — всё уходит в «прочее».');
-  if (!here) {
+  if (msg.chat.type === 'private') {
+    lines.push('', 'ℹ️ Вы пишете в личке. Команда /здесь настраивает темы — напишите её в самой форум-группе, внутри нужной темы: зашли в тему «Дубай» → написали <code>/здесь Дубай</code>.');
+  } else if (!here) {
     lines.push('', `⚠️ Команда написана в другой группе (эта — <code>${msg.chat.id}</code>). Если настроили новую группу — напишите /здесь в каждой её теме заново.`);
   }
   // тестовая публикация в «прочее»: проверяет и права бота, и существование темы

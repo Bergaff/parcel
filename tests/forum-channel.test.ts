@@ -428,6 +428,20 @@ describe('/форум — диагностика форум-канала', () =>
     expect(reply).toContain('⚠️ Команда написана в другой группе');
   });
 
+  it('/форум в личке — подсказка, что /здесь пишут в самой группе', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg()));
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 9,
+      message: { message_id: 17, date: 1789000008, chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never, text: '/форум' },
+    });
+    const reply = sent.map((s) => s.text).join('\n');
+    expect(reply).toContain('Вы пишете в личке');
+    expect(reply).toContain('/здесь Дубай');
+    expect(reply).not.toContain('⚠️'); // личка — не «другая группа», предупреждение ни к чему
+  });
+
   it('не админу — та же подсказка, что и /здесь', async () => {
     sent.length = 0;
     await forumMessage('/форум', 111, 55);
