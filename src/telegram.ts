@@ -874,20 +874,24 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       }
       case '/комнаты':
       case '/rooms': {
-        if (isAdminChat(env, msg)) await cmdForumStats(env, chatId);
-        else await sendText(env, chatId, notAdminHint(msg));
+        await runGuarded(env, msg, async () => {
+          if (isAdminChat(env, msg)) await cmdForumStats(env, chatId);
+          else await sendText(env, chatId, notAdminHint(msg));
+        });
         break;
       }
       case '/здесь':
       case '/тема':
       case '/zdes':
         // в личке команды не было вовсе — бот молчал; теперь объясняем
-        await cmdForumTopic(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
+        await runGuarded(env, msg, () => cmdForumTopic(env, msg, cmdText.split(/\s+/).slice(1).join(' ')));
         break;
       case '/форум':
       case '/forum':
-        if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
-        else await sendText(env, chatId, notAdminHint(msg));
+        await runGuarded(env, msg, async () => {
+          if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
+          else await sendText(env, chatId, notAdminHint(msg));
+        });
         break;
       case '/post': {
         const wizard: WizardState = {
@@ -1222,36 +1226,42 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   if ((msg.from?.username && msg.from.username === env.BOT_USERNAME) || msg.from?.is_bot) return;
 
   // /здесь — настройка «комнат» форум-канала (см. cmdForumTopic): админ
-  // пишет команду в нужной теме, бот запоминает тему за маршрутом
+  // пишет команду в нужной теме, бот запоминает тему за маршрутом.
+  // runGuarded: даже внутренний сбой (D1, сеть) превращается в ответ,
+  // а не в молчание
   if (/^\/(здесь|тема|zdes)(@\w+)?(\s|$)/i.test(cmd)) {
-    await cmdForumTopic(env, msg, cmd.split(/\s+/).slice(1).join(' '));
+    await runGuarded(env, msg, () => cmdForumTopic(env, msg, cmd.split(/\s+/).slice(1).join(' ')));
     return;
   }
   // /комнаты — статистика публикаций (админ)
   if (/^\/(комнаты|rooms)(@\w+)?(\s|$|$)/i.test(cmd)) {
-    if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
-    else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
+    await runGuarded(env, msg, async () => {
+      if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
+      else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
+    });
     return;
   }
   // /форум — диагностика форум-канала (админ)
   if (/^\/(форум|forum)(@\w+)?(\s|$)/i.test(cmd)) {
-    if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
-    else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
+    await runGuarded(env, msg, async () => {
+      if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
+      else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
+    });
     return;
   }
   // /описание — задать описание этого чата (бот должен быть админом)
   if (/^\/(описание|opisanie)(@\w+)?(\s|$)/i.test(cmd)) {
-    await cmdSetChatDescription(env, msg, cmd.split(/\s+/).slice(1).join(' '));
+    await runGuarded(env, msg, () => cmdSetChatDescription(env, msg, cmd.split(/\s+/).slice(1).join(' ')));
     return;
   }
   // /поиск, /search, /серч работают и в группах
   if (isSearchCommand(cmd)) {
-    await cmdSearch(env, msg.chat.id, cmd.split(/\s+/).slice(1).join(' '));
+    await runGuarded(env, msg, () => cmdSearch(env, msg.chat.id, cmd.split(/\s+/).slice(1).join(' ')));
     return;
   }
   // /репорт, /report, /жалоба — тоже
   if (isReportCommand(cmd)) {
-    await cmdReport(env, msg, cmd.split(/\s+/).slice(1).join(' '));
+    await runGuarded(env, msg, () => cmdReport(env, msg, cmd.split(/\s+/).slice(1).join(' ')));
     return;
   }
   if (text.length < 10 || text.length > 4000) return;
@@ -1491,6 +1501,36 @@ function notAdminHint(msg: TgMessage): string {
     + '\nДобавьте его в переменную ADMIN_IDS (Cloudflare → Workers & Pages → parcel → Settings → Variables) через запятую вместе со старым ID — например <code>111111111,222222222</code>. Применяется сразу, без деплоя.';
 }
 
+/** Любая команда обязана ответить. Необработанное исключение (сбой D1,
+ *  сети, неожиданные данные) раньше убивало ответ целиком — для админа
+ *  команда «просто молчала», хотя в логах воркера был только стек. Теперь:
+ *  говорим об ошибке прямо в чат; если и это не ушло — эскалация админам
+ *  в личку и громкий лог с точной причиной. */
+async function runGuarded(env: Env, msg: TgMessage, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (e) {
+    const err = String((e as Error)?.message ?? e);
+    console.error('tg: команда упала', msg.chat.id, 'тема', msg.message_thread_id ?? '-', err);
+    try {
+      const res = (await api(env, 'sendMessage', {
+        chat_id: msg.chat.id, parse_mode: 'HTML', disable_web_page_preview: true,
+        message_thread_id: msg.message_thread_id,
+        text: `⚠️ Команда выполнена с ошибкой: <code>${escapeHtml(err)}</code>\nПовторите команду; если ошибка повторится — сообщите администратору, приложив этот текст.`,
+      })) as { ok?: boolean; description?: string } | null;
+      if (!res?.ok) throw new Error(res?.description ?? 'нет ответа Telegram');
+    } catch (sendErr) {
+      const se = String((sendErr as Error)?.message ?? sendErr);
+      console.error('tg: ответ об ошибке не ушёл в группу', msg.chat.id, se);
+      for (const adminId of admins(env)) {
+        await sendText(env, Number(adminId),
+          `⚠️ Команда в группе ${msg.chat.id} (тема ${msg.message_thread_id ?? '-'}) упала с ошибкой: ${escapeHtml(err)}. Ответить в группу тоже не получилось: ${escapeHtml(se)}.`)
+          .catch((dmErr) => console.error('tg: и личка админу', adminId, 'недоступна:', String((dmErr as Error)?.message ?? dmErr), '— нужен /start боту в личку'));
+      }
+    }
+  }
+}
+
 /** /здесь в теме форум-группы: запомнить тему за маршрутом (админ). */
 async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<void> {
   const thread = msg.message_thread_id ?? 1;
@@ -1513,8 +1553,8 @@ async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<v
       console.error('форум: ответ в группу не ушёл', msg.chat.id, 'тема', thread, fail);
       for (const adminId of admins(env)) {
         await sendText(env, Number(adminId),
-          `⚠️ Не смог ответить в группе ${msg.chat.id} (тема ${thread}): ${escapeHtml(fail)}. Комната при этом ${label.trim() ? `«${escapeHtml(label.trim())}» ` : ''}не настроена — проверьте, что я админ этой группы и тема существует.`)
-          .catch(() => undefined);
+          `⚠️ Не смог ответить в группе ${msg.chat.id} (тема ${thread}): ${escapeHtml(fail)}. Комната ${label.trim() ? `«${escapeHtml(label.trim())}» ` : ''}при этом могла сохраниться — проверьте /форум. Если сообщений от меня в личке не видно — напишите мне /start: без него Telegram не разрешает боту писать первым.`)
+          .catch((dmErr) => console.error('форум: ⚠️-копия админу', adminId, 'не ушла:', String((dmErr as Error)?.message ?? dmErr), '— нужен /start боту в личку'));
       }
     }
   };
@@ -1559,7 +1599,7 @@ async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<v
   for (const adminId of admins(env)) {
     await sendText(env, Number(adminId),
       `✅ Комната настроена: ${what} — тема ${thread} группы «${escapeHtml(msg.chat.title ?? String(msg.chat.id))}». (Это копия ответа из темы.)`)
-      .catch(() => undefined);
+      .catch((dmErr) => console.error('форум: ✅-копия админу', adminId, 'не ушла:', String((dmErr as Error)?.message ?? dmErr), '— нужен /start боту в личку'));
   }
 }
 

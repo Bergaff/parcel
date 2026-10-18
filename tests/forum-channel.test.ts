@@ -19,6 +19,7 @@ const db = vi.hoisted(() => ({
   forumEvents: [] as Array<{ thread: number; routeKey: string; fromCity: string; toCity: string; posts: number }>,
   flowCounts: { arrived: 0, published: 0 },
   failGroupSends: false,
+  failSettingWrites: false,
 }));
 
 vi.mock('../src/store', () => ({
@@ -38,7 +39,10 @@ vi.mock('../src/store', () => ({
   findRelated: async () => [],
   getListingById: async (_e: unknown, id: string) => db.listings.get(id) ?? null,
   getSetting: async (_e: unknown, key: string) => db.settings.get(key) ?? null,
-  setSetting: async (_e: unknown, key: string, value: string) => { db.settings.set(key, value); },
+  setSetting: async (_e: unknown, key: string, value: string) => {
+    if (db.failSettingWrites) throw new Error('D1 unavailable: settings write failed');
+    db.settings.set(key, value);
+  },
   listForMatching: async () => [],
   listForumStats: async () => [...db.forumStats.values()].sort((a, b) => b.posts - a.posts),
   listForumStatEvents: async () => db.forumEvents.map((e) => ({ ...e })),
@@ -119,6 +123,7 @@ beforeEach(() => {
   db.forumEvents.length = 0;
   db.flowCounts = { arrived: 0, published: 0 };
   db.failGroupSends = false;
+  db.failSettingWrites = false;
   sent.length = 0;
   global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
@@ -503,6 +508,33 @@ describe('сбой отправки в группу — админ узнаёт 
     expect(warn?.text).toContain('-100777');
     // и копия результата — комната настроена, несмотря на сбой ответа
     expect(sent.some((s) => s.chatId === 42 && s.text.includes('Комната настроена'))).toBe(true);
+    db.failGroupSends = false;
+  });
+});
+
+describe('внутренний сбой команды — бот всё равно отвечает', () => {
+  it('ошибка записи настроек: /здесь отвечает в группу текстом ошибки, не молчит', async () => {
+    // необработанное исключение (сбой D1 и т.п.) раньше убивало ответ целиком —
+    // для админа команда «просто молчала». Теперь ошибка видна прямо в теме
+    db.failSettingWrites = true;
+    await forumMessage('/здесь Дубай', 42, 78);
+    expect(db.settings.size).toBe(0); // запись не удалась…
+    const reply = sent.find((s) => s.chatId === -100777 && s.text.includes('ошибк'));
+    expect(reply?.threadId).toBe(78); // …но бот ответил в ту же тему
+    expect(reply?.text).toContain('D1 unavailable');
+    expect(sent.some((s) => s.text.includes('Готово'))).toBe(false);
+    db.failSettingWrites = false;
+  });
+
+  it('ошибка записи + группа не отвечает: предупреждение уходит админу в личку', async () => {
+    db.failSettingWrites = true;
+    db.failGroupSends = true;
+    await forumMessage('/здесь Дубай', 42, 78);
+    const warn = sent.find((s) => s.chatId === 42 && s.text.includes('ошибк'));
+    expect(warn).toBeTruthy();
+    expect(warn?.text).toContain('D1 unavailable');
+    expect(warn?.text).toContain('-100777');
+    db.failSettingWrites = false;
     db.failGroupSends = false;
   });
 });
