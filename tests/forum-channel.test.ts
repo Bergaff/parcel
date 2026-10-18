@@ -173,6 +173,25 @@ describe('/здесь — настройка комнат', () => {
     expect(sent.some((s) => s.threadId === 66 && s.text.includes('Готово'))).toBe(true);
   });
 
+  it('автокомплит группы: /здесь@parcel_transfer_bot работает как /здесь', async () => {
+    // клиент в группе дописывает к команде @юзернейм бота — раньше регэксп
+    // её не узнавал и команда молча игнорировалась даже для админа
+    await forumMessage('/здесь@parcel_transfer_bot Варшава → Минск', 42, 55);
+    const c = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c.pairs['варшава|минск']).toBe(55);
+    expect(sent.some((s) => s.text.includes('Готово'))).toBe(true);
+  });
+
+  it('/здесь в личке боту — объяснение вместо молчания', async () => {
+    await handleTelegramUpdate(env, {
+      update_id: 8,
+      message: { message_id: 16, date: 1789000007, chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never, text: '/здесь Варшава → Минск' },
+    });
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('форум-группе');
+  });
+
   it('не админ — подсказка с ID вместо молчания, настройки не трогаем', async () => {
     await forumMessage('/здесь Варшава → Минск', 111, 55);
     expect(db.settings.size).toBe(0); // ничего не записали

@@ -877,6 +877,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         else await sendText(env, chatId, notAdminHint(msg));
         break;
       }
+      case '/здесь':
+      case '/тема':
+      case '/zdes':
+        // в личке команды не было вовсе — бот молчал; теперь объясняем
+        await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
+        break;
       case '/форум':
       case '/forum':
         if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
@@ -1191,24 +1197,24 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
   // /здесь — настройка «комнат» форум-канала (см. cmdForumTopic): админ
   // пишет команду в нужной теме, бот запоминает тему за маршрутом
-  if (/^\/(здесь|тема|zdes)(\s|$)/i.test(text)) {
+  if (/^\/(здесь|тема|zdes)(@\w+)?(\s|$)/i.test(text)) {
     await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
     return;
   }
   // /комнаты — статистика публикаций (админ)
-  if (/^\/(комнаты|rooms)(\s|$|$)/i.test(text)) {
+  if (/^\/(комнаты|rooms)(@\w+)?(\s|$|$)/i.test(text)) {
     if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
     else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
     return;
   }
   // /форум — диагностика форум-канала (админ)
-  if (/^\/(форум|forum)(\s|$)/i.test(text)) {
+  if (/^\/(форум|forum)(@\w+)?(\s|$)/i.test(text)) {
     if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
     else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
     return;
   }
   // /описание — задать описание этого чата (бот должен быть админом)
-  if (/^\/(описание|opisanie)(\s|$)/i.test(text)) {
+  if (/^\/(описание|opisanie)(@\w+)?(\s|$)/i.test(text)) {
     await cmdSetChatDescription(env, msg, text.split(/\s+/).slice(1).join(' '));
     return;
   }
