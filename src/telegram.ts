@@ -837,8 +837,9 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     return;
   }
 
-  if (text.startsWith('/')) {
-    const parts = text.split(/\s+/);
+  const cmdText = cmdNorm(text);
+  if (cmdText.startsWith('/')) {
+    const parts = cmdText.split(/\s+/);
     const cmd = parts[0]!.split('@')[0]!.toLowerCase();
     switch (cmd) {
       case '/start':
@@ -881,7 +882,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/тема':
       case '/zdes':
         // в личке команды не было вовсе — бот молчал; теперь объясняем
-        await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
+        await cmdForumTopic(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       case '/форум':
       case '/forum':
@@ -919,7 +920,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/parse': {
         // Диагностика парсера: вставьте реальное сообщение из чата — бот покажет,
         // что он из него извлекёт и возьмёт ли на модерацию.
-        const rest = text.split(/\s+/).slice(1).join(' ');
+        const rest = cmdText.split(/\s+/).slice(1).join(' ');
         if (!rest) {
           await sendText(env, chatId,
             'Пришлите сообщение для проверки сразу после команды:\n' +
@@ -932,7 +933,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       }
       case '/описание':
       case '/opisanie':
-        await cmdSetChatDescription(env, msg, text.split(/\s+/).slice(1).join(' '));
+        await cmdSetChatDescription(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       case '/pending': {
         if (!admins(env).includes(String(msg.from?.id))) {
@@ -960,34 +961,34 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/search':
       case '/поиск':
       case '/серч': {
-        await cmdSearch(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        await cmdSearch(env, chatId, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       }
       case '/report':
       case '/репорт':
       case '/жалоба': {
-        await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
+        await cmdReport(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       }
       case '/связи':
       case '/матч':
       case '/match':
       case '/links': {
-        await cmdRelated(env, chatId, text.split(/\s+/).slice(1).join(' '));
+        await cmdRelated(env, chatId, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       }
       case '/подбор':
       case '/подборы':
       case '/пары':
       case '/podbor': {
-        await cmdMatch(env, msg, text.split(/\s+/).slice(1).join(' '));
+        await cmdMatch(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       }
       case '/статистика':
       case '/стата':
       case '/итоги':
       case '/stats': {
-        await cmdStats(env, msg, text.split(/\s+/).slice(1).join(' '));
+        await cmdStats(env, msg, cmdText.split(/\s+/).slice(1).join(' '));
         break;
       }
       default:
@@ -1188,14 +1189,33 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
 /* Парсинг групповых сообщений                                          */
 /* ------------------------------------------------------------------ */
 
+/** Нормализация командного текста: невидимые символы (zero-width, BOM,
+ *  мягкий перенос, узкие пробелы из мессенджеров и буфера обмена) не должны
+ *  ломать разбор команды. Диагноз из прод-логов: сообщение с «/здесь …»
+ *  доходило до воркера (след tg cmd), но воркер завершался за 0 мс без
+ *  единого запроса к базе — регэксп команды не совпадал из-за невидимого
+ *  символа, и бот молчал. Здесь все они заменяются обычным пробелом. */
+function cmdNorm(raw: string): string {
+  return raw
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, ' ') // невидимые → пробел
+    .replace(/[\u00A0\u202F\u3000]/g, ' ')                // экзотические пробелы → обычный
+    .replace(/\s+/g, ' ')
+    .replace(/^\/\s+/, '/')                                // «/ здесь» → «/здесь»
+    .trim();
+}
+
 async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   if (!text) return;
   // Диагностический след: если команда в группе «не работает», по этой строке
   // в логах воркера сразу видно, дошла ли она до воркера (Cloudflare →
   // Workers → parcel → Logs). Нет строки — Telegram не доставил сообщение.
-  if (text.startsWith('/')) {
-    console.log('tg cmd', msg.chat.id, msg.chat.type, 'thread', msg.message_thread_id ?? '-', text.slice(0, 60));
+  // codes — юникод-коды первых символов: невидимый символ (zero-width и т.п.)
+  // в тексте не отображается, но виден как код.
+  const cmd = cmdNorm(text);
+  if (cmd.startsWith('/')) {
+    console.log('tg cmd', msg.chat.id, msg.chat.type, 'thread', msg.message_thread_id ?? '-',
+      cmd.slice(0, 60), 'codes:', [...cmd.slice(0, 12)].map((ch) => ch.codePointAt(0)!.toString(16)).join(' '));
   }
   // Не реагируем на собственные сообщения и ботов. username сверки не должен
   // ловить «undefined === undefined» (нет ника и нет BOT_USERNAME — это не мы)
@@ -1203,35 +1223,35 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
 
   // /здесь — настройка «комнат» форум-канала (см. cmdForumTopic): админ
   // пишет команду в нужной теме, бот запоминает тему за маршрутом
-  if (/^\/(здесь|тема|zdes)(@\w+)?(\s|$)/i.test(text)) {
-    await cmdForumTopic(env, msg, text.split(/\s+/).slice(1).join(' '));
+  if (/^\/(здесь|тема|zdes)(@\w+)?(\s|$)/i.test(cmd)) {
+    await cmdForumTopic(env, msg, cmd.split(/\s+/).slice(1).join(' '));
     return;
   }
   // /комнаты — статистика публикаций (админ)
-  if (/^\/(комнаты|rooms)(@\w+)?(\s|$|$)/i.test(text)) {
+  if (/^\/(комнаты|rooms)(@\w+)?(\s|$|$)/i.test(cmd)) {
     if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
     else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
     return;
   }
   // /форум — диагностика форум-канала (админ)
-  if (/^\/(форум|forum)(@\w+)?(\s|$)/i.test(text)) {
+  if (/^\/(форум|forum)(@\w+)?(\s|$)/i.test(cmd)) {
     if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
     else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
     return;
   }
   // /описание — задать описание этого чата (бот должен быть админом)
-  if (/^\/(описание|opisanie)(@\w+)?(\s|$)/i.test(text)) {
-    await cmdSetChatDescription(env, msg, text.split(/\s+/).slice(1).join(' '));
+  if (/^\/(описание|opisanie)(@\w+)?(\s|$)/i.test(cmd)) {
+    await cmdSetChatDescription(env, msg, cmd.split(/\s+/).slice(1).join(' '));
     return;
   }
   // /поиск, /search, /серч работают и в группах
-  if (isSearchCommand(text)) {
-    await cmdSearch(env, msg.chat.id, text.split(/\s+/).slice(1).join(' '));
+  if (isSearchCommand(cmd)) {
+    await cmdSearch(env, msg.chat.id, cmd.split(/\s+/).slice(1).join(' '));
     return;
   }
   // /репорт, /report, /жалоба — тоже
-  if (isReportCommand(text)) {
-    await cmdReport(env, msg, text.split(/\s+/).slice(1).join(' '));
+  if (isReportCommand(cmd)) {
+    await cmdReport(env, msg, cmd.split(/\s+/).slice(1).join(' '));
     return;
   }
   if (text.length < 10 || text.length > 4000) return;

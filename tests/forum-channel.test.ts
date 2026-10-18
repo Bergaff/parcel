@@ -187,6 +187,30 @@ describe('/здесь — настройка комнат', () => {
     expect(sent.some((s) => s.threadId === 66 && s.text.includes('Готово'))).toBe(true);
   });
 
+  it('невидимые символы в команде не ломают /здесь (zero-width, BOM, узкий пробел)', async () => {
+    // диагноз из прод-логов: сообщение с «/здесь …» доходило до воркера,
+    // но воркер завершался за 0 мс — регэксп не совпадал из-за невидимого
+    // символа, вставленного клавиатурой или буфером обмена
+    const ZWSP = '​', BOM = '﻿', NBSP = ' ';
+    // BOM перед слэшем + zero-width вместо пробела после команды
+    await forumMessage(`${BOM}/здесь${ZWSP}Дубай`, 42, 88);
+    const c = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c.cities['дубай']).toBe(88);
+    expect(sent.some((s) => s.text.includes('Готово'))).toBe(true);
+    // невидимый символ между «/» и «здесь» — тоже работает
+    sent.length = 0;
+    db.settings.clear();
+    await forumMessage(`/${ZWSP}здесь Варшава → Минск`, 42, 55);
+    const c2 = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c2.pairs['варшава|минск']).toBe(55);
+    // узкий неразрывный пробел вместо обычного — тоже команда
+    sent.length = 0;
+    db.settings.clear();
+    await forumMessage(`/здесь${NBSP}прочее`, 42, 99);
+    const c3 = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c3.fallback).toBe(99);
+  });
+
   it('автокомплит группы: /здесь@parcel_transfer_bot работает как /здесь', async () => {
     // клиент в группе дописывает к команде @юзернейм бота — раньше регэксп
     // её не узнавал и команда молча игнорировалась даже для админа
