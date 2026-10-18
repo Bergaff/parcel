@@ -1191,6 +1191,12 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
 async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   if (!text) return;
+  // Диагностический след: если команда в группе «не работает», по этой строке
+  // в логах воркера сразу видно, дошла ли она до воркера (Cloudflare →
+  // Workers → parcel → Logs). Нет строки — Telegram не доставил сообщение.
+  if (text.startsWith('/')) {
+    console.log('tg cmd', msg.chat.id, msg.chat.type, 'thread', msg.message_thread_id ?? '-', text.slice(0, 60));
+  }
   // Не реагируем на собственные сообщения и ботов. username сверки не должен
   // ловить «undefined === undefined» (нет ника и нет BOT_USERNAME — это не мы)
   if ((msg.from?.username && msg.from.username === env.BOT_USERNAME) || msg.from?.is_bot) return;
@@ -1424,8 +1430,9 @@ export function countryPairKey(a: string, b: string): string {
 export function parseForumRouteLabel(
   label: string
 ): { pair: string } | { country: string } | { city: string } | { fallback: true } | null {
-  // ↔ («в обе стороны») для парсинга — то же, что →
-  const s = label.trim().replace(/\s+/g, ' ').replace(/[↔⇄]/g, '→');
+  // ↔ («в обе стороны») для парсинга — то же, что →; U+FE0F (символ-вариант
+  // из эмодзи-клавиатуры, «↔️») срезаем — он невидим, но ломает разбор
+  const s = label.trim().replace(/[\uFE0F]/g, '').replace(/\s+/g, ' ').replace(/[↔⇄]/g, '→');
   if (!s) return null;
   if (/^(прочее|остальное|другое|общее|всё|все)$/i.test(s)) return { fallback: true };
   // разделитель — стрелка (надёжнее всего), « - » с пробелами, затем обычный
