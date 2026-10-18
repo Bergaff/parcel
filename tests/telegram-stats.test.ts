@@ -229,7 +229,7 @@ function dbFake(opts: { pendingRows?: Array<Record<string, unknown>>; pendingTot
     const COLS = ['id', 'type', 'from_city', 'to_city', 'departure_date', 'recurring', 'weight_kg',
       'price', 'description', 'phone', 'telegram', 'status', 'source', 'source_chat', 'source_chat_id',
       'source_message_id', 'by_admin', 'hidden', 'created_at', 'published_at', 'from_city_lc',
-      'to_city_lc', 'description_lc'];
+      'to_city_lc', 'description_lc', 'reject_reason'];
     const calls: Array<{ sql: string; params: unknown[] }> = [];
     const make = (sql: string) => {
       const call = { sql, params: [] as unknown[] };
@@ -290,6 +290,8 @@ describe('пересылка объявления без контакта — п
     expect(insert).toBeTruthy();
     expect(insert!.params).toContain('rejected');
     expect(insert!.params).not.toContain('pending');
+    // причина отказа видна в ведре: «без контакта», а не «не указана»
+    expect(insert!.params).toContain('no_contact');
     // переславшему — объяснение, а не «отправлено на модерацию»
     const reply = sent.filter((s) => s.chatId === 555).map((s) => s.text).join('\n');
     expect(reply).toContain('Не принято');

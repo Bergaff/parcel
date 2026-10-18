@@ -1852,6 +1852,7 @@ const REJECT_REASONS = {
   admin: 'модератор',
   duplicate: 'повтор',
   reports: 'жалобы (3+)',
+  no_contact: 'без контакта',
 };
 
 function rejectedText(l) {

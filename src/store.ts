@@ -41,6 +41,7 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   await ensureRecurringColumn(env);
   await ensureByAdminColumn(env);
   await ensureHiddenColumn(env);
+  await ensureRejectReasonColumn(env).catch(() => undefined);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
   // Единая точка нормализации контактов: номер не должен лежать в поле telegram,
@@ -57,8 +58,8 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
-       by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc, reject_reason)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
@@ -71,7 +72,10 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
       input.byAdmin ? 1 : input.fromPerson ? 2 : 0,
       hidden ? 1 : 0, now, publishedAt,
       // поиск не зависит от регистра: нижний регистр кладём рядом с текстом
-      input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase()
+      input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase(),
+      // авто-отказ «водитель без контакта» — сразу с причиной, чтобы в ведре
+      // отклонённых было видно, почему заявка туда попала
+      auto?.status === 'rejected' ? 'no_contact' : null
     )
     .run();
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as

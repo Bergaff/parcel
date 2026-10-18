@@ -197,6 +197,14 @@ describe('выбор темы: точная пара → страны → гор
     const c = cfg({ countries: { 'беларусь|польша': 22 } });
     expect(forumThreadFor(c, 'Минск', 'Варшава')).toBe(22);
     expect(forumThreadFor(c, 'Белосток', 'Брест')).toBe(22);
+    // погранцифр тоже знает свои страны: Брест ↔ Тересполь/Бяла — это Польша ↔ Беларусь
+    expect(forumThreadFor(c, 'Брест', 'Тересполь')).toBe(22);
+    expect(forumThreadFor(c, 'Бяла', 'Брест')).toBe(22);
+    expect(forumThreadFor(c, 'Гомель', 'Познань')).toBe(22);
+    // Литва: Вильнюс/Каунас/Клайпеда ↔ белорусские города
+    const lt = cfg({ countries: { 'беларусь|литва': 33 } });
+    expect(forumThreadFor(lt, 'Минск', 'Вильнюс')).toBe(33);
+    expect(forumThreadFor(lt, 'Клайпеда', 'Минск')).toBe(33);
   });
 });
 
@@ -333,5 +341,31 @@ describe('/описание — задать описание чата/кана�
     });
     expect(sent.filter((s) => s.method === 'setChatDescription')).toHaveLength(0);
     expect(sent.some((s) => s.method === 'sendMessage' && s.text.includes('какому чату'))).toBe(true);
+  });
+});
+
+describe('/id — Telegram ID аккаунта', () => {
+  it('админ: ID и подтверждение', async () => {
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 5,
+      message: { message_id: 13, date: 1789000004, chat: { id: 42, type: 'private' } as never,
+        from: { id: 42 } as never, text: '/id' },
+    });
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('Ваш Telegram ID: <b>42</b>');
+    expect(reply?.text).toContain('администратор');
+  });
+
+  it('не админ: ID и подсказка про ADMIN_IDS', async () => {
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 6,
+      message: { message_id: 14, date: 1789000005, chat: { id: 111, type: 'private' } as never,
+        from: { id: 111 } as never, text: '/id' },
+    });
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('Ваш Telegram ID: <b>111</b>');
+    expect(reply?.text).toContain('ADMIN_IDS');
   });
 });
