@@ -2274,6 +2274,23 @@ async function renderAdminForum() {
 
   const segs = el('div', { class: 'admin-card-actions' }, [
     seg(7, '7 дней'), seg(30, '30 дней'), seg(0, 'всё время'),
+    // после перенастройки комнат (/здесь) старые счётчики не про новые
+    // комнаты — обнуляем по явному нажатию, с подтверждением
+    el('button', {
+      class: 'btn btn-sm btn-line', type: 'button', text: 'сбросить счётчики',
+      title: 'Комнаты перенастроили командой /здесь — старая статистика не соответствует новым комнатам',
+      onclick: async () => {
+        if (!confirm('Сбросить статистику канала? Актуально после перенастройки комнат (/здесь): счётчики комнат и «прочего» обнулятся и накопятся заново. Заявки и доска не затрагиваются.')) return;
+        try {
+          const r = await adminApi('/api/admin/forum-stats/reset', { method: 'POST' });
+          if (!r.ok) throw new Error();
+          toast('Счётчики канала сброшены — копим заново.');
+          await renderAdminForum();
+        } catch {
+          toast('Не получилось сбросить. Попробуйте ещё раз.');
+        }
+      },
+    }),
   ]);
   const summary = el('p', {
     class: 'admin-contact',

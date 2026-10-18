@@ -658,6 +658,19 @@ export async function listForumStatEvents(env: Env, sinceIso: string | null): Pr
   }));
 }
 
+/** Сброс статистики форум-канала: комнаты перенастроили (/здесь) — прежние
+ *  счётчики и события описывают уже неактуальные комнаты. Обнуляем обе
+ *  таблицы (сводную и события) и копим заново; сами заявки, публикации
+ *  на доске и настройки комнат не затрагиваются. */
+export async function resetForumStats(env: Env): Promise<void> {
+  await ensureForumStatsTable(env);
+  await ensureForumStatEventsTable(env);
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM forum_stats'),
+    env.DB.prepare('DELETE FROM forum_stat_events'),
+  ]);
+}
+
 /** Заявки за период: сколько пришло (любой статус) и сколько опубликовано —
  *  база для «% заявок, дошедших до канала». sinceIso = null — за всё время. */
 export async function listingFlowCounts(

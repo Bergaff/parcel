@@ -56,6 +56,8 @@ const server = {
   pendingTotal: 0, // настоящее число очереди с сервера (COUNT), 0 — не подменять
   dupesPruned: 0, // сколько явных повторов отклонено до показа очереди
   replacedWith: null as { id: string; deleteId: string } | null,
+  forumResetPosts: 0, // сколько раз админка сбрасывала счётчики канала
+  forumStatsGets: 0, // сколько раз вкладка «канал» забирала статистику
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
     {
@@ -252,6 +254,7 @@ function makeFetch(calls: string[]) {
         };
       }
       if (path === '/api/admin/forum-stats') {
+        server.forumStatsGets += 1;
         return {
           body: {
             configured: true, days: 30, arrived: 50, published: 20, posted: 12, inRooms: 8, inFallback: 4,
@@ -266,6 +269,10 @@ function makeFetch(calls: string[]) {
             ],
           },
         };
+      }
+      if (path === '/api/admin/forum-stats/reset' && method === 'POST') {
+        server.forumResetPosts += 1;
+        return { body: { ok: true } };
       }
       const mKey = (contact: string) => {
         const digits = String(contact).replace(/\D/g, '');
@@ -743,6 +750,31 @@ describe('админка', () => {
     // «что не попало» — кандидаты на новые комнаты
     expect(body).toContain('Что не попало в свои комнаты');
     expect(body).toContain('Минск → Москва');
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «канал»: сброс счётчиков — после перенастройки комнат статистика не актуальна', async () => {
+    byId('admin-tab-forum').click();
+    await settle(80);
+    const resetBtn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'сбросить счётчики') as HTMLButtonElement | undefined;
+    expect(resetBtn).toBeTruthy(); // кнопка есть, когда канал настроен
+    // передумали в подтверждении — на сервер ничего не уходит
+    win.confirm = () => false;
+    const posts0 = server.forumResetPosts;
+    resetBtn!.click();
+    await settle(80);
+    expect(server.forumResetPosts).toBe(posts0);
+    // подтвердили — счётчики сброшены, вкладка перерисовалась с сервера
+    win.confirm = () => true;
+    const gets0 = server.forumStatsGets;
+    resetBtn!.click();
+    await settle(120);
+    expect(server.forumResetPosts).toBe(posts0 + 1);
+    expect(server.forumStatsGets).toBe(gets0 + 1);
+    expect(text('toast')).toContain('Счётчики канала сброшены');
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
     await settle(80);
