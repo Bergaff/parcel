@@ -538,3 +538,42 @@ describe('внутренний сбой команды — бот всё рав�
     db.failGroupSends = false;
   });
 });
+
+describe('команда от бота-аккаунта — видимый ответ вместо молчания', () => {
+  // диагноз из прод-логов: «tg cmd» печатался, но запрос завершался за
+  // 2 мс без обращения к D1 — команда приходила с from.is_bot = true
+  // (релей/автопост/отправка через Bot API) и молча съедалась фильтром
+  async function botMessage(text: string, fromId: number, threadId: number) {
+    await handleTelegramUpdate(env, {
+      update_id: 31,
+      message: {
+        message_id: 31, date: 1789000031,
+        chat: { id: -100777, type: 'supergroup', is_forum: true } as never,
+        from: { id: fromId, is_bot: true, username: 'relay_bot' } as never,
+        text, message_thread_id: threadId,
+      },
+    });
+  }
+
+  it('бот без ADMIN_IDS: /здесь отвечает подсказкой с его ID, настройки не трогаем', async () => {
+    await botMessage('/здесь Дубай', 555, 44);
+    expect(db.settings.size).toBe(0); // ничего не записали
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('ADMIN_IDS');
+    expect(reply?.text).toContain('Ваш Telegram ID: <b>555</b>');
+  });
+
+  it('бот из ADMIN_IDS (релей админа): комната настраивается полноценно', async () => {
+    await botMessage('/здесь Дубай', 42, 45);
+    const c = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c.cities['дубай']).toBe(45);
+    expect(sent.some((s) => s.text.includes('Готово'))).toBe(true);
+  });
+
+  it('объявления и посторонние команды от ботов по-прежнему не разбираются', async () => {
+    await botMessage('Еду завтра Варшава → Минск, возьму две посылки, +48601234567', 555, 44);
+    await botMessage('/поиск Минск', 555, 44);
+    expect(sent).toHaveLength(0);
+    expect(db.settings.size).toBe(0);
+  });
+});

@@ -1215,20 +1215,29 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // в логах воркера сразу видно, дошла ли она до воркера (Cloudflare →
   // Workers → parcel → Logs). Нет строки — Telegram не доставил сообщение.
   // codes — юникод-коды первых символов: невидимый символ (zero-width и т.п.)
-  // в тексте не отображается, но виден как код.
+  // в тексте не отображается, но виден как код. from — автор сообщения:
+  // диагноз из прод-логов: «tg cmd» есть, а запрос завершился за 2 мс без
+  // единого обращения к D1 — команда приходила от бота-аккаунта (релей,
+  // автопост, отправка через Bot API) и молча съедалась фильтром ниже.
   const cmd = cmdNorm(text);
+  const selfEcho = !!(msg.from?.username && msg.from.username === env.BOT_USERNAME);
+  const fromBot = !!msg.from?.is_bot;
   if (cmd.startsWith('/')) {
     console.log('tg cmd', msg.chat.id, msg.chat.type, 'thread', msg.message_thread_id ?? '-',
+      'from', msg.from?.id ?? '-', msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name ?? '-'),
+      selfEcho ? 'сам' : fromBot ? 'бот' : 'человек',
       cmd.slice(0, 60), 'codes:', [...cmd.slice(0, 12)].map((ch) => ch.codePointAt(0)!.toString(16)).join(' '));
   }
-  // Не реагируем на собственные сообщения и ботов. username сверки не должен
-  // ловить «undefined === undefined» (нет ника и нет BOT_USERNAME — это не мы)
-  if ((msg.from?.username && msg.from.username === env.BOT_USERNAME) || msg.from?.is_bot) return;
+  // Свои собственные сообщения не разбираем (защита от эха)
+  if (selfEcho) return;
 
   // /здесь — настройка «комнат» форум-канала (см. cmdForumTopic): админ
   // пишет команду в нужной теме, бот запоминает тему за маршрутом.
   // runGuarded: даже внутренний сбой (D1, сеть) превращается в ответ,
-  // а не в молчание
+  // а не в молчание. Разбираем и от ботов: релей-/автопост-боты передают
+  // команды людей — не-админу уйдёт видимая подсказка с его ID, боту из
+  // ADMIN_IDS — полноценная обработка. Зацикливания нет: наши ответы
+  // не начинаются с «/»
   if (/^\/(здесь|тема|zdes)(@\w+)?(\s|$)/i.test(cmd)) {
     await runGuarded(env, msg, () => cmdForumTopic(env, msg, cmd.split(/\s+/).slice(1).join(' ')));
     return;
@@ -1252,6 +1261,12 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // /описание — задать описание этого чата (бот должен быть админом)
   if (/^\/(описание|opisanie)(@\w+)?(\s|$)/i.test(cmd)) {
     await runGuarded(env, msg, () => cmdSetChatDescription(env, msg, cmd.split(/\s+/).slice(1).join(' ')));
+    return;
+  }
+  // Прочие сообщения ботов не разбираем: /поиск и /репорт от ботов — шум
+  // (другие боты в группах), объявления от ботов — дубли от релеев
+  if (fromBot) {
+    if (cmd.startsWith('/')) console.log('tg cmd: команда бота', msg.from?.id, 'пропущена (не форумная)');
     return;
   }
   // /поиск, /search, /серч работают и в группах
