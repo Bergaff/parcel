@@ -865,7 +865,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           `• <b>/parse</b>: проверить, как я понимаю сообщение из чата (или просто перешлите его мне)\n` +
           `• <b>/id</b>: показать Telegram ID аккаунта — для ADMIN_IDS после смены аккаунта администратора\n` +
           `• Добавьте меня в чаты водителей и релокантов: я буду находить объявления и отправлять их на доску\n` +
-          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (пара), <code>/здесь Польша ↔ Беларусь</code> (регион), <code>/здесь Дубай</code> (город) или <code>/здесь прочее</code> — одобренные заявки будут публиковаться там ссылками с превью. <code>/комнаты</code> — статистика публикаций по комнатам. <code>/описание текст</code> — задать описание чата/канала (в личке: <code>/описание @канал текст</code>)\n` +
+          `• Форум-канал с «комнатами» по направлениям: создайте группу с темами, добавьте меня админом и в каждой теме напишите <code>/здесь Варшава → Минск</code> (пара), <code>/здесь Польша ↔ Беларусь</code> (регион), <code>/здесь Дубай</code> (город) или <code>/здесь прочее</code> — одобренные заявки будут публиковаться там ссылками с превью. <code>/комнаты</code> — статистика по комнатам, <code>/форум</code> — диагностика канала. <code>/описание текст</code> — задать описание чата/канала (в личке: <code>/описание @канал текст</code>)\n` +
           `• Сайт: ${site}`
         );
         await setWizard(env, chatId, null);
@@ -874,8 +874,14 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       case '/комнаты':
       case '/rooms': {
         if (isAdminChat(env, msg)) await cmdForumStats(env, chatId);
+        else await sendText(env, chatId, notAdminHint(msg));
         break;
       }
+      case '/форум':
+      case '/forum':
+        if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
+        else await sendText(env, chatId, notAdminHint(msg));
+        break;
       case '/post': {
         const wizard: WizardState = {
           step: 'type',
@@ -1192,6 +1198,13 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   // /комнаты — статистика публикаций (админ)
   if (/^\/(комнаты|rooms)(\s|$|$)/i.test(text)) {
     if (isAdminChat(env, msg)) await cmdForumStats(env, msg.chat.id);
+    else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
+    return;
+  }
+  // /форум — диагностика форум-канала (админ)
+  if (/^\/(форум|forum)(\s|$)/i.test(text)) {
+    if (isAdminChat(env, msg)) await cmdForumDiagnostics(env, msg);
+    else await sendText(env, msg.chat.id, notAdminHint(msg), { message_thread_id: msg.message_thread_id });
     return;
   }
   // /описание — задать описание этого чата (бот должен быть админом)
@@ -1435,12 +1448,27 @@ export function parseForumRouteLabel(
   return { pair: forumRouteKey(from, to) };
 }
 
+/** Подсказка для не-админа: админские команды бота молчат, если аккаунта нет
+ *  в ADMIN_IDS — обычно это происходит после смены Telegram-аккаунта.
+ *  Говорим прямо, что сделать, вместо молчаливого игнорирования. */
+function notAdminHint(msg: TgMessage): string {
+  const uid = msg.from?.id;
+  return 'Это команда администратора, а этот аккаунт пока не в списке ADMIN_IDS.'
+    + (uid != null ? `\nВаш Telegram ID: <b>${uid}</b>` : '')
+    + '\nДобавьте его в переменную ADMIN_IDS (Cloudflare → Workers & Pages → parcel → Settings → Variables) через запятую вместе со старым ID — например <code>111111111,222222222</code>. Применяется сразу, без деплоя.';
+}
+
 /** /здесь в теме форум-группы: запомнить тему за маршрутом (админ). */
 async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<void> {
   const reply = (text: string) => sendText(env, msg.chat.id, text, {
     message_thread_id: msg.message_thread_id,
   });
-  if (!isAdminChat(env, msg)) return; // команда админская — молчим
+  if (!isAdminChat(env, msg)) {
+    // молчание запутало админа, сменившего аккаунт: новый ID не в ADMIN_IDS,
+    // команда «не работает» без единого ответа. Говорим, что сделать.
+    await reply(notAdminHint(msg));
+    return;
+  }
   if (!msg.chat.is_forum) {
     await reply('Это работает в форум-группе — группе с включёнными «Тематами». Создайте группу, в настройках включите «Темы», добавьте меня админом и повторите команду в нужной теме.');
     return;
@@ -1582,6 +1610,52 @@ async function cmdSetChatDescription(env: Env, msg: TgMessage, args: string): Pr
     console.error('setChatDescription failed', e);
     await reply('Не получилось: бот должен быть админом этого чата с правом изменять описание (право «Change chat info» в настройках админа). Проверьте и повторите.');
   }
+}
+
+/** /форум — диагностика форум-канала: настройки, комнаты и тестовая публикация
+ *  в «прочее». Сразу видно, в какую группу публикуем и может ли бот писать. */
+async function cmdForumDiagnostics(env: Env, msg: TgMessage): Promise<void> {
+  const reply = (text: string) => sendText(env, msg.chat.id, text, {
+    message_thread_id: msg.message_thread_id,
+  });
+  const cfg = await loadForumConfig(env);
+  if (!cfg) {
+    await reply('Форум-канал не настроен. Создайте группу с включёнными «Темами», добавьте меня админом и в нужной теме напишите /здесь <направление> — пара («Варшава → Минск»), регион («Польша ↔ Беларусь») или город («Дубай»); /здесь прочее — комната по умолчанию.');
+    return;
+  }
+  const here = String(msg.chat.id) === cfg.chat;
+  const lines: string[] = [
+    '🔧 <b>Диагностика форум-канала</b>',
+    `Публикуем в группу <code>${escapeHtml(cfg.chat)}</code>${here ? ' — эта группа' : ''}`,
+    `Тема «прочее» (fallback): <b>${cfg.fallback}</b>`,
+  ];
+  const rooms = [
+    ...Object.entries(cfg.pairs).map(([k, id]) => `• пара ${k.replace('|', ' → ')} → тема ${id}`),
+    ...Object.entries(cfg.countries).map(([k, id]) => `• регион ${k.split('|').join(' ↔ ')} → тема ${id}`),
+    ...Object.entries(cfg.cities).map(([k, id]) => `• город ${k} → тема ${id}`),
+  ];
+  lines.push(rooms.length ? `Комнаты:\n${rooms.join('\n')}` : 'Комнат пока нет — всё уходит в «прочее».');
+  if (!here) {
+    lines.push('', `⚠️ Команда написана в другой группе (эта — <code>${msg.chat.id}</code>). Если настроили новую группу — напишите /здесь в каждой её теме заново.`);
+  }
+  // тестовая публикация в «прочее»: проверяет и права бота, и существование темы
+  let test: { ok?: boolean; description?: string } | null = null;
+  let netError = '';
+  try {
+    test = (await api(env, 'sendMessage', {
+      chat_id: cfg.chat,
+      text: '🔧 Проверка форум-канала: бот может писать в эту тему — публикации работают.',
+      message_thread_id: cfg.fallback,
+    })) as { ok?: boolean; description?: string } | null;
+  } catch (e) {
+    netError = String((e as Error)?.message ?? e);
+  }
+  if (test?.ok) {
+    lines.push('', '✅ Тестовое сообщение отправлено в тему «прочее» — проверьте, что оно появилось.');
+  } else {
+    lines.push('', `❌ Тестовое сообщение не ушло: ${escapeHtml(netError || test?.description || 'нет ответа Telegram')}. Проверьте, что бот — админ группы и тема «прочее» (id ${cfg.fallback}) существует.`);
+  }
+  await reply(lines.join('\n'));
 }
 
 /* ---------- статистика попадания в канал (админка) ---------- */

@@ -173,10 +173,12 @@ describe('/здесь — настройка комнат', () => {
     expect(sent.some((s) => s.threadId === 66 && s.text.includes('Готово'))).toBe(true);
   });
 
-  it('не админ — тишина: настроек не появилось', async () => {
+  it('не админ — подсказка с ID вместо молчания, настройки не трогаем', async () => {
     await forumMessage('/здесь Варшава → Минск', 111, 55);
-    expect(db.settings.size).toBe(0);
-    expect(sent).toHaveLength(0);
+    expect(db.settings.size).toBe(0); // ничего не записали
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('ADMIN_IDS');
+    expect(reply?.text).toContain('Ваш Telegram ID: <b>111</b>');
   });
 });
 
@@ -367,5 +369,51 @@ describe('/id — Telegram ID аккаунта', () => {
     const reply = sent.find((s) => s.method === 'sendMessage');
     expect(reply?.text).toContain('Ваш Telegram ID: <b>111</b>');
     expect(reply?.text).toContain('ADMIN_IDS');
+  });
+});
+
+describe('/форум — диагностика форум-канала', () => {
+  it('админу: настройки, комнаты и тестовое сообщение в «прочее»', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg({
+      countries: { 'беларусь|польша': 66 },
+      cities: { 'дубай': 77 },
+    })));
+    sent.length = 0;
+    await forumMessage('/форум', 42, 55);
+    const reply = sent.map((s) => s.text).join('\n');
+    expect(reply).toContain('Диагностика форум-канала');
+    expect(reply).toContain('-100777');   // группа из настроек
+    expect(reply).toContain('эта группа'); // команда написана именно в ней
+    expect(reply).toContain('регион беларусь ↔ польша → тема 66');
+    expect(reply).toContain('город дубай → тема 77');
+    // тестовое сообщение ушло в тему «прочее» (99) настроенной группы
+    const test = sent.find((s) => s.text.includes('Проверка форум-канала'));
+    expect(test?.chatId).toBe('-100777'); // chat в настройках хранится строкой
+    expect(test?.threadId).toBe(99);
+    expect(sent.some((s) => s.text.includes('✅ Тестовое сообщение отправлено'))).toBe(true);
+  });
+
+  it('написано в другой группе — предупреждение о несоответствии', async () => {
+    db.settings.set('forum_broadcast', JSON.stringify(cfg()));
+    sent.length = 0;
+    await handleTelegramUpdate(env, {
+      update_id: 7,
+      message: {
+        message_id: 15, date: 1789000006,
+        chat: { id: -100999, type: 'supergroup', is_forum: true } as never,
+        from: { id: 42 } as never,
+        text: '/форум', message_thread_id: 5,
+      },
+    });
+    const reply = sent.map((s) => s.text).join('\n');
+    expect(reply).toContain('⚠️ Команда написана в другой группе');
+  });
+
+  it('не админу — та же подсказка, что и /здесь', async () => {
+    sent.length = 0;
+    await forumMessage('/форум', 111, 55);
+    const reply = sent.find((s) => s.method === 'sendMessage');
+    expect(reply?.text).toContain('ADMIN_IDS');
+    expect(reply?.text).toContain('Ваш Telegram ID: <b>111</b>');
   });
 });
