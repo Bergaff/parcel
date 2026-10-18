@@ -18,6 +18,7 @@ const db = vi.hoisted(() => ({
   forumStats: new Map<string, StatRow>(),
   forumEvents: [] as Array<{ thread: number; routeKey: string; fromCity: string; toCity: string; posts: number }>,
   flowCounts: { arrived: 0, published: 0 },
+  failGroupSends: false,
 }));
 
 vi.mock('../src/store', () => ({
@@ -117,12 +118,19 @@ beforeEach(() => {
   db.forumStats.clear();
   db.forumEvents.length = 0;
   db.flowCounts = { arrived: 0, published: 0 };
+  db.failGroupSends = false;
   sent.length = 0;
   global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(typeof url === 'string' ? url : url instanceof URL ? url.href : url.url);
     const m = /api\.telegram\.org\/bot[^/]+\/(\w+)/.exec(u);
     if (m) {
       const b = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      if (db.failGroupSends && Number(b.chat_id) < 0) {
+        // Telegram отказал в отправке в группу (Forbidden/чат не найден и т.п.)
+        return new Response(JSON.stringify({ ok: false, description: 'Forbidden: bot is not a member of the group chat' }), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
       sent.push({
         method: m[1] ?? '',
         text: String(b.text ?? b.description ?? ''),
@@ -454,5 +462,23 @@ describe('/форум — диагностика форум-канала', () =>
     const reply = sent.find((s) => s.method === 'sendMessage');
     expect(reply?.text).toContain('ADMIN_IDS');
     expect(reply?.text).toContain('Ваш Telegram ID: <b>111</b>');
+  });
+});
+
+describe('сбой отправки в группу — админ узнаёт в личке', () => {
+  it('комната записана, но ответ в группу не дошёл: ⚠️ с текстом ошибки в личку', async () => {
+    db.failGroupSends = true;
+    await forumMessage('/здесь Дубай', 42, 78);
+    // настройка сохранилась: setSetting идёт до ответа
+    const c = JSON.parse(db.settings.get('forum_broadcast') ?? '{}');
+    expect(c.cities['дубай']).toBe(78);
+    // админу в личку — точная причина сбоя
+    const warn = sent.find((s) => s.chatId === 42 && s.text.includes('Не смог ответить'));
+    expect(warn).toBeTruthy();
+    expect(warn?.text).toContain('Forbidden');
+    expect(warn?.text).toContain('-100777');
+    // и копия результата — комната настроена, несмотря на сбой ответа
+    expect(sent.some((s) => s.chatId === 42 && s.text.includes('Комната настроена'))).toBe(true);
+    db.failGroupSends = false;
   });
 });

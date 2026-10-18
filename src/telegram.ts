@@ -1473,10 +1473,34 @@ function notAdminHint(msg: TgMessage): string {
 
 /** /здесь в теме форум-группы: запомнить тему за маршрутом (админ). */
 async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<void> {
-  const reply = (text: string) => sendText(env, msg.chat.id, text, {
-    message_thread_id: msg.message_thread_id,
-  });
-  if (!isAdminChat(env, msg)) {
+  const thread = msg.message_thread_id ?? 1;
+  // Ответ в тему + страховка: если он не дошёл (бот исключён из группы,
+  // тема удалена, Telegram вернул ошибку) — админ узнает об этом в личке
+  // с точным текстом ошибки, а не тишиной. Раньше такой сбой видел только
+  // лог воркера и выглядел как «команда не работает».
+  const reply = async (text: string) => {
+    let fail = '';
+    try {
+      const res = (await api(env, 'sendMessage', {
+        chat_id: msg.chat.id, text, parse_mode: 'HTML', disable_web_page_preview: true,
+        message_thread_id: msg.message_thread_id,
+      })) as { ok?: boolean; description?: string } | null;
+      if (!res?.ok) fail = res?.description ?? 'нет ответа Telegram';
+    } catch (e) {
+      fail = String((e as Error)?.message ?? e);
+    }
+    if (fail) {
+      console.error('форум: ответ в группу не ушёл', msg.chat.id, 'тема', thread, fail);
+      for (const adminId of admins(env)) {
+        await sendText(env, Number(adminId),
+          `⚠️ Не смог ответить в группе ${msg.chat.id} (тема ${thread}): ${escapeHtml(fail)}. Комната при этом ${label.trim() ? `«${escapeHtml(label.trim())}» ` : ''}не настроена — проверьте, что я админ этой группы и тема существует.`)
+          .catch(() => undefined);
+      }
+    }
+  };
+  const adminOk = isAdminChat(env, msg);
+  console.log('форум: /здесь от', msg.from?.id, 'админ:', adminOk, 'группа', msg.chat.id, 'тема', thread);
+  if (!adminOk) {
     // молчание запутало админа, сменившего аккаунт: новый ID не в ADMIN_IDS,
     // команда «не работает» без единого ответа. Говорим, что сделать.
     await reply(notAdminHint(msg));
@@ -1493,7 +1517,6 @@ async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<v
   }
   const cfg = (await loadForumConfig(env)) ?? { chat: String(msg.chat.id), fallback: 1, pairs: {}, countries: {}, cities: {} };
   cfg.chat = String(msg.chat.id); // последняя группа — рабочая
-  const thread = msg.message_thread_id ?? 1;
   let what: string;
   if ('fallback' in parsed) {
     cfg.fallback = thread;
@@ -1509,7 +1532,15 @@ async function cmdForumTopic(env: Env, msg: TgMessage, label: string): Promise<v
     what = `город <b>${escapeHtml(label.trim())}</b> (откуда или куда)`;
   }
   await setSetting(env, FORUM_SETTING, JSON.stringify(cfg));
+  console.log('форум: комната записана, тема', thread, 'админ', msg.from?.id);
   await reply(`Готово: ${what} закреплён за этой темой. Новые заявки будут появляться здесь ссылкой с превью.`);
+  // копия админам в личку: даже если сообщение в группу не долетело,
+  // результат настройки видно сразу
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `✅ Комната настроена: ${what} — тема ${thread} группы «${escapeHtml(msg.chat.title ?? String(msg.chat.id))}». (Это копия ответа из темы.)`)
+      .catch(() => undefined);
+  }
 }
 
 /** Тема заявки по правилам: точная пара → страна ↔ страна → город → прочее. */
