@@ -459,17 +459,22 @@ export async function listAdminBoard(env: Env, limit = 200, q?: string, odd = fa
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
-/** Сколько на доске объявлений с подозрительно далёкой датой выезда —
- *  для кнопки «показать все такие»: число известно, даже если сами
- *  объявления за пределами первой выборки (лимит 200). */
-export async function countFarDepartures(env: Env): Promise<number> {
+/** Сколько объявлений с подозрительно далёкой датой выезда — раздельно:
+ *  на доске (published — их уберёт кнопка «убрать все такие») и уже
+ *  в архиве (expired — фильтр их только показывает). Раньше счётчик
+ *  смешивал статусы: после архивации строка говорила «N объявлений»,
+ *  а кнопка отвечала «Убрано в архив: 0» — все N уже были в архиве. */
+export async function countFarDepartures(env: Env): Promise<{ published: number; archived: number }> {
   await ensureRecurringColumn(env);
   const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM listings
-     WHERE status IN ('published', 'expired') AND recurring IS NULL
+    `SELECT
+       SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) AS published,
+       SUM(CASE WHEN status = 'expired' THEN 1 ELSE 0 END) AS archived
+     FROM listings
+     WHERE recurring IS NULL
        AND departure_date IS NOT NULL AND departure_date > date('now', '+90 days')`
-  ).first() as { n: number } | null;
-  return row?.n ?? 0;
+  ).first<Record<string, unknown> | null>();
+  return { published: Number(row?.published ?? 0), archived: Number(row?.archived ?? 0) };
 }
 
 /** Редактирование заявки в админ-панели: обновляет поля и возвращает обновлённую заявку. */

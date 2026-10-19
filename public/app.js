@@ -824,7 +824,8 @@ let adminPendingTotal = 0; // сколько заявок реально ждё�
 let adminDupesPruned = 0; // сколько явных повторов отклонено из очереди до показа
 let adminBoardQuery = ''; // поиск по контакту на вкладке «на доске»
 let adminBoardOdd = false; // фильтр «только с аномальной датой выезда» на доске
-let adminBoardFarCount = 0; // сколько таких на доске (COUNT с сервера)
+let adminBoardFarCount = 0; // таких сейчас НА доске (COUNT с сервера)
+let adminBoardFarArchived = 0; // такие уже в архиве — фильтр их только показывает
 
 function adminKey() { return localStorage.getItem(ADMIN_KEY_STORAGE) || ''; }
 
@@ -1147,7 +1148,10 @@ async function loadAdmin() {
     adminPruned = data.pruned ?? 0;
     adminDupesPruned = data.dupesPruned ?? 0;
     adminPendingTotal = data.pendingTotal ?? adminItems.length;
-    if (adminTab === 'board') adminBoardFarCount = data.farCount ?? 0;
+    if (adminTab === 'board') {
+      adminBoardFarCount = data.farCount ?? 0;
+      adminBoardFarArchived = data.farArchived ?? 0;
+    }
     renderAdminItems();
   } catch {
     $('#admin-list').replaceChildren(el('p', { class: 'empty-note', text: 'Не получилось загрузить. Проверьте связь и нажмите «обновить».' }));
@@ -1223,12 +1227,14 @@ function renderAdminItems() {
   listEl.replaceChildren();
   if (adminTab === 'board') {
     if (adminBoardOdd) {
-      // фильтр активен: показаны только аномальные даты, поиск по контакту
-      // в этом режиме не применяется
+      // фильтр активен: показаны только аномальные даты (на доске и в архиве),
+      // поиск по контакту в этом режиме не применяется
+      const onBoard = adminItems.filter((l) => l.status === 'published').length;
+      const inArch = adminItems.length - onBoard;
       listEl.append(el('div', { class: 'admin-search' }, [
         el('span', {
           class: 'admin-contact',
-          text: `Показаны только объявления с подозрительно далёкой датой выезда: ${adminItems.length}`,
+          text: `Показаны только объявления с подозрительно далёкой датой выезда: ${adminItems.length} (на доске ${onBoard}, в архиве ${inArch})`,
         }),
         el('button', {
           class: 'btn btn-ink btn-sm', type: 'button', text: 'показать всю доску',
@@ -1237,38 +1243,45 @@ function renderAdminItems() {
       ]));
     } else {
       listEl.append(adminBoardSearch());
-      // Строка под счётчиком «На доске: N — действующие и архив»: показать
-      // все объявления с подозрительно далёкой датой (дальше 90 дней) или
-      // убрать их с доски разом. Число — с сервера (COUNT), поэтому строка
-      // видна, даже если сами объявления дальше первой выборки
-      const oddCount = Math.max(adminBoardFarCount, adminItems.filter((l) => oddDepartureDays(l) != null).length);
-      if (oddCount > 0) {
+      // Строка под счётчиком «На доске: N — действующие и архив». Числа —
+      // с сервера (COUNT), раздельно: «на доске» — уберёт кнопка, «уже в
+      // архиве» — фильтр только покажет. Раньше один счётчик смешивал
+      // статусы: после архивации строка говорила «25 объявлений», а кнопка
+      // отвечала «Убрано в архив: 0» — убирать было уже нечего
+      const oddOnBoard = adminBoardFarCount
+        || adminItems.filter((l) => l.status === 'published' && oddDepartureDays(l) != null).length;
+      if (oddOnBoard > 0 || adminBoardFarArchived > 0) {
+        const bits = [];
+        if (oddOnBoard > 0) bits.push(`${oddOnBoard} ${plural(oddOnBoard, 'объявление', 'объявления', 'объявлений')} на доске`);
+        if (adminBoardFarArchived > 0) bits.push(`${adminBoardFarArchived} уже в архиве`);
         listEl.append(el('div', { class: 'admin-search' }, [
           el('span', {
             class: 'admin-contact',
-            text: `⚠️ Подозрительно далёкая дата выезда: ${oddCount} ${plural(oddCount, 'объявление', 'объявления', 'объявлений')}`,
+            text: `⚠️ Подозрительно далёкая дата выезда: ${bits.join(' · ')}`,
           }),
           el('button', {
             class: 'btn btn-ink btn-sm', type: 'button', text: 'показать все такие',
             title: 'Показать только объявления с датой выезда дальше 90 дней',
             onclick: () => { adminBoardOdd = true; adminBoardQuery = ''; loadAdmin(); },
           }),
-          el('button', {
-            class: 'btn btn-line btn-sm', type: 'button', text: 'убрать все такие с доски',
-            onclick: async () => {
-              if (!confirm('Убрать с доски все объявления с датой выезда дальше 90 дней? Уйдут в архив — вернуть можно кнопкой «на доску» на карточке.')) return;
-              try {
-                const r = await adminApi('/api/admin/board/archive-far', { method: 'POST' });
-                if (!r.ok) throw new Error();
-                const data = await r.json();
-                toast(`Убрано в архив: ${data.archived ?? 0}. Вернуть можно кнопкой «на доску».`);
-                await loadAdmin();
-              } catch {
-                toast('Не получилось убрать. Попробуйте ещё раз.');
-              }
-            },
-          }),
-        ]));
+          oddOnBoard > 0
+            ? el('button', {
+                class: 'btn btn-line btn-sm', type: 'button', text: 'убрать все такие с доски',
+                onclick: async () => {
+                  if (!confirm('Убрать с доски все объявления с датой выезда дальше 90 дней? Уйдут в архив — вернуть можно кнопкой «на доску» на карточке.')) return;
+                  try {
+                    const r = await adminApi('/api/admin/board/archive-far', { method: 'POST' });
+                    if (!r.ok) throw new Error();
+                    const data = await r.json();
+                    toast(`Убрано в архив: ${data.archived ?? 0}. Вернуть можно кнопкой «на доску».`);
+                    await loadAdmin();
+                  } catch {
+                    toast('Не получилось убрать. Попробуйте ещё раз.');
+                  }
+                },
+              })
+            : null,
+        ].filter(Boolean)));
       }
     }
   }

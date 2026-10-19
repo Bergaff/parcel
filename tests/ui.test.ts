@@ -61,6 +61,7 @@ const server = {
   boardOver: null as Loose | null, // override карточки вкладки «доска»
   archiveFarPosts: 0, // сколько раз админка убирала с доски аномальные даты
   boardOddGets: 0, // сколько раз доска запрашивала фильтр аномальных дат
+  farArchivedStub: 0, // >0 — сервер говорит «все аномальные уже в архиве»
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
     {
@@ -190,16 +191,28 @@ function makeFetch(calls: string[]) {
           return { body: { items, pruned: 1, ...(server.dupesPruned ? { dupesPruned: server.dupesPruned } : {}), ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
         }
         // доска: odd=1 — только аномальные даты (дальше 90 дней); farCount —
-        // серверный COUNT для кнопки «показать все такие»
+        // такие НА доске (published), farArchived — уже в архиве (expired)
         const isFar = (x: Loose) => x.departureDate && !x.recurring
           && (new Date(`${x.departureDate}T00:00:00`).getTime() - Date.now()) / 86400000 > 90;
+        const farSplit = (xs: Loose[]) => ({
+          farCount: xs.filter((x) => x.status === 'published').length,
+          farArchived: xs.filter((x) => x.status !== 'published').length,
+        });
         if (q.get('odd') === '1') {
           server.boardOddGets += 1;
           const oddItems = [listing(server.boardOver ?? {})].filter(isFar);
-          return { body: { items: oddItems, farCount: oddItems.length } };
+          return { body: { items: oddItems, ...farSplit(oddItems) } };
         }
         const items = [listing(server.boardOver ?? {})];
-        return { body: { items, farCount: items.filter(isFar).length } };
+        const far = farSplit(items.filter(isFar));
+        return {
+          body: {
+            items,
+            // farArchivedStub — сценарий «все аномальные уже в архиве»
+            farCount: server.farArchivedStub ? 0 : far.farCount,
+            farArchived: server.farArchivedStub || far.farArchived,
+          },
+        };
       }
       if (path === '/api/admin/mediakit-creds') {
         if (method === 'POST') {
@@ -876,6 +889,27 @@ describe('админка', () => {
     expect(text('admin-count')).toContain('На доске:');
     body = win.document.querySelector('#admin-list')?.textContent ?? '';
     expect(body).not.toContain('Показаны только объявления');
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «доска»: все аномальные уже в архиве — «убрать» не предлагается', async () => {
+    // сценарий из прода: строка говорила «25 объявлений», кнопка отвечала
+    // «Убрано в архив: 0» — счётчик смешивал действующие и архивные.
+    // Теперь: «25 уже в архиве», убирать нечего — кнопки «убрать» нет
+    server.farArchivedStub = 25;
+    server.boardOver = { departureDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) };
+    byId('admin-tab-board').click();
+    await settle(80);
+    const body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    expect(body).toContain('25 уже в архиве');
+    expect(body).not.toContain('объявление на доске');
+    const btns = Array.from(win.document.querySelectorAll('#admin-list button')).map((b) => b.textContent);
+    expect(btns).not.toContain('убрать все такие с доски'); // убирать нечего
+    expect(btns).toContain('показать все такие'); // посмотреть архив — можно
+    server.farArchivedStub = 0;
+    server.boardOver = null;
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
     await settle(80);

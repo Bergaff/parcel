@@ -871,13 +871,11 @@ app.get('/api/admin/listings', async (c) => {
   // В очереди модерации помечаем повторы: одно и то же объявление пересылают
   // каждый день, и админ не должен держать в голове, что уже одобрил.
   if (isBoard) {
-    // farCount — сколько на доске объявлений с подозрительно далёкой датой
-    // (дальше 90 дней): кнопка «показать все такие» появляется, даже если
-    // сами объявления за пределами выборки
-    const farCount = boardOdd
-      ? items.length
-      : await countFarDepartures(c.env).catch(() => 0);
-    return c.json({ items: withOrigin, farCount });
+    // farCount — аномальные дата (дальше 90 дней) НА доске, farArchived —
+    // такие же уже в архиве: кнопка «убрать все такие» убирает только
+    // действующие, число не должно смешивать статусы
+    const far = await countFarDepartures(c.env).catch(() => ({ published: 0, archived: 0 }));
+    return c.json({ items: withOrigin, farCount: far.published, farArchived: far.archived });
   }
   const pendingTotal = await countPending(c.env);
   const annotated: Array<Record<string, unknown>> = [];
