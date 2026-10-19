@@ -58,6 +58,7 @@ const server = {
   replacedWith: null as { id: string; deleteId: string } | null,
   forumResetPosts: 0, // сколько раз админка сбрасывала счётчики канала
   forumStatsGets: 0, // сколько раз вкладка «канал» забирала статистику
+  boardOver: null as Loose | null, // override карточки вкладки «доска»
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
     {
@@ -186,7 +187,7 @@ function makeFetch(calls: string[]) {
           // pendingTotal — настоящее число очереди (COUNT), не длина списка
           return { body: { items, pruned: 1, ...(server.dupesPruned ? { dupesPruned: server.dupesPruned } : {}), ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
         }
-        return { body: { items: [listing()] } };
+        return { body: { items: [listing(server.boardOver ?? {})] } };
       }
       if (path === '/api/admin/mediakit-creds') {
         if (method === 'POST') {
@@ -775,6 +776,28 @@ describe('админка', () => {
     expect(server.forumResetPosts).toBe(posts0 + 1);
     expect(server.forumStatsGets).toBe(gets0 + 1);
     expect(text('toast')).toContain('Счётчики канала сброшены');
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «доска»: предупреждение о подозрительно далёкой дате выезда', async () => {
+    // «выезд 29 сентября 2027», добавлено 30 сентября 2026: в объявлении
+    // дата была без года и уже прошла — парсер подставил следующий год.
+    // Такие аномалии должны быть видны админу сразу на карточке
+    byId('admin-tab-board').click();
+    await settle(80);
+    let body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    expect(body).toContain('подозрительно далеко'); // фикстура: выезд 2030 годом
+    expect(body).toContain('парсер подставил следующий');
+    expect(body).toContain('редактироват');
+    // обычная дата через неделю — предупреждения нет
+    server.boardOver = { departureDate: new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) };
+    byId('admin-refresh').click();
+    await settle(80);
+    body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    expect(body).not.toContain('подозрительно далеко');
+    server.boardOver = null;
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
     await settle(80);

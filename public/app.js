@@ -883,6 +883,24 @@ function duplicateNote(l) {
   ]);
 }
 
+/* Подозрительно далёкая дата выезда: «выезд 29 сентября 2027», добавлено
+   30 сентября 2026 — в объявлении была дата без года, день уже прошёл, и
+   парсер подставил следующий (src/parser.ts: «если дата без года уже
+   прошла — предполагаем следующий год»). Видно и в очереди, и на доске:
+   поправьте дату кнопкой «редактировать». */
+function oddDepartureNote(l) {
+  if (!l.departureDate || l.recurring) return null; // расписание — дата не главная
+  const d = new Date(`${l.departureDate}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  const days = Math.round((d.getTime() - Date.now()) / 86400000);
+  if (days <= 90) return null; // дальше трёх месяцев — почти наверняка ошибка
+  const months = Math.max(2, Math.round(days / 30));
+  return el('p', { class: 'dup-warn dup-suspect' }, [
+    el('b', { text: `⚠️ Выезд через ${months} мес. — подозрительно далеко. ` }),
+    'Похоже на неверный год: в объявлении дата была без года и уже прошла — парсер подставил следующий. Проверьте и поправьте кнопку «редактировать» ниже на карточке.',
+  ]);
+}
+
 function adminCard(l, mode = 'pending') {
   const contact = contactInfo(l);
   const meta = [
@@ -956,6 +974,7 @@ function adminCard(l, mode = 'pending') {
       ].filter(Boolean);
   return el('article', { class: 'admin-card', 'data-id': l.id }, [
     duplicateNote(l),
+    oddDepartureNote(l),
     el('h3', { class: 'route-line' }, [
       l.fromCity,
       el('span', { class: 'r-arrow', text: '→' }),

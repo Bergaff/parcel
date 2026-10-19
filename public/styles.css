@@ -530,6 +530,9 @@ button { font-family: inherit; }
 }
 .dup-warn a { font-weight: 700; }
 .dup-similar { border-left-color: var(--line-strong); background: rgba(169, 158, 133, .12); }
+/* Подозрительно далёкая дата выезда: «выезд 29 сентября 2027» при
+   добавлении 30 сентября 2026 — год подставлен парсером */
+.dup-suspect { border-left-color: #b45309; background: rgba(217, 119, 6, .1); }
 .dup-why { color: var(--muted); }
 .admin-card .desc { margin: 8px 0; }
 .admin-contact { font-size: 14px; color: var(--ink-soft); margin: 0 0 12px; }
