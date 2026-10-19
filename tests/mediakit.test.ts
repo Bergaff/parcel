@@ -209,6 +209,7 @@ describe('страница и CSV', () => {
       { country: 'US', views: 10, share: 20.8 },
     ],
     dcViews: 13,
+    ownViews: 0,
     devices: [{ name: 'Телефон', views: 30, share: 62.5 }],
     os: [{ name: 'iOS', views: 18, share: 37.5 }],
     sources: [{ name: 'Telegram', views: 20, share: 41.7 }],

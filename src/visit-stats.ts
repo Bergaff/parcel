@@ -11,6 +11,7 @@
  * отдельно и тестируются юнитами без сети и базы.
  */
 import type { Env } from './types';
+import { plural } from './format';
 
 /* ------------------------------------------------------------------ */
 /* Классификация                                                       */
@@ -154,6 +155,9 @@ export function ensureStatTables(env: Env): Promise<void> {
         env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_stat_views_day ON stat_views(day)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_js (day TEXT NOT NULL, vid TEXT NOT NULL, PRIMARY KEY (day, vid))'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_bot_chats (chat_id TEXT PRIMARY KEY, last_seen TEXT NOT NULL)'),
+        // «свои» визиты: владелец сайта помечает себя в /mediakit, и его
+        // просмотры не попадают в цифры медиакита
+        env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_own (vid TEXT PRIMARY KEY, added_at TEXT NOT NULL)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)'),
         // боты работали с чатами и до появления статистики — не начинаем
         // счётчик с нуля, засеиваем из истории объявлений (idempotent)
@@ -169,6 +173,13 @@ export function ensureStatTables(env: Env): Promise<void> {
   return statTablesReady;
 }
 
+/**
+ * Куки «это мой браузер»: ставится в /mediakit кнопкой «Не считать мои визиты».
+ * По ней последующие просмотры этого браузера помечаются как свои — иначе
+ * vid пересчитывается каждый день (он зависит от даты) и пометка слетала бы.
+ */
+export const OWN_COOKIE = 'poputka_own';
+
 export interface PageViewInput {
   path: string;
   ip: string;
@@ -176,6 +187,8 @@ export interface PageViewInput {
   country: string | null;
   asOrg: string | null;
   referer: string | null;
+  /** true — браузер владельца (куки OWN_COOKIE): просмотр помечается как свой. */
+  own?: boolean;
 }
 
 /** Записать просмотр страницы (роботов тоже пишем — их считаем «отфильтрованными»). */
@@ -189,6 +202,12 @@ export async function trackPageView(env: Env, v: PageViewInput): Promise<void> {
   })();
   const ref = ua.bot ? { group: null, host: null } : classifyRef(v.referer, siteHost);
   const vid = ua.bot ? 'bot' : await visitorId(v.ip, v.ua, day, await ensureSalt(env));
+  // браузер владельца помечен кукой — vid дня уходит в «свои», и все агрегаты
+  // медиакита считаются без этих просмотров
+  if (!ua.bot && v.own) {
+    await env.DB.prepare('INSERT OR IGNORE INTO stat_own (vid, added_at) VALUES (?, ?)')
+      .bind(vid, now.toISOString()).run();
+  }
   await env.DB.prepare(
     `INSERT INTO stat_views (ts, day, vid, kind, bot, country, device, os, dc, ref_group, ref_host)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -198,6 +217,29 @@ export async function trackPageView(env: Env, v: PageViewInput): Promise<void> {
     isDatacenterOrg(v.asOrg) ? 1 : 0,
     ref.group ?? null, ref.host ?? null
   ).run();
+}
+
+/**
+ * Пометить (или снять пометку) визиты этого браузера как «свои».
+ * Возвращает vid дня — его же исключают агрегаты. Роботов не помечаем.
+ */
+export async function setOwnVisitor(
+  env: Env,
+  v: { ip: string; ua: string },
+  own: boolean
+): Promise<string | null> {
+  const ua = classifyUserAgent(v.ua);
+  if (ua.bot) return null;
+  await ensureStatTables(env);
+  const day = new Date().toISOString().slice(0, 10);
+  const vid = await visitorId(v.ip, v.ua, day, await ensureSalt(env));
+  if (own) {
+    await env.DB.prepare('INSERT OR IGNORE INTO stat_own (vid, added_at) VALUES (?, ?)')
+      .bind(vid, new Date().toISOString()).run();
+  } else {
+    await env.DB.prepare('DELETE FROM stat_own WHERE vid = ?').bind(vid).run();
+  }
+  return vid;
 }
 
 /** Маячок из app.js: браузер живой. Отмечает посетителя дня как подтверждённого. */
@@ -238,6 +280,11 @@ export interface AudienceDaily { day: string; uniques: number; views: number; bo
 /** Просмотры живой аудитории: посетитель в этот день подтверждён JS-маячком. */
 const LIVE_JOIN = 'JOIN stat_js j ON j.day = v.day AND j.vid = v.vid';
 
+/* Без «своих» визитов: владелец сайта заходит на доску сам, и эти просмотры
+   не должны попадать ни в медиакит, ни в оценку поискового трафика
+   (повод — «РБ это я мог быть» в разборе Search Console). */
+const NOT_OWN = 'AND v.vid NOT IN (SELECT vid FROM stat_own)';
+
 export interface AudienceStats {
   days: number;
   generatedAt: string;
@@ -253,6 +300,8 @@ export interface AudienceStats {
   daily: AudienceDaily[];
   countries: Array<{ country: string; views: number; share: number }>;
   dcViews: number;
+  /** Сколько просмотров исключено как «свои» (владелец сайта). */
+  ownViews: number;
   devices: Array<{ name: string; views: number; share: number }>;
   os: Array<{ name: string; views: number; share: number }>;
   sources: Array<{ name: string; views: number; share: number }>;
@@ -277,42 +326,47 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
   const dayList = lastDays(days);
   const from = dayList[0]!;
 
-  const [liveByDay, rawByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, botRes] = await Promise.all([
+  // порядок важен: ownRes — счётчик «своих» просмотров, botRes — последний (чат-боты)
+  const [liveByDay, rawByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, ownRes, botRes] = await Promise.all([
     env.DB.prepare(
       `SELECT v.day, COUNT(DISTINCT v.vid) AS uniques, COUNT(*) AS views
-       FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY v.day`
+       FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY v.day`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT day, COUNT(*) AS total, SUM(bot) AS bots FROM stat_views WHERE day >= ? GROUP BY day`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT COALESCE(v.country, '—') AS country, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN}
        GROUP BY country ORDER BY n DESC LIMIT 15`
     ).bind(from).all(),
-    env.DB.prepare(`SELECT COUNT(*) AS n FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.dc = 1`).bind(from).first(),
+    env.DB.prepare(`SELECT COUNT(*) AS n FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} AND v.dc = 1`).bind(from).first(),
     env.DB.prepare(
       `SELECT COALESCE(v.device, '—') AS name, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY device ORDER BY n DESC`
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY device ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT COALESCE(v.os, '—') AS name, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY os ORDER BY n DESC`
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY os ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT v.ref_group AS name, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.ref_group IS NOT NULL AND v.ref_group != 'Внутренние'
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} AND v.ref_group IS NOT NULL AND v.ref_group != 'Внутренние'
        GROUP BY v.ref_group ORDER BY n DESC`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT v.ref_host AS host, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 AND v.ref_host IS NOT NULL
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} AND v.ref_host IS NOT NULL
        GROUP BY v.ref_host ORDER BY n DESC LIMIT 10`
     ).bind(from).all(),
     env.DB.prepare(
       `SELECT v.kind AS name, COUNT(*) AS n FROM stat_views v
-       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 GROUP BY v.kind ORDER BY n DESC`
+       ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY v.kind ORDER BY n DESC`
     ).bind(from).all(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM stat_views v
+       WHERE v.day >= ? AND v.bot = 0 AND v.vid IN (SELECT vid FROM stat_own)`
+    ).bind(from).first(),
     // группы в Telegram имеют отрицательные id, личные диалоги — положительные:
     // «чатов, с которыми работал бот» ≠ «группы-источники» (их показывают в админке)
     env.DB.prepare(
@@ -365,6 +419,7 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
     countries: withShare(((geo.results ?? []) as unknown as Array<{ country: string; n: number }>)
       .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, views),
     dcViews: Number((dcRes as { n: number } | null)?.n ?? 0),
+    ownViews: Number((ownRes as { n: number } | null)?.n ?? 0),
     devices: withShare(((devRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
       .map((r) => ({ name: String(r.name), views: Number(r.n) })), (r) => r.views, views),
     os: withShare(((osRes.results ?? []) as unknown as Array<{ name: string; n: number }>)
@@ -443,6 +498,8 @@ function sectionTable(title: string, rows: Array<{ a: string; b: string; c: stri
 export interface AudiencePageOpts {
   audience: AudienceStats;
   board: { onBoard: number; last30Arrived: number; last30Cities: number; viewsTotal: number } | null;
+  /** Этот браузер помечен как «свой» (куки OWN_COOKIE). */
+  ownExcluded?: boolean;
 }
 
 /** Страница «Статистика аудитории» — как в примере биржи. */
@@ -486,6 +543,17 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   const rawNote = a.views > 0
     ? `<p class="plain">Все цифры на странице — только живая аудитория: посетители, чей браузер исполнил JavaScript. Сырых просмотров за период — ${a.rawViews}, из них живых — ${a.views}; остальные — роботы и скрипты (${a.botsFiltered} отфильтровано по User-Agent, часть идёт с браузерными User-Agent и отсечена маячком) и посетители с выключенным JavaScript.</p>`
     : `<p class="plain">За период не зафиксировано живых посетителей (браузер с JavaScript) — показывать нечего. Сырых просмотров — ${a.rawViews}, роботов отфильтровано — ${a.botsFiltered}.</p>`;
+  // «не считать меня»: владелец сайта заходит на доску сам, и без пометки его
+  // просмотры выглядят как аудитория (повод — «РБ это я мог быть» в разборе
+  // Search Console). Цифры выше уже без помеченных визитов.
+  const ownNote = a.ownViews > 0 || opts.ownExcluded
+    ? `<p class="plain">Из цифр исключены помеченные визиты владельца${a.ownViews > 0 ? `: ${a.ownViews} ${plural(a.ownViews, 'просмотр', 'просмотра', 'просмотров')} за период` : ''}. ${
+        opts.ownExcluded
+          ? 'Этот браузер помечен — новые просмотры тоже не считаются.'
+          : 'Кнопка «Не считать мои визиты» выше помечает этот браузер.'
+      }</p>`
+    : '';
+
   const devices = sectionTable('Устройства', a.devices.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
   const os = sectionTable('Операционные системы', a.os.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
   const sources = sectionTable('Источники трафика', a.sources.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
@@ -539,6 +607,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
     <div class="media-actions">
       <a href="/mediakit/export.csv?days=${a.days}">Скачать CSV</a>
       <button type="button" onclick="window.print()">Печать / PDF</button>
+      <form method="post" action="/mediakit/own-visits?days=${a.days}" style="display:inline"><button type="submit" title="Помеченные визиты не попадают в цифры на этой странице">${opts.ownExcluded ? 'Снова считать мои визиты' : 'Не считать мои визиты'}</button></form>
       <form method="post" action="/mediakit/logout" style="display:inline"><button type="submit">Выйти</button></form>
     </div>
   </div>
@@ -546,6 +615,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
 
   <div class="media-grid">${tiles}</div>
   ${rawNote}
+  ${ownNote}
 
   ${board}
 

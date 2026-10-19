@@ -6,7 +6,7 @@ import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
 import {
-  confirmJsVisit, gatherVisitStats, isTrackablePage, pruneVisitStats, renderAudiencePage,
+  confirmJsVisit, gatherVisitStats, isTrackablePage, OWN_COOKIE, pruneVisitStats, renderAudiencePage, setOwnVisitor,
   renderDailyCsv, trackPageView,
 } from './visit-stats';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
@@ -80,6 +80,9 @@ app.use('*', async (c, next) => {
       country: cf?.country ?? null,
       asOrg: cf?.asOrganization ?? null,
       referer: c.req.header('referer') ?? null,
+      // браузер владельца помечен кукой из /mediakit — такие просмотры
+      // не попадают в цифры медиакита
+      own: getCookie(c.req.raw, OWN_COOKIE) === '1',
     }));
   } catch { /* статистика не должна ломать сайт */ }
 });
@@ -650,7 +653,9 @@ app.get('/mediakit', async (c) => {
       viewsTotal: s.viewsTotal,
     })).catch(() => null);
     const audience = await gatherVisitStats(c.env, days);
-    return c.html(renderAudiencePage({ audience, board }));
+    return c.html(renderAudiencePage({
+      audience, board, ownExcluded: getCookie(c.req.raw, OWN_COOKIE) === '1',
+    }));
   } catch (e) {
     console.error('mediakit failed', e);
     return c.html(renderLoginPage('Статистика временно недоступна — попробуйте позже.'), 503);
@@ -669,6 +674,26 @@ app.get('/mediakit/export.csv', async (c) => {
     'Content-Disposition': `attachment; filename="poputka-stats-${days}d.csv"`,
     'Cache-Control': 'no-store',
   });
+});
+
+/* «Не считать меня»: помечаем визиты этого браузера как свои — цифры
+   медиакита перестают включать собственные заходы владельца на доску.
+   Пометка живёт в базе (vid дня), а куки продлевает её на следующие дни. */
+app.post('/mediakit/own-visits', async (c) => {
+  c.header('X-Robots-Tag', 'noindex, nofollow');
+  c.header('Cache-Control', 'no-store');
+  const authed = await isMediaAuthed(getCookie(c.req.raw, 'media'), c.env);
+  if (!authed) return c.redirect('/mediakit');
+  // переключаем: если куки стоит — снимаем пометку, иначе ставим
+  const nowOwn = getCookie(c.req.raw, OWN_COOKIE) !== '1';
+  await setOwnVisitor(c.env, { ip: getIp(c), ua: c.req.header('user-agent') ?? '' }, nowOwn)
+    .catch(() => undefined);
+  const daysRaw = Number(c.req.query('days') ?? 7);
+  const days = [1, 7, 30].includes(daysRaw) ? daysRaw : 7;
+  c.header('Set-Cookie', nowOwn
+    ? `${OWN_COOKIE}=1; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`
+    : `${OWN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure`);
+  return c.redirect(`/mediakit?days=${days}`, 303);
 });
 
 app.post('/mediakit/login', async (c) => {
