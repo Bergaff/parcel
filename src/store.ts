@@ -237,6 +237,26 @@ export async function pruneStalePending(env: Env): Promise<number> {
 }
 
 /**
+ * Убрать с доски объявления с подозрительно далёкой датой выезда (дальше
+ * horizonDays): почти наверняка парсер подставил следующий год дате без
+ * года — «выезд 29 сентября», добавлено 30 сентября → 2027. Уходят в
+ * архив, кнопка «на доску» возвращает; published_at сохраняется.
+ * Регулярные рейсы (recurring) не трогаем: расписание живёт дальше даты.
+ * Возвращает число убранных.
+ */
+export async function archiveFarDepartures(env: Env, horizonDays = 90): Promise<number> {
+  await ensureRecurringColumn(env);
+  const days = Math.max(1, Math.floor(horizonDays));
+  const res = await env.DB.prepare(
+    `UPDATE listings SET status = 'expired'
+     WHERE status = 'published' AND recurring IS NULL
+       AND departure_date IS NOT NULL
+       AND departure_date > date('now', '+${days} days')`
+  ).run();
+  return res.meta.changes ?? 0;
+}
+
+/**
  * Вычистить из очереди модерации явные повторы: копию объявления, которое
  * уже на доске, и лишние копии внутри самой очереди (чат с автоперепостом
  * заводил по 20 одинаковых карточек). Остаётся первая копия, повторные

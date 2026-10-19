@@ -886,14 +886,19 @@ function duplicateNote(l) {
 /* Подозрительно далёкая дата выезда: «выезд 29 сентября 2027», добавлено
    30 сентября 2026 — в объявлении была дата без года, день уже прошёл, и
    парсер подставил следующий (src/parser.ts: «если дата без года уже
-   прошла — предполагаем следующий год»). Видно и в очереди, и на доске:
-   поправьте дату кнопкой «редактировать». */
-function oddDepartureNote(l) {
-  if (!l.departureDate || l.recurring) return null; // расписание — дата не главная
+   прошла — предполагаем следующий год»). Дальше 90 дней — почти наверняка
+   ошибка; регулярные рейсы с расписанием не считаются. */
+function oddDepartureDays(l) {
+  if (!l.departureDate || l.recurring) return null;
   const d = new Date(`${l.departureDate}T00:00:00`);
   if (Number.isNaN(d.getTime())) return null;
   const days = Math.round((d.getTime() - Date.now()) / 86400000);
-  if (days <= 90) return null; // дальше трёх месяцев — почти наверняка ошибка
+  return days > 90 ? days : null;
+}
+
+function oddDepartureNote(l) {
+  const days = oddDepartureDays(l);
+  if (days == null) return null;
   const months = Math.max(2, Math.round(days / 30));
   return el('p', { class: 'dup-warn dup-suspect' }, [
     el('b', { text: `⚠️ Выезд через ${months} мес. — подозрительно далеко. ` }),
@@ -1208,6 +1213,41 @@ function renderAdminItems() {
   const listEl = $('#admin-list');
   listEl.replaceChildren();
   if (adminTab === 'board') listEl.append(adminBoardSearch());
+  // На доске — предложение убрать разом все объявления с аномальной датой
+  // (дальше 90 дней): на карточках уже есть предупреждения, но когда таких
+  // много, удобнее одна кнопка, чем править каждую
+  if (adminTab === 'board') {
+    const oddCount = adminItems.filter((l) => oddDepartureDays(l) != null).length;
+    if (oddCount > 0) {
+      listEl.append(el('section', { class: 'admin-card' }, [
+        el('h3', {
+          class: 'match-history-head',
+          text: `Подозрительно далёкая дата выезда: ${oddCount} ${plural(oddCount, 'объявление', 'объявления', 'объявлений')}`,
+        }),
+        el('p', {
+          class: 'admin-contact',
+          text: 'Дата выезда дальше 90 дней — почти наверняка парсер подставил следующий год дате без года. Можно убрать их с доски разом: уйдут в архив, кнопка «на доску» на карточке вернёт любое.',
+        }),
+        el('div', { class: 'admin-card-actions' }, [
+          el('button', {
+            class: 'btn btn-ink btn-sm', type: 'button', text: 'убрать все такие с доски',
+            onclick: async () => {
+              if (!confirm('Убрать с доски все объявления с датой выезда дальше 90 дней? Уйдут в архив — вернуть можно кнопкой «на доску» на карточке.')) return;
+              try {
+                const r = await adminApi('/api/admin/board/archive-far', { method: 'POST' });
+                if (!r.ok) throw new Error();
+                const data = await r.json();
+                toast(`Убрано в архив: ${data.archived ?? 0}. Вернуть можно кнопкой «на доску».`);
+                await loadAdmin();
+              } catch {
+                toast('Не получилось убрать. Попробуйте ещё раз.');
+              }
+            },
+          }),
+        ]),
+      ]));
+    }
+  }
   if (adminItems.length === 0) {
     listEl.append(el('p', {
       class: 'empty-note',

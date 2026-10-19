@@ -59,6 +59,7 @@ const server = {
   forumResetPosts: 0, // сколько раз админка сбрасывала счётчики канала
   forumStatsGets: 0, // сколько раз вкладка «канал» забирала статистику
   boardOver: null as Loose | null, // override карточки вкладки «доска»
+  archiveFarPosts: 0, // сколько раз админка убирала с доски аномальные даты
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
     {
@@ -274,6 +275,12 @@ function makeFetch(calls: string[]) {
       if (path === '/api/admin/forum-stats/reset' && method === 'POST') {
         server.forumResetPosts += 1;
         return { body: { ok: true } };
+      }
+      if (path === '/api/admin/board/archive-far' && method === 'POST') {
+        server.archiveFarPosts += 1;
+        // после архивирования доска чистая: ближайшая дата вместо 2030 года
+        server.boardOver = { departureDate: new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10) };
+        return { body: { ok: true, archived: 1 } };
       }
       const mKey = (contact: string) => {
         const digits = String(contact).replace(/\D/g, '');
@@ -797,6 +804,36 @@ describe('админка', () => {
     await settle(80);
     body = win.document.querySelector('#admin-list')?.textContent ?? '';
     expect(body).not.toContain('подозрительно далеко');
+    server.boardOver = null;
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «доска»: массовое удаление объявлений с аномальной датой', async () => {
+    // фикстура — выезд 2030 годом: баннер предлагает убрать все такие
+    // объявления разом; сервер архивирует все найденные, а не только видимые
+    byId('admin-tab-board').click();
+    await settle(80);
+    const btn = () => Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'убрать все такие с доски') as HTMLButtonElement | undefined;
+    expect(btn()).toBeTruthy();
+    expect(win.document.querySelector('#admin-list')?.textContent ?? '')
+      .toContain('Подозрительно далёкая дата выезда: 1 объявление');
+    // передумали в подтверждении — на сервер ничего не уходит
+    win.confirm = () => false;
+    const posts0 = server.archiveFarPosts;
+    btn()!.click();
+    await settle(80);
+    expect(server.archiveFarPosts).toBe(posts0);
+    // подтвердили — массовая архивация, доска перерисовалась чистой
+    win.confirm = () => true;
+    btn()!.click();
+    await settle(120);
+    expect(server.archiveFarPosts).toBe(posts0 + 1);
+    expect(text('toast')).toContain('Убрано в архив: 1');
+    expect(win.document.querySelector('#admin-list')?.textContent ?? '')
+      .not.toContain('подозрительно далеко');
     server.boardOver = null;
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
