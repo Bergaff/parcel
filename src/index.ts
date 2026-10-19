@@ -19,7 +19,8 @@ import { SITE_VERSION } from './version';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
   buildRoutePage, buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml,
-  cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
+  cityAliasSlug, cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias,
+  routeOgSpec, routePathFor,
 } from './seo-routes';
 import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, buildMonthStatsPage, siteOrigin, STATIC_PAGES } from './pages';
 import { flushIndexNow, getIndexNowKey, KEY_LOCATION_PATH } from './indexnow';
@@ -519,8 +520,15 @@ app.get('/itogi/:month', async (c) => {
 
 app.get('/gorod/:slug', async (c) => {
   const origin = siteOrigin(c.env, c.req.url);
-  const html = await buildCityPage(c.env, c.req.param('slug'), origin);
-  if (!html) return c.notFound();
+  const slug = c.req.param('slug');
+  const html = await buildCityPage(c.env, slug, origin);
+  if (!html) {
+    // местное написание города: /gorod/kyiv → /gorod/kiev. Честный 301,
+    // а не вторая страница — иначе дубли и растерянные позиции
+    const canonical = cityAliasSlug(slug);
+    if (canonical) return c.redirect(`/gorod/${canonical}`, 301);
+    return c.notFound();
+  }
   c.header('Cache-Control', 'public, max-age=0, s-maxage=600');
   return c.html(html);
 });

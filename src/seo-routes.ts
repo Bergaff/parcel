@@ -103,6 +103,117 @@ export const SEO_ROUTES: SeoRoute[] = [
   { from: 'Гродно', to: 'Вильнюс', slug: 'grodno-vilnyus' },
 ];
 
+/**
+ * Местные названия городов: украинские, белорусские, польские, литовские.
+ *
+ * Зачем: Search Console показывает запросы на местных языках — «попутники
+ * львів мостиска» (позиция 51), «попутчики киев» (53), «попутники львів
+ * володимир» (57), «попутники пісочна львів» (69). Сайт русский, и Google не
+ * связывает его с этими запросами. Теперь местное название (а) написано на
+ * странице города и (б) ведёт на неё честным 301 с местного слага
+ * (/gorod/kyiv → /gorod/kiev) — дублей страниц не появляется.
+ */
+export const CITY_ALT_NAMES: Record<string, Array<[string, string]>> = {
+  'Киев': [['укр.', 'Київ'], ['англ.', 'Kyiv']],
+  'Львов': [['укр.', 'Львів'], ['польск.', 'Lwów'], ['англ.', 'Lviv']],
+  'Харьков': [['укр.', 'Харків'], ['англ.', 'Kharkiv']],
+  'Одесса': [['укр.', 'Одеса'], ['англ.', 'Odesa']],
+  'Ивано-Франковск': [['укр.', 'Івано-Франківськ'], ['англ.', 'Ivano-Frankivsk']],
+  'Черновцы': [['укр.', 'Чернівці']],
+  'Тернополь': [['укр.', 'Тернопіль']],
+  'Ровно': [['укр.', 'Рівне']],
+  'Винница': [['укр.', 'Вінниця']],
+  'Луцк': [['укр.', 'Луцьк']],
+  'Николаев': [['укр.', 'Миколаїв']],
+  'Хмельницкий': [['укр.', 'Хмельницький']],
+  'Чернигов': [['укр.', 'Чернігів']],
+  'Запорожье': [['укр.', 'Запоріжжя']],
+  'Днепр': [['укр.', 'Дніпро']],
+  'Мостиска': [['укр.', 'Мостиська']],
+  'Минск': [['бел.', 'Мінск'], ['англ.', 'Minsk']],
+  'Гродно': [['бел.', 'Гродна']],
+  'Брест': [['бел.', 'Брэст']],
+  'Витебск': [['бел.', 'Віцебск']],
+  'Могилёв': [['бел.', 'Магілёў']],
+  'Барановичи': [['бел.', 'Баранавічы']],
+  'Бобруйск': [['бел.', 'Бабруйск']],
+  'Варшава': [['польск.', 'Warszawa'], ['англ.', 'Warsaw']],
+  'Краков': [['польск.', 'Kraków'], ['англ.', 'Krakow']],
+  'Гданьск': [['польск.', 'Gdańsk'], ['англ.', 'Gdansk']],
+  'Вроцлав': [['польск.', 'Wrocław'], ['англ.', 'Wroclaw']],
+  'Белосток': [['польск.', 'Białystok'], ['англ.', 'Bialystok']],
+  'Катовице': [['польск.', 'Katowice']],
+  'Познань': [['польск.', 'Poznań']],
+  'Лодзь': [['польск.', 'Łódź']],
+  'Вильнюс': [['лит./англ.', 'Vilnius']],
+  'Прага': [['чеш.', 'Praha'], ['англ.', 'Prague']],
+  'Вена': [['нем.', 'Wien'], ['англ.', 'Vienna']],
+  'Кёльн': [['нем.', 'Köln']],
+  'Милан': [['итал.', 'Milano'], ['англ.', 'Milan']],
+  'Париж': [['фр.', 'Paris']],
+};
+
+/** «Київ (укр.), Lwów (польск.)» — строка для страницы города. */
+export function cityAltNamesText(city: string): string | null {
+  const alts = CITY_ALT_NAMES[city];
+  if (!alts || alts.length === 0) return null;
+  return alts.map(([lang, name]) => `${escapeHtml(name)} (${lang})`).join(', ');
+}
+
+/**
+ * Слаг местного названия → канонический слаг города: /gorod/kyiv → /gorod/kiev.
+ * Null — редирект не нужен (слаг и так канонический, неизвестен или занят
+ * другим городом: редиректить на чужую страницу нельзя).
+ */
+export function cityAliasSlug(slug: string): string | null {
+  const map = cityAliasMap();
+  return map.get(slug.toLowerCase()) ?? null;
+}
+
+let aliasMapCache: Map<string, string> | null = null;
+
+function cityAliasMap(): Map<string, string> {
+  if (aliasMapCache) return aliasMapCache;
+  const canonical = new Set(Object.keys(CITY_COUNTRY).map((c) => citySlug(c)));
+  const map = new Map<string, string>();
+  for (const [city, alts] of Object.entries(CITY_ALT_NAMES)) {
+    const canon = citySlug(city);
+    // страница города есть только у известных нам городов — иначе 301 приведёт
+    // на 404, а это хуже честного 404 сразу
+    if (!canon || !canonical.has(canon)) continue;
+    for (const [, alt] of alts) {
+      const s = citySlug(alt);
+      if (!s || s === canon || canonical.has(s)) continue;
+      map.set(s, canon);
+    }
+  }
+  aliasMapCache = map;
+  return map;
+}
+
+/** Все написания города: каноническое плюс местные. */
+function citySpellings(city: string): string[] {
+  const alts = CITY_ALT_NAMES[city];
+  return alts ? [city, ...alts.map(([, a]) => a)] : [city];
+}
+
+/**
+ * Слаги пары из местных написаний («kyiv-lviv», «warszawa-minsk») — кроме
+ * канонического. Нужны, чтобы такой адрес редиректил на настоящую страницу
+ * маршрута, а не отдавал 404.
+ */
+export function routeAltSlugs(from: string, to: string): string[] {
+  const canon = routeSlug(from, to);
+  const out: string[] = [];
+  for (const a of citySpellings(from)) {
+    for (const b of citySpellings(to)) {
+      const s = routeSlug(a, b);
+      if (s && s !== canon) out.push(s);
+    }
+  }
+  return out;
+}
+
 /** Страна города (для текста страниц). */
 const CITY_COUNTRY: Record<string, { name: string; inst: string }> = {
   'Варшава': { name: 'Польша', inst: 'Польшей' },
@@ -114,12 +225,27 @@ const CITY_COUNTRY: Record<string, { name: string; inst: string }> = {
   'Тересполь': { name: 'Польша', inst: 'Польшей' },
   'Бяла': { name: 'Польша', inst: 'Польшей' },
   'Познань': { name: 'Польша', inst: 'Польшей' },
+  // Города коридора, которых не хватало: без них страница города не подписывала
+  // страну, а местное написание не получало честного 301
+  'Вроцлав': { name: 'Польша', inst: 'Польшей' },
+  'Лодзь': { name: 'Польша', inst: 'Польшей' },
+  'Жешув': { name: 'Польша', inst: 'Польшей' },
   'Львов': { name: 'Украина', inst: 'Украиной' },
   'Киев': { name: 'Украина', inst: 'Украиной' },
   'Одесса': { name: 'Украина', inst: 'Украиной' },
   'Харьков': { name: 'Украина', inst: 'Украиной' },
   'Ивано-Франковск': { name: 'Украина', inst: 'Украиной' },
   'Черновцы': { name: 'Украина', inst: 'Украиной' },
+  'Тернополь': { name: 'Украина', inst: 'Украиной' },
+  'Ровно': { name: 'Украина', inst: 'Украиной' },
+  'Винница': { name: 'Украина', inst: 'Украиной' },
+  'Луцк': { name: 'Украина', inst: 'Украиной' },
+  'Николаев': { name: 'Украина', inst: 'Украиной' },
+  'Хмельницкий': { name: 'Украина', inst: 'Украиной' },
+  'Чернигов': { name: 'Украина', inst: 'Украиной' },
+  'Запорожье': { name: 'Украина', inst: 'Украиной' },
+  'Днепр': { name: 'Украина', inst: 'Украиной' },
+  'Мостиска': { name: 'Украина', inst: 'Украиной' },
   'Минск': { name: 'Беларусь', inst: 'Беларусью' },
   'Брест': { name: 'Беларусь', inst: 'Беларусью' },
   'Гродно': { name: 'Беларусь', inst: 'Беларусью' },
@@ -127,6 +253,8 @@ const CITY_COUNTRY: Record<string, { name: string; inst: string }> = {
   'Брузги': { name: 'Беларусь', inst: 'Беларусью' },
   'Витебск': { name: 'Беларусь', inst: 'Беларусью' },
   'Могилёв': { name: 'Беларусь', inst: 'Беларусью' },
+  'Барановичи': { name: 'Беларусь', inst: 'Беларусью' },
+  'Бобруйск': { name: 'Беларусь', inst: 'Беларусью' },
   'Вильнюс': { name: 'Литва', inst: 'Литвой' },
   'Каунас': { name: 'Литва', inst: 'Литвой' },
   'Клайпеда': { name: 'Литва', inst: 'Литвой' },
@@ -422,6 +550,7 @@ async function routeIndex(env: Env, force = false): Promise<RouteIndex> {
   const bySlug = new Map<string, RouteEntry>();
   const byPair = new Map<string, string>();
   const aliasBySlug = new Map<string, string>();
+  const aliasCandidates: Array<[string, string]> = [];
 
   // 1) витрина: адреса уже в индексе, их слаги не меняем
   for (const r of SEO_ROUTES) {
@@ -431,6 +560,7 @@ async function routeIndex(env: Env, force = false): Promise<RouteIndex> {
     // редиректим на витринный, а не отдаём 404 и не делаем вторую страницу
     const auto = routeSlug(r.from, r.to);
     if (auto && auto !== r.slug) aliasBySlug.set(auto, r.slug);
+    for (const alt of routeAltSlugs(r.from, r.to)) aliasCandidates.push([alt, r.slug]);
   }
 
   // 2) живые пары из базы — только те, которых нет в витрине
@@ -464,6 +594,12 @@ async function routeIndex(env: Env, force = false): Promise<RouteIndex> {
   for (const stat of cities) {
     const slug = citySlug(stat.city);
     if (slug) cityBySlug.set(slug, { city: stat.city, stat });
+  }
+
+  // 4) местные написания маршрутов: «kyiv-lviv» → «kiev-lvov». Проверяем
+  //    после шага 2, чтобы не увести адрес, который уже занят живой страницей
+  for (const [alt, canonicalSlug] of aliasCandidates) {
+    if (!bySlug.has(alt) && !aliasBySlug.has(alt)) aliasBySlug.set(alt, canonicalSlug);
   }
 
   indexCache = { bySlug, byPair, aliasBySlug, cityBySlug, pairs, cities, at: Date.now() };
@@ -811,6 +947,8 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
     .slice(0, 12);
 
   const active = stat?.active ?? outItems.length + inItems.length;
+  // местные названия — для запросов на украинском/белорусском/польском
+  const altNames = cityAltNamesText(city);
   const gen = genitiveCity(city);
   const acc = accusativeCity(city);
   // «Попутки Гродно» — как этот город ищут («попутка гродно», «попутки гродно»):
@@ -848,7 +986,7 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
   const body = `    ${crumbs(origin, trail)}
     <p class="doc-date">город на доске</p>
     <h1 class="page-title">Попутки ${escapeHtml(city)}: передать посылку ${escapeHtml(fromCity(city))} и в ${escapeHtml(acc)}</h1>
-    <p class="route-cities">${country ? escapeHtml(country) + ' · ' : ''}${active} ${plural(active, 'заявка', 'заявки', 'заявок')} сейчас${stat?.lastmod ? ' · обновлено ' + fmtDayShort(stat.lastmod) : ''}</p>
+    <p class="route-cities">${country ? escapeHtml(country) + ' · ' : ''}${active} ${plural(active, 'заявка', 'заявки', 'заявок')} сейчас${stat?.lastmod ? ' · обновлено ' + fmtDayShort(stat.lastmod) : ''}${altNames ? ` · другие названия: ${altNames}` : ''}</p>
 
     <p class="lead">${cityIntro(city, country, active, slug)}</p>
 

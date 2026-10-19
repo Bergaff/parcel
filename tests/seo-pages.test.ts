@@ -38,8 +38,10 @@ import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap, buildRoutePage,
   buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml, cityPathFor, clearRouteIndexCache,
   footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routeDescription,
-  routePathFor, routeTitle, SEO_ROUTES, tripBlock, tripFaq,
+  routeAltSlugs, routePathFor, routeTitle, SEO_ROUTES, tripBlock, tripFaq,
 } from '../src/seo-routes';
+import { cityAliasSlug, cityAltNamesText } from '../src/seo-routes';
+import { normalizeCity } from '../src/parser';
 import { buildHomePage } from '../src/pages';
 import { citySlug, routeSlug } from '../src/seo';
 import { SITE_VERSION } from '../src/version';
@@ -241,6 +243,66 @@ describe('блок «Сколько ехать» на странице марш�
     expect(html).toContain('примерно 1150 км');
     expect(html).toContain('ч за рулём');
     expect(tripFaq('Вроцлав', 'Минск')![1]).toContain('1150 км');
+  });
+});
+
+/* Местные названия городов: запросы «попутники львів мостиска» (позиция 51),
+   «попутчики киев» (53), «попутники львів володимир» (57) из Search Console. */
+describe('местные названия городов', () => {
+  it('украинское/белорусское написание приводит к каноническому городу', () => {
+    expect(normalizeCity('Київ')).toBe('Киев');
+    expect(normalizeCity('Львів')).toBe('Львов');
+    expect(normalizeCity('Мінск')).toBe('Минск');
+    expect(normalizeCity('Гродна')).toBe('Гродно');
+    expect(normalizeCity('Мостиська')).toBe('Мостиска');
+  });
+
+  it('слаг местного названия ведёт на каноническую страницу (301)', () => {
+    expect(cityAliasSlug('kyiv')).toBe('kiev'); // англ. Kyiv
+    expect(cityAliasSlug('kiiv')).toBe('kiev'); // укр. Київ транслитом
+    expect(cityAliasSlug('lviv')).toBe('lvov'); // укр. Львів и англ. Lviv
+    expect(cityAliasSlug('grodna')).toBe('grodno'); // бел. Гродна
+    expect(cityAliasSlug('warszawa')).toBe('varshava');
+    expect(cityAliasSlug('warsaw')).toBe('varshava');
+    expect(cityAliasSlug('wroclaw')).toBe('vrotslav');
+  });
+
+  it('канонический слаг и неизвестный — без редиректа', () => {
+    expect(cityAliasSlug('kiev')).toBeNull();
+    expect(cityAliasSlug('minsk')).toBeNull(); // «Мінск» и «Minsk» транслитом и так minsk
+    expect(cityAliasSlug('gdansk')).toBeNull(); // «Gdansk» = канонический слаг
+    expect(cityAliasSlug('netu')).toBeNull();
+    expect(cityAliasSlug('moskva')).toBeNull();
+  });
+
+  it('редирект не ведёт на чужую страницу города', () => {
+    // «Praha» — это Прага, а не чей-то ещё слаг; collisions быть не должно
+    expect(cityAliasSlug('praha')).toBe('praga');
+    expect(cityAliasSlug('vena')).toBeNull();
+  });
+
+  it('местные написания видны на странице города', async () => {
+    const html = await buildCityPage(env, 'kiev', ORIGIN);
+    expect(html).toContain('другие названия: Київ (укр.)');
+    const lvov = await buildCityPage(env, 'lvov', ORIGIN);
+    expect(lvov).toContain('Львів (укр.)');
+    expect(lvov).toContain('Lwów (польск.)');
+  });
+
+  it('нет местного названия — строки нет', () => {
+    expect(cityAltNamesText('Забайкальск')).toBeNull();
+  });
+
+  it('слаги маршрутов из местных написаний — алиасы витринных страниц', () => {
+    expect(routeAltSlugs('Киев', 'Львов')).toContain('kyiv-lviv');
+    expect(routeAltSlugs('Варшава', 'Минск')).toContain('warszawa-minsk');
+    // канонического слага в списке нет — он и так страница
+    expect(routeAltSlugs('Киев', 'Львов')).not.toContain('kiev-lvov');
+  });
+
+  it('алиас маршрута резолвится в витринный слаг', async () => {
+    expect(await resolveRouteAlias(env, 'kyiv-lviv')).toBe('kiev-lvov');
+    expect(await resolveRouteAlias(env, 'warszawa-minsk')).toBe('varshava-minsk');
   });
 });
 
