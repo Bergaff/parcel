@@ -30,6 +30,7 @@ import {
   type Crumb,
 } from './seo';
 import { renderRowHtml } from './ssr';
+import { tripInfo } from './geo';
 import { fromCity, genitiveCity, accusativeCity, inCountry } from './ru';
 
 export interface SeoRoute {
@@ -565,6 +566,52 @@ function cityFaq(city: string, seed: string): Array<[string, string]> {
 }
 
 /* ------------------------------------------------------------------ */
+/**
+ * Блок «Сколько ехать»: километраж, время в пути и пункты пропуска.
+ *
+ * Нужен, потому что Google показывает страницы маршрутов по запросам
+ * «варшава гродно расстояние», «милан москва расстояние», «как добраться до
+ * забайкальска из москвы» и «кузницу» (пункт пропуска Кузница/Брузги), а
+ * ответа на странице не было — показы есть, кликов нет. Числа приблизительные
+ * и так подписаны; если город неизвестен (`src/geo.ts`), блока нет вовсе:
+ * выдуманное расстояние хуже его отсутствия.
+ */
+export function tripBlock(from: string, to: string): string {
+  const t = tripInfo(from, to);
+  if (!t) return '';
+  const f = escapeHtml(from);
+  const to2 = escapeHtml(to);
+  const borderLine = t.crossings.length > 0
+    ? ` Направление пересекает границу ${escapeHtml(t.border ?? '')}; пункты пропуска на нём: ${
+        t.crossings.map(([a, b]) => `${escapeHtml(a)} — ${escapeHtml(b)}`).join(', ')
+      }. Какие из них открыты и сколько там очередь, меняется — уточняйте перед выездом.`
+    : t.border
+      ? ` Направление пересекает границу ${escapeHtml(t.border)} — заложите запас времени на формальности.`
+      : '';
+  return `
+    <h2 class="rule-head">Сколько ехать ${f} → ${to2}</h2>
+    <p>По трассе примерно ${t.km} км — около ${t.hoursText} ч за рулём без долгих остановок.${borderLine}</p>`;
+}
+
+/** Вопрос-ответ про дорогу: в блок «Частые вопросы» и в FAQPage-разметку. */
+export function tripFaq(from: string, to: string): [string, string] | null {
+  const t = tripInfo(from, to);
+  if (!t) return null;
+  const f = escapeHtml(from);
+  const to2 = escapeHtml(to);
+  const border = t.crossings.length > 0
+    ? ` По пути граница ${escapeHtml(t.border ?? '')} — пункты пропуска: ${
+        t.crossings.map(([a, b]) => `${escapeHtml(a)} — ${escapeHtml(b)}`).join(', ')
+      }; какие из них работают, уточняйте перед выездом.`
+    : t.border
+      ? ` По пути граница ${escapeHtml(t.border)} — заложите запас времени.`
+      : '';
+  return [
+    `Сколько ехать ${f} → ${to2}?`,
+    `Примерно ${t.km} км по трассе, около ${t.hoursText} ч за рулём без долгих остановок.${border}`,
+  ];
+}
+
 /* Страница маршрута /r/:slug                                          */
 /* ------------------------------------------------------------------ */
 
@@ -663,7 +710,10 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     : '';
 
   const steps = howtoText(r, seed).map(([h, t]) => `<li><b>${escapeHtml(h)}</b>: ${t}</li>`).join('\n');
-  const faq = faqText(r, seed);
+  // вопрос про дорогу добавляем всегда, когда знаем километраж: он же уходит
+  // в FAQPage-разметку — запросы «сколько ехать/расстояние» наши
+  const tripQa = tripFaq(r.from, r.to);
+  const faq = tripQa ? [...faqText(r, seed), tripQa] : faqText(r, seed);
   const faqHtml = faq.map(([q, a]) =>
     `<details class="qa"><summary>${escapeHtml(q)}</summary><p>${a}</p></details>`).join('\n');
 
@@ -695,6 +745,8 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
 
     <h2 class="rule-head">Как передать посылку ${escapeHtml(r.from)} → ${escapeHtml(r.to)}</h2>
     <ol class="steps">${steps}</ol>
+
+${tripBlock(r.from, r.to)}
 
     <h2 class="rule-head">Что обычно передают</h2>
     <p>${whatText(r, seed)}</p>

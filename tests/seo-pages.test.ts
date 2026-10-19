@@ -38,7 +38,7 @@ import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap, buildRoutePage,
   buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml, cityPathFor, clearRouteIndexCache,
   footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routeDescription,
-  routePathFor, routeTitle, SEO_ROUTES,
+  routePathFor, routeTitle, SEO_ROUTES, tripBlock, tripFaq,
 } from '../src/seo-routes';
 import { buildHomePage } from '../src/pages';
 import { citySlug, routeSlug } from '../src/seo';
@@ -198,6 +198,49 @@ describe('заголовок и описание маршрута', () => {
     // active=4 в моке: число заявок попало в <title>
     expect(html).toContain('<title>Передать посылку Варшава → Минск — 4 заявки | попутка.</title>');
     expect(html).toContain('name="description" content="4 живые заявки Варшава → Минск:');
+  });
+});
+
+/* Блок «Сколько ехать» — ответ на запросы «расстояние/сколько ехать/как
+   добраться» и «кузницу», по которым Google нас показывал, а ответа на
+   странице не было. */
+describe('блок «Сколько ехать» на странице маршрута', () => {
+  it('километраж, время и пункты пропуска — в теле и в FAQ', async () => {
+    const html = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(html).toContain('<h2 class="rule-head">Сколько ехать Варшава → Минск</h2>');
+    expect(html).toContain('По трассе примерно 590 км — около 8 ч за рулём');
+    expect(html).toContain('Брузги — Кузница');
+    expect(html).toContain('уточняйте перед выездом');
+    // тот же факт — вопросом в «Частых вопросах» и в разметке FAQPage
+    expect(html).toContain('Сколько ехать Варшава → Минск?');
+    expect(html).toContain('"@type":"FAQPage"');
+  });
+
+  it('внутри Шенгена границы нет — и на странице её не выдумываем', async () => {
+    const html = await buildRoutePage(env, 'varshava-berlin', ORIGIN);
+    expect(html).toContain('Сколько ехать Варшава → Берлин');
+    expect(html).toContain('примерно 575 км');
+    expect(html).not.toContain('пункты пропуска на нём');
+    expect(html).not.toContain('пересекает границу');
+  });
+
+  it('граница без списка переходов названа, но без обещаний', async () => {
+    const html = await buildRoutePage(env, 'minsk-moskva', ORIGIN);
+    expect(html).toContain('примерно 720 км');
+    expect(html).toContain('пересекает границу Беларусь — Россия');
+    expect(html).not.toContain('пункты пропуска на нём');
+  });
+
+  it('неизвестный город — блока нет, а страница живая', () => {
+    expect(tripBlock('Минск', 'Нету-Такого')).toBe('');
+    expect(tripFaq('Минск', 'Нету-Такого')).toBeNull();
+  });
+
+  it('текст блока: приблизительно, с числом и часами', () => {
+    const html = tripBlock('Вроцлав', 'Минск');
+    expect(html).toContain('примерно 1150 км');
+    expect(html).toContain('ч за рулём');
+    expect(tripFaq('Вроцлав', 'Минск')![1]).toContain('1150 км');
   });
 });
 
