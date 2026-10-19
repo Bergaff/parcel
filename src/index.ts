@@ -22,6 +22,7 @@ import {
   cityOgSpec, cityPathFor, resolveCity, resolveRoute, resolveRouteAlias, routeOgSpec, routePathFor,
 } from './seo-routes';
 import { buildHomePage, buildItemPage, buildNotFoundPage, buildStaticPage, buildStatsPage, buildMonthStatsPage, siteOrigin, STATIC_PAGES } from './pages';
+import { flushIndexNow, getIndexNowKey, KEY_LOCATION_PATH } from './indexnow';
 import { currentPeriod } from './format';
 import { aggregateDaily, listMonthStats, refreshStats, regenerateMonthSummary, statsPostText } from './stats';
 
@@ -46,6 +47,18 @@ app.use('/api/*', async (c, next) => {
     return c.body(null, 204);
   }
   await next();
+  /* IndexNow: после любого мутирующего запроса сливаем очередь адресов —
+     новое, правленое или одобренное объявление уходит в Яндекс и Bing сразу,
+     а не «когда дойдёт краулер». Ответ пользователя этого не ждёт (waitUntil),
+     а если сеть не ответила — адреса останутся в очереди до следующего раза. */
+  if (c.req.method !== 'GET' && c.req.method !== 'OPTIONS') {
+    const task = flushIndexNow(c.env, siteOrigin(c.env, c.req.url)).catch(() => undefined);
+    try {
+      c.executionCtx.waitUntil(task);
+    } catch {
+      /* нет ExecutionContext (например, в тестах) — очередь дольёт cron */
+    }
+  }
 });
 
 /* ------------- Статистика аудитории (медиакит) ---------------- */
@@ -512,6 +525,13 @@ app.get('/gorod/:slug', async (c) => {
 /* Карта сайта: /sitemap.xml — индекс из трёх файлов (страницы, маршруты,
    объявления). Разбивка нужна, потому что объявления меняются каждый час,
    а витрина маршрутов — раз в день. */
+/* Ключ IndexNow: поисковики приходят сюда проверить владение доменом
+   (адрес сообщается в параметре keyLocation при отправке). */
+app.get(KEY_LOCATION_PATH, async (c) => {
+  c.header('Cache-Control', 'public, max-age=3600');
+  return c.body(await getIndexNowKey(c.env), 200, { 'Content-Type': 'text/plain; charset=utf-8' });
+});
+
 app.get('/sitemap.xml', async (c) => {
   const xml = await buildSitemapXml(c.env, siteOrigin(c.env, c.req.url));
   return new Response(xml, {
@@ -1295,6 +1315,14 @@ const worker = {
     }
     const res = await archiveExpired(env);
     console.log('archiveExpired:', JSON.stringify(res));
+
+    // IndexNow: доливает то, что не ушло за день (сеть, 5xx, пустые запросы)
+    try {
+      const sent = await flushIndexNow(env);
+      console.log('indexNow:', JSON.stringify({ sent }));
+    } catch (e) {
+      console.error('indexNow flush failed', e);
+    }
 
     // сырая статистика аудитории живёт 90 дней — дальше удаляется
     try {

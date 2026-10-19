@@ -26,6 +26,8 @@ export interface Env {
   MEDIA_PASSWORD?: string;
   /** Контакты для рекламы на странице /mediakit (текст, например «@user в Telegram»). */
   MEDIA_CONTACT?: string;
+  /** Ключ IndexNow. Не задавайте руками: воркер создаст его сам и положит в KV. */
+  INDEXNOW_KEY?: string;
 }
 
 export type ListingType = 'offer' | 'request';

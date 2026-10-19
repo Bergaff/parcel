@@ -5,6 +5,8 @@ import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
 import { admins, hasContactHint, normalizeContacts } from './util';
 import { nextRecurringDate } from './parser';
+// IndexNow: очередь адресов на переиндексацию (см. src/indexnow.ts)
+import { listingPaths, queueListingChange, queuePaths } from './indexnow';
 
 function mapRow(row: Record<string, unknown>): Listing {
   return {
@@ -82,6 +84,11 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     | Record<string, unknown>
     | null;
   if (!row) throw new Error('Failed to create listing');
+  // опубликовали (в том числе авто-публикация) — сообщаем поисковикам сразу,
+  // не дожидаясь краулера; сбой очереди не должен ронять создание заявки
+  if (status === 'published') {
+    await queuePaths(env, listingPaths(id, input.fromCity, input.toCity)).catch(() => undefined);
+  }
   return mapRow(row);
 }
 
@@ -191,12 +198,16 @@ export async function updateListingStatus(
     const res = await env.DB.prepare(
       'UPDATE listings SET status = ?, published_at = COALESCE(?, published_at), reject_reason = ? WHERE id = ?'
     ).bind(status, publishedAt, reason, id).run();
-    return (res.meta.changes ?? 0) > 0;
+    const ok = (res.meta.changes ?? 0) > 0;
+    if (ok) await queueListingChange(env, id).catch(() => undefined);
+    return ok;
   }
   const res = await env.DB.prepare(
     'UPDATE listings SET status = ?, published_at = COALESCE(?, published_at) WHERE id = ?'
   ).bind(status, publishedAt, id).run();
-  return (res.meta.changes ?? 0) > 0;
+  const ok = (res.meta.changes ?? 0) > 0;
+  if (ok) await queueListingChange(env, id).catch(() => undefined);
+  return ok;
 }
 
 export async function listPending(env: Env, limit = 50): Promise<Listing[]> {
@@ -505,6 +516,11 @@ export async function updateListing(
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
     | Record<string, unknown>
     | null;
+  if (row) {
+    // правка меняет и карточку, и страницу маршрута (города могли смениться)
+    await queuePaths(env, listingPaths(String(row.id), String(row.from_city ?? ''), String(row.to_city ?? '')))
+      .catch(() => undefined);
+  }
   return row ? mapRow(row) : null;
 }
 
