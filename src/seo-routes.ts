@@ -568,6 +568,51 @@ function cityFaq(city: string, seed: string): Array<[string, string]> {
 /* Страница маршрута /r/:slug                                          */
 /* ------------------------------------------------------------------ */
 
+/* Заголовок и описание под бюджет Google: в выдаче влезает ~570px (≈55–60
+   символов) и ~155 символов описания. Старый шаблон маршрута — «Передать
+   посылку Вроцлав → Минск с попуткой — заявки водителей | попутка.» — был
+   71–73 символа и обрезался на полуслове («…с попуткой — заявки води…»):
+   страница держала позицию 2,56 при 94 показах, а кликов было 4 (CTR 4,4%
+   вместо 15–25% для такой позиции). Теперь заголовок выбирается из вариантов
+   по длине и несёт число живых заявок — оно обновляется само и кликается
+   лучше общих слов. */
+
+/** Сколько символов заголовка Google показывает целиком. */
+const TITLE_MAX = 60;
+/** Сколько символов описания Google показывает целиком. */
+const DESC_MAX = 160;
+
+/** Заголовок страницы маршрута: самый длинный вариант, влезающий в бюджет. */
+export function routeTitle(from: string, to: string, active: number): string {
+  const pair = `${from} → ${to}`;
+  const suffix = active > 0
+    ? ` — ${active} ${plural(active, 'заявка', 'заявки', 'заявок')}`
+    : ' с попуткой';
+  const variants = [
+    `Передать посылку ${pair}${suffix}`,
+    `Посылка ${pair}${suffix}`,
+    `Передать посылку ${pair}`,
+    `Посылка ${pair}`,
+    pair,
+  ];
+  const core = variants.find((v) => `${v} | ${SITE_NAME}`.length <= TITLE_MAX)
+    ?? variants[variants.length - 1]!;
+  return `${core} | ${SITE_NAME}`;
+}
+
+/** Описание страницы маршрута: маршрут в первых словах, дальше конкретика. */
+export function routeDescription(from: string, to: string, active: number): string {
+  const pair = `${from} → ${to}`;
+  const base = active > 0
+    ? `${active} ${plural(active, 'живая заявка', 'живые заявки', 'живых заявок')} ${pair}: даты выезда, вес, цена и контакт водителя.`
+    : `Сейчас по маршруту ${pair} заявок нет — разместите просьбу: водители увидят её на доске и в боте, отклик обычно в тот же день.`;
+  const tail = ' Передать посылку попутно, напрямую — без посредников и комиссий.';
+  let out = `${base}${tail}`;
+  if (out.length > DESC_MAX) out = base; // хвост не влез — остаёмся на фактах
+  if (out.length > DESC_MAX) out = `${out.slice(0, DESC_MAX - 1).trimEnd()}…`;
+  return out;
+}
+
 /** Страница маршрута /r/:slug. null — маршрута нет (отдаём 404). */
 export async function buildRoutePage(env: Env, slug: string, origin: string): Promise<string | null> {
   const r = await resolveRoute(env, slug);
@@ -597,8 +642,8 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     r.pair?.lastmod ? `обновлено ${fmtDayShort(r.pair.lastmod)}` : null,
   ].filter(Boolean).join(' · ');
 
-  const title = `Передать посылку ${r.from} → ${r.to} с попуткой — заявки водителей | ${SITE_NAME}`;
-  const description = `Нужно передать посылку ${r.from} → ${r.to}? Попутки и попутчики: водители берут посылки попутно по пути — даты выезда, вес, цена и контакт. Договор напрямую, без посредников и комиссий.`;
+  const title = routeTitle(r.from, r.to, active);
+  const description = routeDescription(r.from, r.to, active);
 
   const listingsHtml = main.length > 0
     ? main.map((l) => listingCard(l, chatLinks)).join('\n')

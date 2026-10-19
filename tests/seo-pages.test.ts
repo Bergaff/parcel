@@ -37,7 +37,8 @@ vi.mock('../src/store', () => ({
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap, buildRoutePage,
   buildRoutesIndexPage, buildRoutesSitemap, buildSitemapXml, cityPathFor, clearRouteIndexCache,
-  footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routePathFor, SEO_ROUTES,
+  footRoutes, knownCities, resolveCity, resolveRoute, resolveRouteAlias, routeDescription,
+  routePathFor, routeTitle, SEO_ROUTES,
 } from '../src/seo-routes';
 import { buildHomePage } from '../src/pages';
 import { citySlug, routeSlug } from '../src/seo';
@@ -150,6 +151,53 @@ describe('индекс маршрутов', () => {
     expect(c?.stat?.active).toBe(5);
     expect(cityPathFor('Гродно')).toBe('/gorod/grodno');
     expect(await resolveCity(env, 'netu')).toBeNull();
+  });
+});
+
+/* Заголовок и описание страницы маршрута — под бюджет Google. Повод:
+   /r/vrotslav-minsk держала позицию 2,56 при 94 показах и давала 4 клика
+   (CTR 4,4%): старый шаблон был 71–73 символа и обрезался на «…заявки води…». */
+describe('заголовок и описание маршрута', () => {
+  it('влезают в бюджет Google у всех витринных маршрутов', () => {
+    const over: string[] = [];
+    for (const r of SEO_ROUTES) {
+      for (const active of [0, 1, 4, 27]) {
+        const t = routeTitle(r.from, r.to, active);
+        const d = routeDescription(r.from, r.to, active);
+        if (t.length > 60) over.push(`title ${r.slug} (${active}): ${t.length} — ${t}`);
+        if (d.length > 160) over.push(`desc ${r.slug} (${active}): ${d.length} — ${d}`);
+        if (!t.includes(`${r.from} → ${r.to}`)) over.push(`title без пары ${r.slug}`);
+        if (!d.includes(`${r.from} → ${r.to}`)) over.push(`desc без пары ${r.slug}`);
+      }
+    }
+    expect(over).toEqual([]);
+  });
+
+  it('есть живые заявки — число в заголовке, а не общие слова', () => {
+    expect(routeTitle('Вроцлав', 'Минск', 12)).toBe('Передать посылку Вроцлав → Минск — 12 заявок | попутка.');
+    expect(routeTitle('Минск', 'Москва', 1)).toBe('Передать посылку Минск → Москва — 1 заявка | попутка.');
+    // длинные названия: вариант покороче, но число заявок сохраняется
+    expect(routeTitle('Санкт-Петербург', 'Ереван', 3)).toBe('Посылка Санкт-Петербург → Ереван — 3 заявки | попутка.');
+  });
+
+  it('заявок нет — честно «с попуткой», без вранья про количество', () => {
+    expect(routeTitle('Вроцлав', 'Минск', 0)).toBe('Передать посылку Вроцлав → Минск с попуткой | попутка.');
+    expect(routeDescription('Вроцлав', 'Минск', 0)).toContain('заявок нет');
+    expect(routeDescription('Вроцлав', 'Минск', 0)).toContain('разместите просьбу');
+  });
+
+  it('описание начинается с фактов: число заявок, даты, цена, контакт', () => {
+    const d = routeDescription('Варшава', 'Минск', 4);
+    expect(d.startsWith('4 живые заявки Варшава → Минск:')).toBe(true);
+    expect(d).toContain('контакт водителя');
+    expect(d).toContain('без посредников и комиссий');
+  });
+
+  it('страница маршрута рендерится с новым заголовком', async () => {
+    const html = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    // active=4 в моке: число заявок попало в <title>
+    expect(html).toContain('<title>Передать посылку Варшава → Минск — 4 заявки | попутка.</title>');
+    expect(html).toContain('name="description" content="4 живые заявки Варшава → Минск:');
   });
 });
 
