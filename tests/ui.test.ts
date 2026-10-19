@@ -60,6 +60,7 @@ const server = {
   forumStatsGets: 0, // сколько раз вкладка «канал» забирала статистику
   boardOver: null as Loose | null, // override карточки вкладки «доска»
   archiveFarPosts: 0, // сколько раз админка убирала с доски аномальные даты
+  boardOddGets: 0, // сколько раз доска запрашивала фильтр аномальных дат
   matchHidden: [] as Array<{ key: string; label: string }>,
   matchPairs: [
     {
@@ -188,7 +189,17 @@ function makeFetch(calls: string[]) {
           // pendingTotal — настоящее число очереди (COUNT), не длина списка
           return { body: { items, pruned: 1, ...(server.dupesPruned ? { dupesPruned: server.dupesPruned } : {}), ...(server.pendingTotal ? { pendingTotal: server.pendingTotal } : {}) } };
         }
-        return { body: { items: [listing(server.boardOver ?? {})] } };
+        // доска: odd=1 — только аномальные даты (дальше 90 дней); farCount —
+        // серверный COUNT для кнопки «показать все такие»
+        const isFar = (x: Loose) => x.departureDate && !x.recurring
+          && (new Date(`${x.departureDate}T00:00:00`).getTime() - Date.now()) / 86400000 > 90;
+        if (q.get('odd') === '1') {
+          server.boardOddGets += 1;
+          const oddItems = [listing(server.boardOver ?? {})].filter(isFar);
+          return { body: { items: oddItems, farCount: oddItems.length } };
+        }
+        const items = [listing(server.boardOver ?? {})];
+        return { body: { items, farCount: items.filter(isFar).length } };
       }
       if (path === '/api/admin/mediakit-creds') {
         if (method === 'POST') {
@@ -835,6 +846,36 @@ describe('админка', () => {
     expect(win.document.querySelector('#admin-list')?.textContent ?? '')
       .not.toContain('подозрительно далеко');
     server.boardOver = null;
+    // возвращаем вкладку «на модерации» — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('вкладка «доска»: кнопка «показать все такие» — фильтр аномальных дат', async () => {
+    // под счётчиком «На доске: N — действующие и архив» кнопка показывает
+    // только объявления с датой выезда дальше 90 дней; возврат — одной кнопкой
+    byId('admin-tab-board').click();
+    await settle(80);
+    const showBtn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'показать все такие') as HTMLButtonElement | undefined;
+    expect(showBtn).toBeTruthy();
+    // нажали — доска перезагрузилась с серверным фильтром odd=1
+    const odd0 = server.boardOddGets;
+    showBtn!.click();
+    await settle(80);
+    expect(server.boardOddGets).toBe(odd0 + 1);
+    expect(text('admin-count')).toContain('аномальной датой'); // счётчик про фильтр
+    let body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    expect(body).toContain('Показаны только объявления');
+    expect(body).toContain('подозрительно далеко'); // карточка с предупреждением
+    // вернулись к полной доске
+    const backBtn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'показать всю доску') as HTMLButtonElement | undefined;
+    backBtn!.click();
+    await settle(80);
+    expect(text('admin-count')).toContain('На доске:');
+    body = win.document.querySelector('#admin-list')?.textContent ?? '';
+    expect(body).not.toContain('Показаны только объявления');
     // возвращаем вкладку «на модерации» — следующие тесты ждут её
     byId('admin-tab-pending').click();
     await settle(80);

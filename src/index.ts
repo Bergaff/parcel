@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -856,8 +856,9 @@ app.get('/api/admin/listings', async (c) => {
   // с perPage:100 молча урезался клампом до 50, и счётчик «Необработано
   // заявок» застревал на 50. Настоящее число очереди приходит отдельно
   // (pendingTotal) — оно не зависит от размера выборки.
+  const boardOdd = c.req.query('odd') === '1';
   const items = isBoard
-    ? await listAdminBoard(c.env, 200, c.req.query('q'))
+    ? await listAdminBoard(c.env, 200, boardOdd ? undefined : c.req.query('q'), boardOdd)
     : await listPending(c.env, 200);
   // происхождение заявки — штампы «от админа» / «с сайта» / «из чата» /
   // «от другого человека» в карточке
@@ -869,7 +870,15 @@ app.get('/api/admin/listings', async (c) => {
 
   // В очереди модерации помечаем повторы: одно и то же объявление пересылают
   // каждый день, и админ не должен держать в голове, что уже одобрил.
-  if (isBoard) return c.json({ items: withOrigin });
+  if (isBoard) {
+    // farCount — сколько на доске объявлений с подозрительно далёкой датой
+    // (дальше 90 дней): кнопка «показать все такие» появляется, даже если
+    // сами объявления за пределами выборки
+    const farCount = boardOdd
+      ? items.length
+      : await countFarDepartures(c.env).catch(() => 0);
+    return c.json({ items: withOrigin, farCount });
+  }
   const pendingTotal = await countPending(c.env);
   const annotated: Array<Record<string, unknown>> = [];
   for (const l of withOrigin.slice(0, 40)) {
