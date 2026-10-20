@@ -836,11 +836,29 @@ async function adminApi(path, options = {}) {
   });
 }
 
-/* Выгрузка всех заявок в CSV. Качаем через fetch, а не ссылкой: ключ админки
+/* Области выгрузки: значение = параметр ?status= у /api/admin/listings.csv,
+   'all' — без параметра. По умолчанию доска: в файле «всё подряд» 3,5 тысячи
+   строк, из них архив — 2,5 тысячи, а смотреть обычно нужно только живые. */
+const EXPORT_SCOPES = [
+  ['published', 'только доска'],
+  ['expired', 'только архив'],
+  ['pending', 'только модерация'],
+  ['rejected', 'только отклонённые'],
+  ['all', 'всё подряд'],
+];
+const SCOPE_FILE = {
+  published: 'doska', expired: 'arhiv', pending: 'moderaciya',
+  rejected: 'otklonennye', all: 'vse',
+};
+
+/* Выгрузка заявок в CSV. Качаем через fetch, а не ссылкой: ключ админки
    живёт в заголовке Authorization, в адрес его подставлять нельзя. */
-async function exportBoardCsv() {
+async function exportBoardCsv(scope) {
+  const key = EXPORT_SCOPES.some(([v]) => v === scope) ? scope : 'published';
+  const label = (EXPORT_SCOPES.find(([v]) => v === key) || [, 'только доска'])[1];
+  const url = key === 'all' ? '/api/admin/listings.csv' : `/api/admin/listings.csv?status=${key}`;
   try {
-    const r = await adminApi('/api/admin/listings.csv');
+    const r = await adminApi(url);
     if (!r.ok) throw new Error(`http ${r.status}`);
     /* В файл кладём БАЙТЫ, а не строку. r.text() по спецификации снимает BOM,
        и тогда Excel на Windows читает UTF-8 как cp1251: «РЅР° РґРѕСЃРєРµ» вместо
@@ -854,7 +872,7 @@ async function exportBoardCsv() {
     a.href = typeof URL.createObjectURL === 'function'
       ? URL.createObjectURL(new Blob([bytes], { type: 'text/csv;charset=utf-8' }))
       : `data:text/csv;charset=utf-8,${encodeURIComponent(`\uFEFF${text}`)}`;
-    a.download = `poputka-zayavki-${day}.csv`;
+    a.download = `poputka-${SCOPE_FILE[key] || 'doska'}-${day}.csv`;
     document.body.append(a);
     a.click();
     if (a.href.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
@@ -863,8 +881,8 @@ async function exportBoardCsv() {
     }
     a.remove();
     toast(rows > 0
-      ? `Выгружено заявок: ${rows}. CSV в UTF-8 (BOM), разделитель «;» — открывается в Excel и Google Таблицах.`
-      : 'Файл сохранён, но заявок нет — таблица пустая.');
+      ? `Выгружено заявок: ${rows} (${label}). CSV в UTF-8 (BOM), разделитель «;» — открывается в Excel и Google Таблицах.`
+      : `Файл сохранён, но заявок нет (${label}).`);
   } catch {
     toast('Не получилось выгрузить CSV. Проверьте ключ админки и попробуйте ещё раз.');
   }
@@ -1277,16 +1295,21 @@ function renderAdminItems() {
       ]));
     } else {
       listEl.append(adminBoardSearch());
-      // Экспорт всей базы заявок в таблицу: даты выезда, контакты, источник,
-      // просмотры. Все статусы сразу (доска, архив, модерация, отклонённые) —
-      // статус отдельной колонкой, в Excel фильтруется за два клика
+      // Экспорт заявок в таблицу. Что именно выгружать — выбирается рядом:
+      // по умолчанию только доска, потому что в файле «всё подряд» архив
+      // забивает её (2,5 тысячи строк против 950 живых)
+      const scopeSel = el('select', {
+        class: 'q', 'aria-label': 'Что выгружать в CSV',
+      }, EXPORT_SCOPES.map(([value, text]) => el('option', {
+        value, text, ...(value === 'published' ? { selected: true } : {}),
+      })));
       listEl.append(el('div', { class: 'admin-search' }, [
         el('button', {
           class: 'btn btn-line btn-sm', type: 'button', text: 'экспорт в CSV',
-          title: 'Скачать все заявки таблицей: доска, архив, модерация и отклонённые. UTF-8 (BOM), разделитель «;»',
-          onclick: () => { exportBoardCsv(); },
+          title: 'Скачать заявки таблицей: UTF-8 (BOM), разделитель «;», сортировка по дате выезда',
+          onclick: () => { exportBoardCsv(scopeSel.value); },
         }),
-        el('span', { class: 'admin-contact', text: 'все статусы, сортировка по дате выезда' }),
+        scopeSel,
       ]));
       // Строка под счётчиком «На доске: N — действующие и архив». Числа —
       // с сервера (COUNT), раздельно: «на доске» — уберёт кнопка, «уже в

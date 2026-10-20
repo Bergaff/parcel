@@ -40,10 +40,18 @@ export const SOURCE_LABEL: Record<Listing['source'], string> = {
   parser: 'из чата',
 };
 
-/** Одна ячейка CSV: всегда в кавычках, внутренние кавычки удваиваем. */
+/**
+ * Одна ячейка CSV: всегда в кавычках, внутренние кавычки удваиваем.
+ *
+ * Переносы строк заменяем пробелом. Формально CSV их разрешает внутри кавычек,
+ * и Excel даже их понимает, — но строка заявки при этом разъезжается на
+ * несколько экранных строк, и таблицу из 3,5 тысяч строк невозможно листать.
+ * У 205 заявок на доске описания были с переносами.
+ */
 export function csvCell(value: string | number | null | undefined): string {
   const s = value === null || value === undefined ? '' : String(value);
-  return `"${s.replace(/"/g, '""')}"`;
+  const flat = s.replace(/\s*\r?\n\s*/g, ' ').trim();
+  return `"${flat.replace(/"/g, '""')}"`;
 }
 
 /**

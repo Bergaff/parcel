@@ -64,6 +64,7 @@ const server = {
   archiveFarPosts: 0, // сколько раз админка убирала с доски аномальные даты
   csvGets: 0, // сколько раз админка выгружала заявки в таблицу
   csvAuth: null as string | null, // пришёл ли ключ админки заголовком
+  csvQuery: null as string | null, // какую область попросили: ?status=…
   boardOddGets: 0, // сколько раз доска запрашивала фильтр аномальных дат
   farArchivedStub: 0, // >0 — сервер говорит «все аномальные уже в архиве»
   matchHidden: [] as Array<{ key: string; label: string }>,
@@ -168,6 +169,7 @@ function makeFetch(calls: string[]) {
       if (path === '/api/admin/listings.csv') {
         server.csvGets += 1;
         server.csvAuth = authed ? 'ok' : 'none';
+        server.csvQuery = query;
         // как отдаёт сервер: BOM, CRLF, разделитель «;», две заявки
         return { raw: '\uFEFF"id";"статус"\r\n"x1";"на доске"\r\n"y2";"в архиве"\r\n' };
       }
@@ -738,13 +740,16 @@ describe('админка', () => {
     (win.URL as Loose).createObjectURL = origCreate;
 
     expect(server.csvGets).toBe(getsBefore + 1);
-    expect(calls.filter((c) => c === 'GET /api/admin/listings.csv')).toHaveLength(1);
+    expect(calls.filter((c) => c === 'GET /api/admin/listings.csv?status=published'),
+      'по умолчанию выгружаем только доску').toHaveLength(1);
     // ключ админки уходит заголовком: в адресе ему быть нельзя
     expect(server.csvAuth).toBe('ok');
+    expect(server.csvQuery).toBe('status=published');
     expect(downloads).toHaveLength(1);
-    expect(downloads[0]).toMatch(/^poputka-zayavki-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(downloads[0]).toMatch(/^poputka-doska-\d{4}-\d{2}-\d{2}\.csv$/);
     // число в тосте — из файла, а не «на глаз»: две строки данных
     expect(text('toast')).toContain('Выгружено заявок: 2');
+    expect(text('toast')).toContain('только доска'); // что именно скачали — видно
     expect(text('toast')).toContain('UTF-8');
 
     /* Главное: BOM обязан доехать до САМОГО ФАЙЛА. Сервер его отдаёт, но
@@ -760,6 +765,41 @@ describe('админка', () => {
     expect(hrefs[0]).toBe('blob:csv-test');
 
     // вернуть админку на вкладку модерации — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('экспорт: область выгрузки выбирается и уходит в ?status=', async () => {
+    byId('admin-tab-board').click();
+    await settle(80);
+    const sel = win.document.querySelector('#admin-list select[aria-label="Что выгружать в CSV"]') as HTMLSelectElement | null;
+    expect(sel, 'выбор области выгрузки').toBeTruthy();
+    // по умолчанию стоит доска, а не «всё подряд»
+    expect(sel!.value).toBe('published');
+    expect(Array.from(sel!.options).map((o) => o.value)).toEqual(['published', 'expired', 'pending', 'rejected', 'all']);
+
+    const downloads: string[] = [];
+    const origClick = win.HTMLAnchorElement.prototype.click;
+    win.HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    } as unknown as () => void;
+    const btn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'экспорт в CSV') as HTMLElement;
+
+    for (const [value, query, file] of [
+      ['expired', 'status=expired', 'poputka-arhiv-'],
+      ['all', '', 'poputka-vse-'],
+      ['rejected', 'status=rejected', 'poputka-otklonennye-'],
+    ] as Array<[string, string, string]>) {
+      sel!.value = value;
+      btn.click();
+      await settle(80);
+      expect(server.csvQuery).toBe(query);
+      expect(downloads[downloads.length - 1]!.startsWith(file), `имя файла для «${value}»`).toBe(true);
+    }
+    win.HTMLAnchorElement.prototype.click = origClick;
+    // «всё подряд» идёт без параметра — сервер отдаёт все статусы
+    expect(calls.filter((c) => c === 'GET /api/admin/listings.csv')).toHaveLength(1);
     byId('admin-tab-pending').click();
     await settle(80);
   });
