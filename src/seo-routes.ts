@@ -783,11 +783,38 @@ export function routeTitle(from: string, to: string, active: number): string {
   return `${core} | ${SITE_NAME}`;
 }
 
+/** Что реально есть в заявках маршрута: без этого описание обещало бы то,
+ *  чего в базе нет. Замер по настоящей выгрузке: на доске 951 заявка, цена
+ *  заполнена у 27 (3%), вес — у 46 (5%), дата выезда — у 397 (42%). */
+export interface RouteFacts {
+  withDate: number;
+  withPrice: number;
+  withContact: number;
+}
+
+/** «даты выезда, цены и контакт водителя» — перечисление с русским «и». */
+function joinDetails(parts: string[]): string {
+  if (parts.length === 0) return 'кто едет по маршруту';
+  if (parts.length === 1) return parts[0]!;
+  return `${parts.slice(0, -1).join(', ')} и ${parts[parts.length - 1]}`;
+}
+
+/** Чем именно наполнены заявки: упоминаем только заполненные поля. */
+function routeDetails(facts?: RouteFacts): string {
+  // фактов нет — значит и обещать нечего: говорим про то, что есть всегда
+  if (!facts) return 'кто едет и как с ним связаться';
+  const parts: string[] = [];
+  if (facts.withDate > 0) parts.push('даты выезда');
+  if (facts.withPrice > 0) parts.push('цены');
+  if (facts.withContact > 0) parts.push('контакт водителя');
+  return joinDetails(parts);
+}
+
 /** Описание страницы маршрута: маршрут в первых словах, дальше конкретика. */
-export function routeDescription(from: string, to: string, active: number): string {
+export function routeDescription(from: string, to: string, active: number, facts?: RouteFacts): string {
   const pair = `${from} → ${to}`;
   const base = active > 0
-    ? `${active} ${plural(active, 'живая заявка', 'живые заявки', 'живых заявок')} ${pair}: даты выезда, вес, цена и контакт водителя.`
+    ? `${active} ${plural(active, 'живая заявка', 'живые заявки', 'живых заявок')} ${pair}: ${routeDetails(facts)}.`
     : `Сейчас по маршруту ${pair} заявок нет — разместите просьбу: водители увидят её на доске и в боте, отклик обычно в тот же день.`;
   const tail = ' Передать посылку попутно, напрямую — без посредников и комиссий.';
   let out = `${base}${tail}`;
@@ -826,7 +853,11 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
   ].filter(Boolean).join(' · ');
 
   const title = routeTitle(r.from, r.to, active);
-  const description = routeDescription(r.from, r.to, active);
+  const description = routeDescription(r.from, r.to, active, {
+    withDate: main.filter((l) => l.departureDate).length,
+    withPrice: main.filter((l) => l.price).length,
+    withContact: main.filter((l) => l.telegram || l.phone).length,
+  });
 
   const listingsHtml = main.length > 0
     ? main.map((l) => listingCard(l, chatLinks)).join('\n')

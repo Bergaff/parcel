@@ -188,11 +188,51 @@ describe('заголовок и описание маршрута', () => {
     expect(routeDescription('Вроцлав', 'Минск', 0)).toContain('разместите просьбу');
   });
 
-  it('описание начинается с фактов: число заявок, даты, цена, контакт', () => {
-    const d = routeDescription('Варшава', 'Минск', 4);
+  /* Повод — настоящая выгрузка: на доске 951 заявка, а цена заполнена у 27 (3%),
+     вес — у 46 (5%). Шаблон «даты выезда, вес, цена и контакт водителя» обещал
+     то, чего в базе нет. */
+  it('описание начинается с числа заявок и перечисляет только то, что есть', () => {
+    const d = routeDescription('Варшава', 'Минск', 4, { withDate: 3, withPrice: 1, withContact: 4 });
     expect(d.startsWith('4 живые заявки Варшава → Минск:')).toBe(true);
-    expect(d).toContain('контакт водителя');
+    expect(d).toContain('даты выезда, цены и контакт водителя');
     expect(d).toContain('без посредников и комиссий');
+  });
+
+  it('нет цен — про цены ни слова; нет дат — про даты ни слова', () => {
+    const noPrice = routeDescription('Варшава', 'Минск', 4, { withDate: 3, withPrice: 0, withContact: 4 });
+    expect(noPrice).toContain('даты выезда и контакт водителя');
+    expect(noPrice).not.toContain('цены');
+
+    const noDate = routeDescription('Варшава', 'Минск', 4, { withDate: 0, withPrice: 0, withContact: 4 });
+    expect(noDate).toContain('контакт водителя');
+    expect(noDate).not.toContain('даты выезда');
+
+    const nothing = routeDescription('Варшава', 'Минск', 4, { withDate: 0, withPrice: 0, withContact: 0 });
+    expect(nothing).toContain('кто едет по маршруту');
+  });
+
+  it('без фактов описание ничего не обещает — ни веса, ни цены', () => {
+    const d = routeDescription('Варшава', 'Минск', 4);
+    expect(d).toContain('кто едет и как с ним связаться');
+    // «Передать посылку» содержит «дат», поэтому проверяем точные формулировки
+    expect(d).not.toContain('вес');
+    expect(d).not.toContain('цены');
+    expect(d).not.toContain('даты выезда');
+  });
+
+  it('любой набор фактов влезает в бюджет Google', () => {
+    const over: string[] = [];
+    for (const facts of [
+      undefined,
+      { withDate: 0, withPrice: 0, withContact: 0 },
+      { withDate: 15, withPrice: 1, withContact: 15 },
+    ]) {
+      for (const active of [1, 4, 27, 340]) {
+        const d = routeDescription('Санкт-Петербург', 'Ереван', active, facts);
+        if (d.length > 160) over.push(`${active} ${JSON.stringify(facts)}: ${d.length} — ${d}`);
+      }
+    }
+    expect(over).toEqual([]);
   });
 
   it('страница маршрута рендерится с новым заголовком', async () => {
@@ -200,6 +240,20 @@ describe('заголовок и описание маршрута', () => {
     // active=4 в моке: число заявок попало в <title>
     expect(html).toContain('<title>Передать посылку Варшава → Минск — 4 заявки | попутка.</title>');
     expect(html).toContain('name="description" content="4 живые заявки Варшава → Минск:');
+  });
+
+  /* Факты считаются из заявок маршрута: здесь проверяем сам провод от
+     buildRoutePage до описания, иначе опечатка в подсчёте прошла бы молча. */
+  it('страница обещает ровно те поля, которые заполнены в её заявках', async () => {
+    // сид beforeEach: у заявки есть дата, цена и телеграм — все три в описании
+    const full = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(full).toContain('даты выезда, цены и контакт водителя');
+
+    clearRouteIndexCache();
+    db.listings = [listing({ departureDate: null, price: null })];
+    const bare = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(bare).toContain('name="description" content="4 живые заявки Варшава → Минск: контакт водителя.');
+    expect(bare).not.toContain('даты выезда, цены');
   });
 });
 
