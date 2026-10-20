@@ -56,9 +56,53 @@ describe('validateAiListing — валидация ответа DeepSeek', () =>
     expect(validateAiListing(ok({ type: 'поездка' }), { now: NOW, originalText: TEXT })).toBeNull();
   });
 
-  it('невалидная дата отбрасывается, заявка остаётся', () => {
-    expect(validateAiListing(ok({ departure_date: '1111-11-11' }), { now: NOW, originalText: TEXT })!.departureDate).toBeNull();
-    expect(validateAiListing(ok({ departure_date: '2030-01-01' }), { now: NOW, originalText: TEXT })!.departureDate).toBeNull();
+  it('невалидная дата отбрасывается, а вместо неё — дата из текста сообщения', () => {
+    // '1111-11-11' и '2030-01-01' мимо разумных пределов — их не берём. Но в
+    // самом сообщении есть «завтра», поэтому заявка не остаётся без даты:
+    // запасной ход (v0.4.40) достаёт завтрашний день правилом.
+    const f = validateAiListing(ok({ departure_date: '1111-11-11' }), { now: NOW, originalText: TEXT })!;
+    expect(f.departureDate).not.toBe('1111-11-11');
+    expect(f.departureDate).toBe('2026-09-15');
+    expect(validateAiListing(ok({ departure_date: '2030-01-01' }), { now: NOW, originalText: TEXT })!.departureDate).toBe('2026-09-15');
+  });
+
+  it('в тексте даты нет — заявка честно остаётся без даты', () => {
+    const f = validateAiListing(ok({ departure_date: '1111-11-11' }), {
+      now: NOW, originalText: 'Везу посылку Крокодилово — Бегемотово, 5 кг, есть место',
+    })!;
+    expect(f.departureDate).toBeNull();
+  });
+
+  it('запасной ход: относительные сроки, которые модель отдаёт как null', () => {
+    const run = (t: string, over: Record<string, unknown> = {}) => validateAiListing(
+      ok({ departure_date: null, ...over }), { now: NOW, originalText: t },
+    )!.departureDate;
+    // реальные формулировки из выгрузки: 554 заявки на доске были без даты
+    expect(run('Через 1час еду Каунас-Вильнюс, есть места')).toBe('2026-09-14');
+    expect(run('В течении 1-2 часов еду Варшава-Брест, есть свободное место')).toBe('2026-09-14');
+    expect(run('Через 3 дня еду Брест - Варшава')).toBe('2026-09-17');
+    expect(run('Вечером 15-го сентября еду Минск Варшава')).toBe('2026-09-15');
+    // регулярный рейс без даты — ближайший такой день
+    expect(run('Каждый четверг возим Крокодилово — Бегемотово')).toBe('2026-09-17');
+  });
+
+  it('запасной ход не выдумывает дату из срока годности и из цен', () => {
+    const run = (t: string) => validateAiListing(ok({ departure_date: null }), { now: NOW, originalText: t })!.departureDate;
+    // «до» — это срок годности заявки, а не дата выезда
+    expect(run('Нужно привезти игрушки. Актуально до 30 сентября, за вознаграждение')).toBeNull();
+    expect(run('Нужно передать паспорт, успеть не позднее 20.09')).toBeNull();
+    // цены и размеры — не даты
+    expect(run('Заказы 200-600 брутто, аптека около 300 г по 1.4$ за штуку')).toBeNull();
+    expect(run('Перевозка доски размером 7.0, Emirates')).toBeNull();
+    // «в ближайшие дни» — слишком размыто, чтобы угадывать
+    expect(run('Ищет попутчика в ближайшие дни')).toBeNull();
+  });
+
+  it('дату модели запасной ход не перебивает', () => {
+    const f = validateAiListing(ok({ departure_date: '2026-09-20' }), {
+      now: NOW, originalText: 'Завтра везу посылку Крокодилово — Бегемотово',
+    })!;
+    expect(f.departureDate).toBe('2026-09-20');
   });
 
   it('дикий вес и кривой контакт отбрасываются', () => {

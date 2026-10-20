@@ -16,7 +16,7 @@
  */
 import type { Env, ListingType } from './types';
 import type { MonthStat } from './stats';
-import { normalizeCity, parseRecurring } from './parser';
+import { normalizeCity, parseDate, parseRecurring } from './parser';
 import { dedupeDescription, isRussianCity, normalizeContacts } from './util';
 
 /** Дневной лимит ИИ-вызовов — страховка от неожиданного счёта. */
@@ -103,6 +103,22 @@ export function validateAiListing(
     const min = opts.now.getTime() - 3 * 86400_000;
     const max = opts.now.getTime() + 366 * 86400_000;
     if (Number.isFinite(t) && t >= min && t <= max) departureDate = b.departure_date;
+  }
+
+  /* ИИ дату не вернул — пробуем правилом по исходному тексту сообщения.
+     Модель честно возвращает null на «через 1час еду», «в течении 1-2 часов»,
+     «вечером 21-го октября», и заявка остаётся без даты: на доске таких было
+     554 из 951, а без даты заявка ещё и не стареет. parseDate знает
+     относительные сроки и порядковые окончания, а «актуально до 30 октября»
+     (срок годности, а не выезд) и «по 1.4$ за штуку» он датой не считает. */
+  if (!departureDate) {
+    const byRule = parseDate(opts.originalText, opts.now);
+    if (byRule) {
+      const t = new Date(`${byRule}T00:00:00Z`).getTime();
+      const min = opts.now.getTime() - 3 * 86400_000;
+      const max = opts.now.getTime() + 366 * 86400_000;
+      if (Number.isFinite(t) && t >= min && t <= max) departureDate = byRule;
+    }
   }
 
   let weightKg: number | null = null;

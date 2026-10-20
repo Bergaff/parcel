@@ -496,11 +496,74 @@ function hasWord(text: string, word: string): boolean {
   return new RegExp(`(^|[^${CYRILLIC}0-9])${word}([^${CYRILLIC}0-9]|$)`).test(text);
 }
 
+/**
+ * «Актуально до 30 октября», «не позднее 5.11» — это срок годности заявки,
+ * а не дата выезда. Смотрим, что написано перед найденной датой: если там
+ * «до», дату не берём (иначе «нужно привезти до 30 октября» превращалось в
+ * выезд 30 октября).
+ */
+function isDeadlineContext(lower: string, index: number): boolean {
+  const before = lower.slice(Math.max(0, index - 20), index);
+  return /(?:до|не\s+позднее|не\s+позже|позднее|позже|крайний\s+срок)\s*$/.test(before);
+}
+
+/** «аптека около 300 г по 1.4$ за штуку»: после цифр идёт валюта — это цена,
+ *  а не 1 апреля. */
+function isPriceContext(lower: string, index: number, length: number): boolean {
+  const after = lower.slice(index + length, index + length + 8);
+  return /^\s*(?:\$|€|₽|zł|зл|руб|долл|eur|usd|pln|byn|грн|евро)/.test(after);
+}
+
+/** Дата без года, уехавшая дальше 120 дней, — почти всегда не дата выезда, а
+ *  приклеившиеся цифры: «по 1.4$» → 1 апреля, а поскольку в этом году 1 апреля
+ *  уже прошло, старое правило «переносим на следующий год» давало +163 дня. */
+const MAX_FAR_DAYS = 120;
+
+function tooFar(candidate: Date, now: Date): boolean {
+  return candidate.getTime() - startOfDay(now).getTime() > MAX_FAR_DAYS * 86_400_000;
+}
+
+/** «255/40r21», «Brzeska 1.4»: цифры, приклеенные к буквам или другим цифрам,
+ *  датой не являются — иначе размер шины становился поездкой 55 апреля. */
+function isGluedToWord(lower: string, index: number, length: number): boolean {
+  const before = index > 0 ? lower[index - 1]! : ' ';
+  const after = lower[index + length] ?? ' ';
+  return /[\dа-яёa-z]/.test(before) || /[\dа-яёa-z]/.test(after);
+}
+
 export function parseDate(text: string, now: Date = new Date()): string | null {
   const lower = text.toLowerCase().replace(/ё/g, 'е');
-  if (hasWord(lower, 'послезавтра')) return toIso(addDays(now, 2));
+  if (hasWord(lower, 'послезавтра') || hasWord(lower, 'післязавтра')) return toIso(addDays(now, 2));
   if (hasWord(lower, 'завтра')) return toIso(addDays(now, 1));
-  if (hasWord(lower, 'сегодня')) return toIso(now);
+  if (hasWord(lower, 'сегодня') || hasWord(lower, 'сьогодні')) return toIso(now);
+
+  /* «Через 1час еду Каунас-Вильнюс», «в течении 1-2 часов еду Варшава-Брест»,
+     «через 3 дня», «через неделю» — срок относительный, но однозначный:
+     считаем от сегодняшнего дня. «В ближайшие дни» сюда сознательно не
+     попадает: угадывать дату нельзя, лучше честно оставить заявку без неё. */
+  // «через час», «через полчаса» — выезжает сегодня
+  if (/через\s+(час|полчаса|минут)/.test(lower)) return toIso(now);
+  // словесные сроки без числа: «через неделю», «через пару дней», «через месяц»
+  if (/через\s+пару\s+дн/.test(lower)) return toIso(addDays(now, 2));
+  if (/через\s+(две|2)\s+недел/.test(lower)) return toIso(addDays(now, 14));
+  if (/через\s+недел/.test(lower)) return toIso(addDays(now, 7));
+  if (/через\s+месяц/.test(lower)) return toIso(addDays(now, 30));
+  const rel = lower.match(
+    /(?:через|в\s*течени[еи]\w*|на\s*протяжении)\s*(\d{1,3})(?:\s*[-–—]\s*\d{1,3})?\s*(час\w*|мин\w*|дн\w*|недел\w*|сут\w*)/,
+  );
+  if (rel) {
+    const n = parseInt(rel[1]!, 10);
+    const unit = rel[2]!;
+    if (unit.startsWith('недел')) return toIso(addDays(now, n * 7));
+    if (unit.startsWith('дн') || unit.startsWith('сут')) return toIso(addDays(now, n));
+    return toIso(now); // часы и минуты — сегодня
+  }
+  // «на выходных», «в выходные» — ближайшая суббота (если сегодня не суббота)
+  if (/(?:на|в)\s*выходны[ех]|на\s*этих\s*выходных/.test(lower)) {
+    const d = new Date(now);
+    d.setDate(d.getDate() + (((6 - d.getDay()) + 7) % 7 || 7));
+    return toIso(d);
+  }
 
   for (const [name, weekday] of Object.entries(WEEKDAYS)) {
     // \b в JS не работает с кириллицей — используем явные границы
@@ -514,7 +577,9 @@ export function parseDate(text: string, now: Date = new Date()): string | null {
   }
 
   const m = lower.match(/(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?/);
-  if (m) {
+  const at = m?.index ?? 0;
+  if (m && !isGluedToWord(lower, at, m[0].length) && !isDeadlineContext(lower, at)
+    && !isPriceContext(lower, at, m[0].length)) {
     const day = parseInt(m[1]!, 10);
     const month = parseInt(m[2]!, 10);
     if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
@@ -524,6 +589,9 @@ export function parseDate(text: string, now: Date = new Date()): string | null {
       if (candidate.getDate() === day && candidate.getMonth() === month - 1) {
         // Если дата без года уже прошла — предполагаем следующий год (актуально для анонсов).
         if (!m[3] && candidate < startOfDay(now)) candidate.setFullYear(candidate.getFullYear() + 1);
+        // но уехавшую слишком далеко дату без года не отдаём: скорее всего это
+        // не дата, а цена, размер или номер («по 1.4$», «255/40r21»)
+        if (!m[3] && tooFar(candidate, now)) return null;
         return toIso(candidate);
       }
     }
@@ -531,14 +599,16 @@ export function parseDate(text: string, now: Date = new Date()): string | null {
 
   // «15 сентября», «5 жовтня» — число + название месяца
   for (const [prefix, month] of MONTHS) {
-    const re = new RegExp(`(\\d{1,2})[^\\dа-яё]{0,3}${prefix}`);
+    // порядковое окончание между числом и месяцем: «21-го октября», «3-е ноября»
+    const re = new RegExp(`(\\d{1,2})(?:\\s*-?\\s*(?:го|е|ое|ый|й|ая|числа))?[^\\dа-яё]{0,3}${prefix}`);
     const mm = lower.match(re);
-    if (mm) {
+    if (mm && !isDeadlineContext(lower, mm.index ?? 0)) {
       const day = parseInt(mm[1]!, 10);
       if (day >= 1 && day <= 31) {
         const candidate = new Date(now.getFullYear(), month - 1, day);
         if (candidate.getDate() === day) {
           if (candidate < startOfDay(now)) candidate.setFullYear(candidate.getFullYear() + 1);
+          if (tooFar(candidate, now)) continue; // «15 мая» в декабре — не дата выезда
           return toIso(candidate);
         }
       }
