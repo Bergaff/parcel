@@ -16,7 +16,7 @@
  * Всё чистые функции — сравнивать текст и контакты тестируется юнитами.
  */
 import { normalizeCity } from './parser';
-import { hasContactHint, uniqueContacts } from './util';
+import { hasContactHint, phoneNumber, telegramUsername, uniqueContacts } from './util';
 
 /** Заявка или черновик заявки: всё, что нужно для сравнения. */
 export interface DedupeSubject {
@@ -99,14 +99,85 @@ export function sameUsername(a: string | null | undefined, b: string | null | un
   return digits(na).length >= 9 && samePhone(na, nb);
 }
 
-/** Контакт один и тот же? false — если хотя бы у одной стороны контакта нет. */
-export function sameContact(a: DedupeSubject, b: DedupeSubject): boolean {
-  if (sameUsername(a.telegram, b.telegram)) return true;
-  if (samePhone(a.phone, b.phone)) return true;
-  // Контакты нормализуются при сохранении, но сравниваем и крест-накрест:
-  // тот же номер мог попасть в другое поле
-  if (samePhone(a.telegram, b.phone) || samePhone(a.phone, b.telegram)) return true;
+/**
+ * Контакты, которые остались внутри текста заявки.
+ *
+ * Повод — настоящая выгрузка: у 82 заявок на доске номер или @юзернейм написаны
+ * в описании, а поля telegram/phone пустые. Ещё бывает, что юзернеймы в полях
+ * различаются («@q6891» и «@6891»), а телефон в тексте один и тот же.
+ */
+export function contactsInText(
+  description: string | null | undefined
+): { telegram: string | null; phone: string | null } {
+  const text = description ?? '';
+  if (!hasContactHint(text)) return { telegram: null, phone: null };
+  return { telegram: telegramUsername(text), phone: phoneNumber(text) };
+}
+
+/** Ключи контакта: телефон — по последним 9 цифрам, юзернейм — без @ и регистра. */
+function contactKeys(telegram: string | null, phone: string | null): Set<string> {
+  const keys = new Set<string>();
+  for (const raw of [telegram, phone]) {
+    const v = (raw ?? '').trim();
+    if (!v) continue;
+    const d = digits(v);
+    if (d.length >= 9) {
+      keys.add(`p:${d.slice(-9)}`);
+      continue;
+    }
+    const u = v.toLowerCase().replace(/^@+/, '');
+    if (u) keys.add(`u:${u}`);
+  }
+  return keys;
+}
+
+function keysOverlap(a: Set<string>, b: Set<string>): boolean {
+  for (const k of a) if (b.has(k)) return true;
   return false;
+}
+
+const fieldKeys = (l: DedupeSubject): Set<string> => contactKeys(l.telegram ?? null, l.phone ?? null);
+
+/** Все контакты стороны: из полей и из текста объявления. */
+function allKeys(l: DedupeSubject): Set<string> {
+  const inText = contactsInText(l.description);
+  const keys = contactKeys(l.telegram ?? null, l.phone ?? null);
+  for (const k of contactKeys(inText.telegram, inText.phone)) keys.add(k);
+  return keys;
+}
+
+/**
+ * Совпал хоть один контакт — считая и написанные в тексте.
+ *
+ * Так ловится настоящая пара из выгрузки: у одной заявки в поле телефон
+ * +375 29 522-80-98, а в тексте +90 539 951 8009; у второй в поле как раз
+ * +90 539 951 8009. По полям они «разные», по смыслу — один и тот же приём
+ * посылок из Стамбула.
+ */
+export function sameContactAnywhere(a: DedupeSubject, b: DedupeSubject): boolean {
+  return keysOverlap(allKeys(a), allKeys(b));
+}
+
+/** В полях у обоих есть контакты и они разные — прямое противоречие. */
+function fieldsContradict(a: DedupeSubject, b: DedupeSubject): boolean {
+  const ka = fieldKeys(a);
+  const kb = fieldKeys(b);
+  return ka.size > 0 && kb.size > 0 && !keysOverlap(ka, kb);
+}
+
+/**
+ * Контакт один и тот же? false — если хотя бы у одной стороны контакта нет.
+ *
+ * Сравниваем всё, что знаем: поля (крест-накрест, номер мог попасть в поле
+ * telegram) и контакт из текста. Но если в полях у обоих стоят РАЗНЫЕ контакты,
+ * совпадение в тексте «тем же человеком» не считаем — это противоречие, его
+ * показывает модератору compareForDuplicate.
+ */
+export function sameContact(a: DedupeSubject, b: DedupeSubject): boolean {
+  if (!sameContactAnywhere(a, b)) return false;
+  // в полях у обоих стоят разные контакты — совпадение в тексте этого не отменяет,
+  // но и «тем же человеком» назвать не даёт: пусть смотрит модератор
+  return !fieldsContradict(a, b);
 }
 
 /** Оба контакта известны и они разные — значит, люди разные. */
@@ -120,6 +191,10 @@ export function differentContacts(a: DedupeSubject, b: DedupeSubject): boolean {
 export function whoLabel(l: DedupeSubject): string {
   const [contact] = uniqueContacts(l.telegram ?? null, l.phone ?? null);
   if (contact) return contact;
+  // поля пустые, но в тексте контакт есть — называем его, а не «без контакта»
+  const inText = contactsInText(l.description);
+  const [fromText] = uniqueContacts(inText.telegram, inText.phone);
+  if (fromText) return fromText;
   if (l.sourceChat) return l.sourceChat;
   return 'без контакта';
 }
@@ -180,6 +255,7 @@ function forwardedFrom(l: DedupeSubject): string | null {
 }
 
 function dateNote(a: DedupeSubject, b: DedupeSubject): string {
+  if (!a.departureDate && !b.departureDate) return 'даты нет ни у одной — сравниваем по человеку и маршруту';
   if (!a.departureDate || !b.departureDate) return 'дата не у всех указана';
   const diff = dateDiffDays(a.departureDate, b.departureDate);
   if (!diff) return `дата та же (${a.departureDate})`;
@@ -206,7 +282,23 @@ export function compareForDuplicate(
   const bothRecurring = Boolean(input.recurring) && Boolean(existing.recurring);
 
   const diff = dateDiffDays(input.departureDate, existing.departureDate);
-  if (diff != null && diff > 1 && !bothRecurring) return null; // другой день — другой рейс
+  if (diff != null && diff > 1 && !bothRecurring) {
+    // Другой день — другой рейс: дублем не считаем и заявку не гасим. Но если
+    // человек тот же, молчать нельзя. В настоящей выгрузке таких пар на доске
+    // 20: либо регулярный рейс, у которого расписание не проставили, либо
+    // повторный анонс той же поездки. Ни то ни другое само не рассосётся —
+    // показываем модератору как «похожее», пусть решит.
+    if (sameContact(input, existing)) {
+      return {
+        kind: 'similar',
+        why: `тот же человек (${whoLabel(existing)}), тот же маршрут, но даты далеко (${existing.departureDate} и ${input.departureDate}, ${diff} дн.) — `
+          + (input.recurring || existing.recurring
+            ? `похоже на регулярный рейс (${input.recurring ?? existing.recurring}): отметьте расписание, чтобы не разбирать руками`
+            : 'похоже на повторный анонс того же рейса'),
+      };
+    }
+    return null;
+  }
 
   const route = `${existing.fromCity} → ${existing.toCity}`;
   const sim = textSimilarity(input.description, existing.description);
@@ -222,6 +314,17 @@ export function compareForDuplicate(
   // Контакты известны у обоих и они разные — значит, люди разные: дальше
   // «дубль» уже не ставим, только предупреждаем модератора.
   const different = differentContacts(input, existing);
+
+  // Поля противоречат, но какой-то из контактов всё же совпал — через текст:
+  // так бывает, когда человек пишет с двух аккаунтов, когда юзернейм записали с
+  // опечаткой («@q6891» и «@6891») или когда один номер стоит в поле, а другой —
+  // в объявлении. Гасить заявку рискованно, но и молчать нельзя.
+  if (different && sameContactAnywhere(input, existing)) {
+    return {
+      kind: 'similar',
+      why: `в полях контакты разные (${whoLabel(input)} и ${whoLabel(existing)}), но один из них совпал с контактом из текста — проверьте, не один ли это человек`,
+    };
+  }
 
   // 2. Та же пересылка от того же автора (контакта Telegram не отдал)
   const fromA = forwardedFrom(input);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   compareForDuplicate,
+  contactsInText,
   groupDuplicates,
   keepRank,
   dateDiffDays,
@@ -55,8 +56,17 @@ describe('один и тот же человек пишет каждый ден�
     expect(compareForDuplicate(input({ departureDate: '2026-09-21' }), existing())?.kind).toBe('duplicate');
   });
 
-  it('другой день — другой рейс, не дубль', () => {
-    expect(compareForDuplicate(input({ departureDate: '2026-09-25' }), existing())).toBeNull();
+  /* Повод — настоящая выгрузка: 20 пар на доске, где один и тот же контакт держит
+     две заявки одного маршрута с датами через 3–16 дней. Раньше дедуп на этом
+     месте молчал вовсе: ни дубля, ни предупреждения. */
+  it('другой день — не дубль, но тот же человек показывается модератору', () => {
+    const v = compareForDuplicate(input({ departureDate: '2026-09-25' }), existing());
+    expect(v?.kind).toBe('similar'); // заявку не гасим: рейс другой
+    expect(v?.why).toContain('даты далеко');
+    expect(v?.why).toContain('2026-09-20 и 2026-09-25');
+    expect(v?.why).toContain('повторный анонс');
+    // в группу дублей такое не попадает — удалять нечего
+    expect(groupDuplicates([existing(), input({ id: 'new-1', departureDate: '2026-09-25' })])).toHaveLength(0);
   });
 
   it('повтор каждый день пять раз подряд — каждый раз дубль одной и той же заявки', () => {
@@ -396,20 +406,104 @@ describe('регулярные рейсы — дубликаты по распи
     expect(v?.why).toContain('регулярные');
   });
 
-  it('разовые рейсы с далёкими датами — по-прежнему не дубль', () => {
-    expect(
-      compareForDuplicate(input({ departureDate: '2026-09-24' }), existing({ departureDate: '2026-09-17' }))
-    ).toBeNull();
+  it('разовые рейсы с далёкими датами — по-прежнему не дубль, а предупреждение', () => {
+    const v = compareForDuplicate(input({ departureDate: '2026-09-24' }), existing({ departureDate: '2026-09-17' }));
+    expect(v?.kind).toBe('similar');
+    expect(v?.why).toContain('повторный анонс');
   });
 
   it('регулярный и разовый не склеиваются', () => {
     // дата далеко: у регулярного она катится cron'ом, у разового — своя.
-    // Это два разных рейса, дубликатом не считаем.
-    expect(
-      compareForDuplicate(
-        input({ departureDate: '2026-09-24', recurring: 'каждый четверг' }),
-        existing({ departureDate: '2026-09-30' })
-      )
-    ).toBeNull();
+    // Это два разных рейса, дубликатом не считаем — но подсказываем, что
+    // расписание не проставлено.
+    const v = compareForDuplicate(
+      input({ departureDate: '2026-09-24', recurring: 'каждый четверг' }),
+      existing({ departureDate: '2026-09-30' })
+    );
+    expect(v?.kind).toBe('similar');
+    expect(v?.why).toContain('регулярный рейс (каждый четверг)');
+  });
+});
+
+/* Дубли, которые видны в настоящей выгрузке: на доске 29 групп, где один
+   контакт держит 2–3 заявки одного маршрута. Три разных случая. */
+describe('без даты и с контактом внутри текста', () => {
+  it('даты нет ни у одной, контакт тот же — дубль', () => {
+    const a = input({
+      fromCity: 'Тересполь', toCity: 'Брест', departureDate: null, telegram: '@slavavtrust', phone: null,
+      description: 'Тересполь-Брест есть свободные места в течении 40 мин. Без предоплат.',
+    });
+    const b = existing({
+      id: 'old-1', fromCity: 'Тересполь', toCity: 'Брест', departureDate: null, telegram: '@slavavtrust', phone: null,
+      description: 'Тересполь-Брест есть свободные места в течении часа. Без предоплат.',
+    });
+    const v = compareForDuplicate(a, b);
+    expect(v?.kind).toBe('duplicate');
+    expect(v?.why).toContain('даты нет ни у одной');
+    expect(groupDuplicates([a, b])).toHaveLength(1);
+  });
+
+  it('без даты люди разные — не дубль, даже при одинаковом тексте', () => {
+    const a = input({ departureDate: null, telegram: '@petya', description: 'Есть места, выезжаю сейчас' });
+    const b = existing({ departureDate: null, telegram: '@vasya', description: 'Есть места, выезжаю сейчас' });
+    expect(compareForDuplicate(a, b)?.kind).not.toBe('duplicate');
+  });
+
+  it('контакт написан в тексте, а поля пустые — тот же человек узнаётся', () => {
+    const a = input({
+      departureDate: '2026-10-20', telegram: null, phone: null,
+      description: 'Еду Минск Варшава вечером, возьму передачи. Вайбер +375 29 153-27-64',
+    });
+    const b = existing({
+      departureDate: '2026-10-20', telegram: null, phone: null,
+      description: 'Минск - Варшава, есть места. Пишите +375291532764',
+    });
+    expect(sameContact(a, b)).toBe(true);
+    expect(compareForDuplicate(a, b)?.kind).toBe('duplicate');
+    expect(whoLabel(a)).toContain('375'); // раньше печаталось «без контакта»
+  });
+
+  it('в полях номера разные, но один из них есть в чужом тексте — предупреждаем, не гасим', () => {
+    // настоящая пара из выгрузки: Стамбул → Москва, приём посылок
+    const a = input({
+      fromCity: 'Стамбул', toCity: 'Москва', departureDate: '2026-10-20', telegram: null, phone: '+375295228098',
+      description: 'Принимают личные вещи, документы, посылки и продукты; выкуп заказов. +905399518009',
+    });
+    const b = existing({
+      fromCity: 'Стамбул', toCity: 'Москва', departureDate: '2026-10-20', telegram: null, phone: '+37529399518009',
+      description: 'Принимают личные вещи, документы, посылки, продукты; выкуп заказов из Турции.',
+    });
+    expect(differentContacts(a, b)).toBe(true);
+    const v = compareForDuplicate(a, b);
+    expect(v?.kind).toBe('similar');
+    expect(v?.why).toContain('совпал с контактом из текста');
+  });
+
+  it('юзернеймы разные, а телефон в тексте один — тоже предупреждаем', () => {
+    // настоящая пара: Москва → Гуанчжоу, @q6891 и @6891
+    const a = input({
+      fromCity: 'Москва', toCity: 'Гуанчжоу', departureDate: '2026-10-20', telegram: '@q6891', phone: null,
+      description: 'Беру разные посылки и документы. По Китаю отправлю в любой город. Вайбер 15915755453',
+    });
+    const b = existing({
+      fromCity: 'Москва', toCity: 'Гуанчжоу', departureDate: '2026-10-20', telegram: '@6891', phone: null,
+      description: 'Возьму посылки и документы, по Китаю отправлю в любой город. 15915755453',
+    });
+    expect(sameContact(a, b)).toBe(false); // поля противоречат — «тем же человеком» не называем
+    expect(compareForDuplicate(a, b)?.kind).toBe('similar');
+  });
+
+  it('даты и размеры в тексте контакта не дают', () => {
+    expect(contactsInText('Выезд 20.10 вечером, есть места, возьму до 10 кг')).toEqual({ telegram: null, phone: null });
+    expect(contactsInText('Выезд 20.10.2026 в 9-10.00, Брест - Варшава')).toEqual({ telegram: null, phone: null });
+    expect(contactsInText('комплект новых шин 255/40r21 и доставить до подъезда')).toEqual({ telegram: null, phone: null });
+    expect(contactsInText('Пишите в вайбер +375 29 153-27-64')).toEqual({ telegram: null, phone: '+375 29 153-27-64' });
+    expect(contactsInText('мой телеграм @driver77, места есть')).toEqual({ telegram: '@driver77', phone: null });
+
+    // разные люди без контактов и с разным текстом — дубля нет
+    const a = input({ departureDate: null, telegram: null, phone: null, description: 'Выезд 20.10 вечером, есть места, возьму до 10 кг' });
+    const b = existing({ departureDate: null, telegram: null, phone: null, description: 'Завтра утром еду обратно, багажник пустой, пишите в личку' });
+    expect(sameContact(a, b)).toBe(false);
+    expect(compareForDuplicate(a, b)).toBeNull();
   });
 });
