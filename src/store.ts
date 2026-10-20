@@ -343,7 +343,11 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
  * 3) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE);
  * 4) регулярные рейсы без обновлений 45 дней — удаляются (расписание умерло).
  */
-export async function archiveExpired(env: Env, now: Date = new Date()): Promise<{ archived: number; deleted: number; rolled: number; pruned: number }> {
+export async function archiveExpired(env: Env, now: Date = new Date()): Promise<{
+  archived: number; deleted: number; rolled: number; pruned: number;
+  /** сколько видимых заявок без даты выезда состарилось (архив + удаление) */
+  dateless: number;
+}> {
   await ensureRecurringColumn(env);
   await ensureHiddenColumn(env);
 
@@ -415,11 +419,32 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
        AND created_at < datetime('now', '-60 days')`
   ).run();
 
+  // 6) Видимые заявки БЕЗ даты выезда: стареть им было не от чего, поэтому
+  //    пункты 2–3 их не касались, а пункт 5 написан только для hidden = 1.
+  //    На доске таких накопилось 422 (из 951 заявка без даты), 317 старше
+  //    недели, 21 старше месяца — и куча росла бы вечно. Живём по возрасту:
+  //    21 день на доске → архив, ещё 30 → удаление. Регулярные рейсы не
+  //    трогаем: у них дату катит пункт 1, а мёртвых убирает пункт 4.
+  const updNoDate = await env.DB.prepare(
+    `UPDATE listings SET status = 'expired'
+     WHERE COALESCE(hidden, 0) = 0 AND status = 'published'
+       AND departure_date IS NULL AND recurring IS NULL
+       AND COALESCE(published_at, created_at) < datetime('now', '-21 days')`
+  ).run();
+  const delNoDate = await env.DB.prepare(
+    `DELETE FROM listings
+     WHERE COALESCE(hidden, 0) = 0 AND status = 'expired'
+       AND departure_date IS NULL AND recurring IS NULL
+       AND COALESCE(published_at, created_at) < datetime('now', '-51 days')`
+  ).run();
+
   return {
-    archived: (upd.meta.changes ?? 0) + (updHidden.meta.changes ?? 0),
-    deleted: (del.meta.changes ?? 0) + (delHidden.meta.changes ?? 0),
+    archived: (upd.meta.changes ?? 0) + (updHidden.meta.changes ?? 0) + (updNoDate.meta.changes ?? 0),
+    deleted: (del.meta.changes ?? 0) + (delHidden.meta.changes ?? 0) + (delNoDate.meta.changes ?? 0),
     rolled,
     pruned: prune.meta.changes ?? 0,
+    // отдельно — сколько бездатных заявок состарилось (видно в логе cron)
+    dateless: (updNoDate.meta.changes ?? 0) + (delNoDate.meta.changes ?? 0),
   };
 }
 

@@ -21,7 +21,10 @@ function recurringRow(over: Record<string, unknown> = {}) {
 }
 
 /** D1-подделка: SELECT возвращает заданные строки, UPDATE/DELETE «выполняются». */
-function fakeDb(selectRows: Record<string, unknown>[], opts: { hiddenChanges?: number } = {}) {
+function fakeDb(
+  selectRows: Record<string, unknown>[],
+  opts: { hiddenChanges?: number; datelessChanges?: number } = {},
+) {
   const calls: Call[] = [];
   const make = (sql: string) => {
     const call: Call = { sql, params: [] };
@@ -42,6 +45,9 @@ function fakeDb(selectRows: Record<string, unknown>[], opts: { hiddenChanges?: n
       async run() {
         // скрытые заявки — отдельная статистика, чтобы старые тесты не путались
         if (/hidden = 1/.test(sql)) return { meta: { changes: opts.hiddenChanges ?? 0 } };
+        // то же для видимых без даты: иначе подделка отвечала бы «1» на любой
+        // UPDATE, и старые ожидания чисел поехали бы просто из-за нового запроса
+        if (/COALESCE\(hidden, 0\) = 0/.test(sql)) return { meta: { changes: opts.datelessChanges ?? 0 } };
         return { meta: { changes: 1 } };
       },
       async first() { return null; },
@@ -117,6 +123,30 @@ describe('archiveExpired — скрытые заявки без контакта
     // статистика схлопывает обе категории (обычный архив дал бы 1 + скрытые 2)
     expect(res.archived).toBe(3);
     expect(res.deleted).toBe(3);
+  });
+
+  it('видимые без даты: 21 день на доске → архив, 51 → удаление, и это видно в счёте', async () => {
+    const { env, calls } = fakeDb([], { datelessChanges: 7 });
+    const res = await archiveExpired(env, NOW);
+    const expire = calls.find((c) => /UPDATE listings SET status = 'expired'\s+WHERE COALESCE\(hidden, 0\) = 0/.test(c.sql));
+    expect(expire, 'видимые заявки без даты должны стареть').toBeTruthy();
+    expect(expire!.sql).toContain('departure_date IS NULL');
+    expect(expire!.sql).toContain('recurring IS NULL'); // регулярные — пункт 1 и 4
+    expect(expire!.sql).toContain("-21 days");
+    expect(expire!.sql).toContain('COALESCE(published_at, created_at)'); // возраст считаем от публикации
+    const del = calls.find((c) => /DELETE FROM listings\s+WHERE COALESCE\(hidden, 0\) = 0/.test(c.sql));
+    expect(del, 'архив без даты удаляется').toBeTruthy();
+    expect(del!.sql).toContain("-51 days");
+    // счёт честный: обычные (1+1) + скрытые (0) + бездатные (7+7)
+    expect(res.dateless).toBe(14);
+    expect(res.archived).toBe(1 + 7);
+    expect(res.deleted).toBe(1 + 7);
+  });
+
+  it('без датчика изменений новый шаг ничего не приписывает', async () => {
+    const { env } = fakeDb([]);
+    const res = await archiveExpired(env, NOW);
+    expect(res.dateless).toBe(0);
   });
 
   it('колонку hidden воркер гарантирует сам (PRAGMA до UPDATE)', async () => {
