@@ -30,7 +30,9 @@ interface Init {
 }
 interface StubResult {
   status?: number;
-  body: unknown;
+  body?: unknown;
+  /** сырой текст ответа — для CSV, где JSON.stringify исказил бы файл */
+  raw?: string;
   delayMs?: number;
 }
 
@@ -60,6 +62,8 @@ const server = {
   forumStatsGets: 0, // сколько раз вкладка «канал» забирала статистику
   boardOver: null as Loose | null, // override карточки вкладки «доска»
   archiveFarPosts: 0, // сколько раз админка убирала с доски аномальные даты
+  csvGets: 0, // сколько раз админка выгружала заявки в таблицу
+  csvAuth: null as string | null, // пришёл ли ключ админки заголовком
   boardOddGets: 0, // сколько раз доска запрашивала фильтр аномальных дат
   farArchivedStub: 0, // >0 — сервер говорит «все аномальные уже в архиве»
   matchHidden: [] as Array<{ key: string; label: string }>,
@@ -161,6 +165,12 @@ function makeFetch(calls: string[]) {
 
       /* админка */
       if (path.startsWith('/api/admin/') && !authed) return { status: 401, body: { error: 'unauthorized' } };
+      if (path === '/api/admin/listings.csv') {
+        server.csvGets += 1;
+        server.csvAuth = authed ? 'ok' : 'none';
+        // как отдаёт сервер: BOM, CRLF, разделитель «;», две заявки
+        return { raw: '\uFEFF"id";"статус"\r\n"x1";"на доске"\r\n"y2";"в архиве"\r\n' };
+      }
       if (path === '/api/admin/listings') {
         if (q.get('tab') === 'pending') {
           const items = [
@@ -365,7 +375,7 @@ function makeFetch(calls: string[]) {
       ok: status >= 200 && status < 300,
       status,
       json: async () => r.body,
-      text: async () => JSON.stringify(r.body),
+      text: async () => r.raw ?? JSON.stringify(r.body),
     };
   };
 }
@@ -693,6 +703,39 @@ describe('админка', () => {
     expect(win.document.querySelector('#admin-list .admin-card')).toBeNull();
     expect(text('admin-count')).toContain('Необработанных заявок нет');
     server.approvedDuplicate = null;
+  });
+
+  it('экспорт в CSV: файл скачивается с ключом в заголовке, строки посчитаны', async () => {
+    byId('admin-tab-board').click();
+    await settle(80);
+    const btn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'экспорт в CSV') as HTMLElement | undefined;
+    expect(btn, 'кнопка «экспорт в CSV» на вкладке «доска»').toBeTruthy();
+
+    // ловим скачивание: jsdom не умеет ни createObjectURL, ни navigation
+    const downloads: string[] = [];
+    const origClick = win.HTMLAnchorElement.prototype.click;
+    win.HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    } as unknown as () => void;
+    const getsBefore = server.csvGets;
+    btn!.click();
+    await settle(120);
+    win.HTMLAnchorElement.prototype.click = origClick;
+
+    expect(server.csvGets).toBe(getsBefore + 1);
+    expect(calls.filter((c) => c === 'GET /api/admin/listings.csv')).toHaveLength(1);
+    // ключ админки уходит заголовком: в адресе ему быть нельзя
+    expect(server.csvAuth).toBe('ok');
+    expect(downloads).toHaveLength(1);
+    expect(downloads[0]).toMatch(/^poputka-zayavki-\d{4}-\d{2}-\d{2}\.csv$/);
+    // число в тосте — из файла, а не «на глаз»: две строки данных
+    expect(text('toast')).toContain('Выгружено заявок: 2');
+    expect(text('toast')).toContain('UTF-8');
+
+    // вернуть админку на вкладку модерации — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
   });
 
   it('отклонение тоже убирает карточку без перезагрузки списка', async () => {

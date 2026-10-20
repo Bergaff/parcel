@@ -836,6 +836,36 @@ async function adminApi(path, options = {}) {
   });
 }
 
+/* Выгрузка всех заявок в CSV. Качаем через fetch, а не ссылкой: ключ админки
+   живёт в заголовке Authorization, в адрес его подставлять нельзя. */
+async function exportBoardCsv() {
+  try {
+    const r = await adminApi('/api/admin/listings.csv');
+    if (!r.ok) throw new Error(`http ${r.status}`);
+    const text = await r.text();
+    // строки считаем сами: число в тосте обязано совпадать с файлом
+    const rows = text.replace(/^\uFEFF/, '').split(/\r\n|\n/).filter((l) => l.length > 0).length - 1;
+    const day = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = typeof URL.createObjectURL === 'function'
+      ? URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }))
+      : `data:text/csv;charset=utf-8,${encodeURIComponent(text)}`;
+    a.download = `poputka-zayavki-${day}.csv`;
+    document.body.append(a);
+    a.click();
+    if (a.href.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') {
+      const url = a.href;
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+    a.remove();
+    toast(rows > 0
+      ? `Выгружено заявок: ${rows}. CSV в UTF-8 (BOM), разделитель «;» — открывается в Excel и Google Таблицах.`
+      : 'Файл сохранён, но заявок нет — таблица пустая.');
+  } catch {
+    toast('Не получилось выгрузить CSV. Проверьте ключ админки и попробуйте ещё раз.');
+  }
+}
+
 /* Штамп происхождения: заявку принёс админ или посторонний человек.
    Синим — админские (свой Telegram боту, форма с ключом админки),
    серым — все остальные источники. */
@@ -1243,6 +1273,17 @@ function renderAdminItems() {
       ]));
     } else {
       listEl.append(adminBoardSearch());
+      // Экспорт всей базы заявок в таблицу: даты выезда, контакты, источник,
+      // просмотры. Все статусы сразу (доска, архив, модерация, отклонённые) —
+      // статус отдельной колонкой, в Excel фильтруется за два клика
+      listEl.append(el('div', { class: 'admin-search' }, [
+        el('button', {
+          class: 'btn btn-line btn-sm', type: 'button', text: 'экспорт в CSV',
+          title: 'Скачать все заявки таблицей: доска, архив, модерация и отклонённые. UTF-8 (BOM), разделитель «;»',
+          onclick: () => { exportBoardCsv(); },
+        }),
+        el('span', { class: 'admin-contact', text: 'все статусы, сортировка по дате выезда' }),
+      ]));
       // Строка под счётчиком «На доске: N — действующие и архив». Числа —
       // с сервера (COUNT), раздельно: «на доске» — уберёт кнопка, «уже в
       // архиве» — фильтр только покажет. Раньше один счётчик смешивал

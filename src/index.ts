@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { renderListingsCsv } from './listing-csv';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -640,6 +641,26 @@ app.get('/api/admin/pending', async (c) => {
   const items = await listPending(c.env, 200);
   const total = await countPending(c.env);
   return c.json({ items, total });
+});
+
+/* Выгрузка всех заявок в таблицу: дата выезда, контакты, источник, просмотры
+   и прочее — смотреть глазами в Excel или Google Таблицах, а не листать
+   админку. UTF-8 с BOM и разделитель «;» (см. src/listing-csv.ts): без этого
+   Excel на Windows ломает кириллицу и сливает всё в одну колонку. */
+app.get('/api/admin/listings.csv', async (c) => {
+  // необязательный фильтр по статусу: неизвестное значение — как «все»
+  const raw = c.req.query('status');
+  const status = raw === 'published' || raw === 'pending' || raw === 'rejected' || raw === 'expired'
+    ? raw
+    : undefined;
+  const items = await listAllForExport(c.env, 5000, status);
+  const today = new Date().toISOString().slice(0, 10);
+  return c.body(renderListingsCsv(items, today), 200, {
+    'Content-Type': 'text/csv; charset=utf-8',
+    'Content-Disposition': `attachment; filename="poputka-zayavki-${today}.csv"`,
+    'Cache-Control': 'no-store',
+    'X-Robots-Tag': 'noindex, nofollow',
+  });
 });
 
 /* ---------- Медиакит: статистика для рекламных бирж ---------- */

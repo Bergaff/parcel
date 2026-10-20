@@ -470,6 +470,32 @@ export async function listAdminBoard(env: Env, limit = 200, q?: string, odd = fa
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
+/**
+ * Все заявки для выгрузки в таблицу — любые статусы, не только доска.
+ *
+ * Отдельная функция, потому что listAdminBoard отдаёт лишь published+expired
+ * и режется 200 строками под интерфейс, а в таблице хочется видеть всё: и
+ * очередь модерации, и отклонённые, и архив — со статусом в колонке.
+ * Сортировка по дате выезда вниз: свежие рейсы сверху, заявки без даты уходят
+ * в конец (в SQLite NULL при DESC последний).
+ */
+export async function listAllForExport(
+  env: Env,
+  limit = 5000,
+  status?: ListingStatus,
+): Promise<Listing[]> {
+  await ensurePinColumn(env);
+  await ensureRecurringColumn(env);
+  const sql = status
+    ? `SELECT * FROM listings WHERE status = ?
+       ORDER BY departure_date DESC, created_at DESC LIMIT ?`
+    : `SELECT * FROM listings
+       ORDER BY departure_date DESC, created_at DESC LIMIT ?`;
+  const stmt = env.DB.prepare(sql);
+  const res = status ? await stmt.bind(status, limit).all() : await stmt.bind(limit).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+}
+
 /** Сколько объявлений с подозрительно далёкой датой выезда — раздельно:
  *  на доске (published — их уберёт кнопка «убрать все такие») и уже
  *  в архиве (expired — фильтр их только показывает). Раньше счётчик
