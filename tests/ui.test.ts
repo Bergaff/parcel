@@ -375,7 +375,14 @@ function makeFetch(calls: string[]) {
       ok: status >= 200 && status < 300,
       status,
       json: async () => r.body,
-      text: async () => r.raw ?? JSON.stringify(r.body),
+      // настоящий Response.text() СНИМАЕТ BOM (спецификация) — заглушка обязана
+      // вести себя так же, иначе тест не заметит потерю BOM при скачивании
+      text: async () => {
+        const raw = r.raw ?? JSON.stringify(r.body);
+        return raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+      },
+      // arrayBuffer BOM не снимает — на разнице и ловим баг
+      arrayBuffer: async () => new TextEncoder().encode(r.raw ?? JSON.stringify(r.body)).buffer,
     };
   };
 }
@@ -712,16 +719,23 @@ describe('админка', () => {
       .find((b) => b.textContent === 'экспорт в CSV') as HTMLElement | undefined;
     expect(btn, 'кнопка «экспорт в CSV» на вкладке «доска»').toBeTruthy();
 
-    // ловим скачивание: jsdom не умеет ни createObjectURL, ни navigation
+    // ловим скачивание: jsdom не умеет createObjectURL и не ходит по ссылкам
     const downloads: string[] = [];
+    const hrefs: string[] = [];
+    const blobs: Blob[] = [];
     const origClick = win.HTMLAnchorElement.prototype.click;
+    const origCreate = win.URL.createObjectURL;
     win.HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
       downloads.push(this.download);
+      hrefs.push(this.href);
     } as unknown as () => void;
+    (win.URL as Loose).createObjectURL = (b: Blob) => { blobs.push(b); return 'blob:csv-test'; };
+    (win.URL as Loose).revokeObjectURL = () => undefined;
     const getsBefore = server.csvGets;
     btn!.click();
     await settle(120);
     win.HTMLAnchorElement.prototype.click = origClick;
+    (win.URL as Loose).createObjectURL = origCreate;
 
     expect(server.csvGets).toBe(getsBefore + 1);
     expect(calls.filter((c) => c === 'GET /api/admin/listings.csv')).toHaveLength(1);
@@ -733,7 +747,46 @@ describe('админка', () => {
     expect(text('toast')).toContain('Выгружено заявок: 2');
     expect(text('toast')).toContain('UTF-8');
 
+    /* Главное: BOM обязан доехать до САМОГО ФАЙЛА. Сервер его отдаёт, но
+       r.text() по спецификации BOM снимает — если строить Blob из строки,
+       Excel на Windows прочитает UTF-8 как cp1251 и покажет «РЅР° РґРѕСЃРєРµ»
+       вместо «на доске». Регресс ровно на эту ошибку. */
+    expect(blobs, 'файл собирается один раз').toHaveLength(1);
+    const bytes = new Uint8Array(await blobs[0]!.arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]], 'первые три байта — EF BB BF').toEqual([0xEF, 0xBB, 0xBF]);
+    const body = new TextDecoder('utf-8').decode(bytes);
+    expect(body.split('\r\n')[0]).toContain('"статус"');
+    expect(body).toContain('на доске');
+    expect(hrefs[0]).toBe('blob:csv-test');
+
     // вернуть админку на вкладку модерации — следующие тесты ждут её
+    byId('admin-tab-pending').click();
+    await settle(80);
+  });
+
+  it('экспорт без createObjectURL: data-URL тоже несёт BOM', async () => {
+    byId('admin-tab-board').click();
+    await settle(80);
+    const btn = Array.from(win.document.querySelectorAll('#admin-list button'))
+      .find((b) => b.textContent === 'экспорт в CSV') as HTMLElement | undefined;
+    expect(btn).toBeTruthy();
+
+    const hrefs: string[] = [];
+    const origClick = win.HTMLAnchorElement.prototype.click;
+    const origCreate = win.URL.createObjectURL;
+    win.HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      hrefs.push(this.href);
+    } as unknown as () => void;
+    (win.URL as Loose).createObjectURL = undefined; // старый браузер / jsdom без него
+    btn!.click();
+    await settle(120);
+    win.HTMLAnchorElement.prototype.click = origClick;
+    (win.URL as Loose).createObjectURL = origCreate;
+
+    expect(hrefs).toHaveLength(1);
+    // %EF%BB%BF — тот же BOM, только percent-encoded
+    expect(hrefs[0]!.startsWith('data:text/csv;charset=utf-8,%EF%BB%BF')).toBe(true);
+    expect(decodeURIComponent(hrefs[0]!.slice('data:text/csv;charset=utf-8,'.length))).toContain('на доске');
     byId('admin-tab-pending').click();
     await settle(80);
   });

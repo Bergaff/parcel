@@ -842,14 +842,18 @@ async function exportBoardCsv() {
   try {
     const r = await adminApi('/api/admin/listings.csv');
     if (!r.ok) throw new Error(`http ${r.status}`);
-    const text = await r.text();
-    // строки считаем сами: число в тосте обязано совпадать с файлом
-    const rows = text.replace(/^\uFEFF/, '').split(/\r\n|\n/).filter((l) => l.length > 0).length - 1;
+    /* В файл кладём БАЙТЫ, а не строку. r.text() по спецификации снимает BOM,
+       и тогда Excel на Windows читает UTF-8 как cp1251: «РЅР° РґРѕСЃРєРµ» вместо
+       «на доске». Сервер BOM отдаёт честно — теряли его здесь, на скачивании.
+       Строки для тоста считаем из расшифрованной копии (декодер BOM снимает). */
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    const text = new TextDecoder('utf-8').decode(bytes);
+    const rows = text.split(/\r\n|\n/).filter((l) => l.length > 0).length - 1;
     const day = new Date().toISOString().slice(0, 10);
     const a = document.createElement('a');
     a.href = typeof URL.createObjectURL === 'function'
-      ? URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' }))
-      : `data:text/csv;charset=utf-8,${encodeURIComponent(text)}`;
+      ? URL.createObjectURL(new Blob([bytes], { type: 'text/csv;charset=utf-8' }))
+      : `data:text/csv;charset=utf-8,${encodeURIComponent(`\uFEFF${text}`)}`;
     a.download = `poputka-zayavki-${day}.csv`;
     document.body.append(a);
     a.click();
