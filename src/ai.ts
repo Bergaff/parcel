@@ -17,7 +17,7 @@
 import type { Env, ListingType } from './types';
 import type { MonthStat } from './stats';
 import { normalizeCity, parseDate, parseRecurring } from './parser';
-import { dedupeDescription, isRussianCity, normalizeContacts } from './util';
+import { countryInsteadOfCity, dedupeDescription, isRussianCity, normalizeContacts } from './util';
 
 /** Дневной лимит ИИ-вызовов — страховка от неожиданного счёта. */
 const DAILY_AI_LIMIT = 300;
@@ -92,6 +92,10 @@ export function validateAiListing(
   const fromCity = normalizeCity(fromRaw);
   const toCity = normalizeCity(toRaw);
   if (!isRussianCity(fromCity) || !isRussianCity(toCity)) return null;
+  // Страна вместо города («Россия → Чехия»): по стране ни маршрута, ни поиска
+  // попутчиков не бывает, а на доске такое висит мёртвым грузом. Не публикуем;
+  // человеку сайт и бот отвечают подсказкой (countryNotCityMessage).
+  if (countryInsteadOfCity(fromCity) || countryInsteadOfCity(toCity)) return null;
   // «Тересполь → Тересполь»: ИИ иногда берёт один город за оба конца маршрута.
   // Маршрута нет — заявка бессмысленная, пусть сообщение разбирают правила.
   if (fromCity === toCity) return null;

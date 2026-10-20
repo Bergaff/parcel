@@ -10,7 +10,7 @@ import {
   confirmJsVisit, gatherVisitStats, isTrackablePage, OWN_COOKIE, pruneVisitStats, renderAudiencePage, setOwnVisitor,
   renderDailyCsv, trackPageView,
 } from './visit-stats';
-import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts } from './util';
+import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts, countryInsteadOfCity, countryNotCityMessage } from './util';
 import { groupDuplicates } from './dedupe';
 import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, loadHiddenContacts, pairListings, setHiddenContacts } from './match';
 import { forumReachStats, handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport, notifyListingPublished } from './telegram';
@@ -183,8 +183,9 @@ function sanitizeRecurring(raw: unknown): string | null {
   return parseRecurring(label) ?? label;
 }
 
-/** Валидация входящего объявления с сайта/внешнего источника. */
-function validateListing(body: unknown): { input?: ListingInput; error?: string } {
+/** Валидация входящего объявления с сайта/внешнего источника.
+ *  Экспортирована ради тестов: правила должны проверяться без HTTP-обвязки. */
+export function validateListing(body: unknown): { input?: ListingInput; error?: string } {
   const b = (body ?? {}) as Record<string, unknown>;
 
   const type = b.type;
@@ -202,6 +203,11 @@ function validateListing(body: unknown): { input?: ListingInput; error?: string 
   if (!isRussianCity(fromCity) || !isRussianCity(toCity)) {
     return { error: 'Названия городов пишите по-русски, кириллицей: «Варшава», а не Warsaw' };
   }
+
+  // Страна вместо города: в выгрузке таких 69 («Россия → Чехия»). Ни расстояние,
+  // ни пункты пропуска, ни поиск попутчиков по стране не работают — просим город.
+  const notCity = countryInsteadOfCity(fromCity) ? fromCity! : countryInsteadOfCity(toCity) ? toCity! : null;
+  if (notCity) return { error: countryNotCityMessage(notCity) };
 
   const description = sanitizeText(b.description, 2000, 'description');
   if (!description || description.length < 5) return { error: 'description обязательна (от 5 символов)' };
@@ -1007,6 +1013,9 @@ app.put('/api/admin/listings/:id', async (c) => {
   if (!fromCity || !toCity || !isRussianCity(fromCity) || !isRussianCity(toCity)) {
     return c.json({ error: 'Города пишите по-русски, кириллицей' }, 400);
   }
+  // то же правило при правке: страну в город не превращаем
+  const editNotCity = countryInsteadOfCity(fromCity) ? fromCity! : countryInsteadOfCity(toCity) ? toCity! : null;
+  if (editNotCity) return c.json({ error: countryNotCityMessage(editNotCity) }, 400);
 
   let departureDate: string | null = null;
   if (typeof b.departureDate === 'string' && b.departureDate !== '') {

@@ -7,7 +7,8 @@ import {
   bumpForumStat, countPending, getSetting, listForumStats, listForumStatEvents, listingFlowCounts, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
 } from './store';
 import {
-  admins, dedupeDescription, escapeHtml, isRussianCity, mskTodayIso, normalizeContacts,
+  admins, countryInsteadOfCity, countryNotCityMessage, dedupeDescription, escapeHtml, isRussianCity,
+  mskTodayIso, normalizeContacts,
   normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
 } from './util';
 import { aiExtractListing, type AiFields } from './ai';
@@ -750,6 +751,41 @@ function extractForwardOrigin(msg: TgMessage): {
   return { chatId, messageId, title, authorUsername };
 }
 
+/**
+ * Ответ бота на шаг «откуда»/«куда»: либо город принят, либо текст с просьбой.
+ *
+ * Чистая функция — правила шага проверяются юнитами, без подделки Telegram.
+ * Отдельная функция понадобилась, когда выяснилось, что люди пишут страну
+ * вместо города (в выгрузке таких 69): молча принять её значит получить заявку,
+ * по которой не работает ни расстояние, ни поиск попутчиков.
+ */
+export function cityAnswer(raw: string): { ok: true; city: string } | { ok: false; reply: string } {
+  const text = raw.trim();
+  const city = text.replace(/[^\p{L}\- ]/gu, ' ').trim();
+  if (/\d/.test(text)) return { ok: false, reply: 'В названии города не может быть цифр. Попробуйте ещё раз.' };
+  if (city.length < 2 || city.length > 60) return { ok: false, reply: 'Похоже, это не город. Попробуйте ещё раз.' };
+  // Любое написание (Warsaw, warsawa, Варшаве) → каноническое «Варшава»
+  const canonical = normalizeCity(city);
+  // Латиницу перевести не смогли — просим по-русски
+  if (!isRussianCity(canonical)) {
+    return {
+      ok: false,
+      reply: '✍️ Город пишите по-русски, кириллицей: например <i>Варшава</i>, а не Warsaw. Попробуйте ещё раз.',
+    };
+  }
+  // страна вместо города: не молчим и не публикуем — просим назвать город
+  const country = countryInsteadOfCity(canonical);
+  if (country) {
+    const example = countryNotCityMessage(canonical).match(/например, «([^»]+)»/)?.[1];
+    return {
+      ok: false,
+      reply: `✍️ <i>${escapeHtml(country)}</i> — это страна, а по стране попутчика не найти. Напишите город`
+        + `${example ? `, например <i>${escapeHtml(example)}</i>` : ''}. Попробуйте ещё раз.`,
+    };
+  }
+  return { ok: true, city: canonical };
+}
+
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   const chatId = msg.chat.id;
@@ -1079,19 +1115,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     }
     case 'from':
     case 'to': {
-      const city = text.replace(/[^\p{L}\- ]/gu, ' ').trim();
-      if (/\d/.test(text)) { await sendText(env, chatId, 'В названии города не может быть цифр. Попробуйте ещё раз.'); return; }
-      if (city.length < 2 || city.length > 60) { await sendText(env, chatId, 'Похоже, это не город. Попробуйте ещё раз.'); return; }
-      // Любое написание (Warsaw, warsawa, Варшаве) → каноническое «Варшава»
-      const canonical = normalizeCity(city);
-      // Латиницу перевести не смогли — просим по-русски
-      if (!isRussianCity(canonical)) {
-        await sendText(env, chatId,
-          '✍️ Город пишите по-русски, кириллицей: например <i>Варшава</i>, а не Warsaw. Попробуйте ещё раз.');
-        return;
-      }
-      if (w.step === 'from') { draft.from = canonical; w.step = 'to'; }
-      else { draft.to = canonical; w.step = 'date'; }
+      const answer = cityAnswer(text);
+      if (!answer.ok) { await sendText(env, chatId, answer.reply); return; }
+      if (w.step === 'from') { draft.from = answer.city; w.step = 'to'; }
+      else { draft.to = answer.city; w.step = 'date'; }
       break;
     }
     case 'date': {
