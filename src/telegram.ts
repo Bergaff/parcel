@@ -14,6 +14,7 @@ import {
 import { aiExtractListing, type AiFields } from './ai';
 import { currentPeriod, fmtPeriod, fmtPeriodGen, plural } from './format';
 import { CITY_COUNTRY } from './seo-routes';
+import { FORUM_COUNTRIES, forumCityCount, forumCountryOfCity } from './forum-cities';
 import { listMonthStats, refreshStats, statsPostText, type MonthStat } from './stats';
 
 /* ------------------------------------------------------------------ */
@@ -1482,11 +1483,25 @@ export function forumRouteKey(from: string, to: string): string {
 }
 
 /** Названия стран (из словаря городов) — для правил «страна ↔ страна». */
-const COUNTRY_NAMES = new Set(Object.values(CITY_COUNTRY).map((v) => v.name.toLowerCase()));
+/* Страны, которые можно писать в /здесь как правило «страна ↔ страна»: из
+ * словаря витрины плюс всё, что знает словарь комнат. Без второй части
+ * «Россия ↔ Турция» или «Беларусь ↔ Беларусь» не разобрались бы: Турции и
+ * Китая в витрине нет, а комнаты под них создать можно. */
+const COUNTRY_NAMES = new Set([
+  ...Object.values(CITY_COUNTRY).map((v) => v.name.toLowerCase()),
+  ...FORUM_COUNTRIES.map((c) => c.toLowerCase()),
+]);
 
-/** Страна города по словарю витрины («Варшава» → «польша»), null — не знаем. */
+/**
+ * Страна города для выбора комнаты: «Варшава» → «польша», null — не знаем.
+ * Сначала словарь витрины (он же задаёт страницы /gorod/), затем словарь
+ * комнат — в нём райцентры, курорты и пункты пропуска, которых витрина не
+ * знает: добавлять их туда нельзя, иначе на сайте появились бы десятки новых
+ * SEO-страниц. Из-за этого «Гродно → Кузница» и «Минск → Пинск» уходили в
+ * «прочее», хотя комнаты для них есть.
+ */
 function countryOfCity(city: string): string | null {
-  const c = CITY_COUNTRY[normalizeCity(city)]?.name;
+  const c = CITY_COUNTRY[normalizeCity(city)]?.name ?? forumCountryOfCity(city);
   return c ? c.toLowerCase() : null;
 }
 
@@ -1791,6 +1806,11 @@ async function cmdForumDiagnostics(env: Env, msg: TgMessage): Promise<void> {
     ...Object.entries(cfg.cities).map(([k, id]) => `• город ${k} → тема ${id}`),
   ];
   lines.push(rooms.length ? `Комнаты:\n${rooms.join('\n')}` : 'Комнат пока нет — всё уходит в «прочее».');
+  // если заявка ушла в «прочее» при существующей комнате региона, почти всегда
+  // причина одна: город неизвестен. Сколько городов знаем — видно здесь, а не
+  // в логах воркера
+  const cities = forumCityCount();
+  lines.push(`Словарь знает ${cities} ${plural(cities, 'город', 'города', 'городов')} — неизвестный город всегда уходит в «прочее».`);
   if (msg.chat.type === 'private') {
     lines.push('', 'ℹ️ Вы пишете в личке. Команда /здесь настраивает темы — напишите её в самой форум-группе, внутри нужной темы: зашли в тему «Дубай» → написали <code>/здесь Дубай</code>.');
   } else if (!here) {
