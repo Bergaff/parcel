@@ -109,7 +109,7 @@ export async function listListings(
   const page = Math.max(1, f.page ?? 1);
   const perPage = Math.min(50, Math.max(1, f.perPage ?? 20));
   // закреплённые — вверху доски (пока не истёк срок), затем свежие как обычно
-  fullSql += ' ORDER BY (CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime(\'now\') THEN 0 ELSE 1 END), COALESCE(published_at, created_at) DESC LIMIT ? OFFSET ?';
+  fullSql += ' ORDER BY (CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime(\'now\') THEN 0 ELSE 1 END), datetime(COALESCE(published_at, created_at)) DESC LIMIT ? OFFSET ?';
   params.push(perPage + 1, (page - 1) * perPage);
 
   const res = await env.DB.prepare(fullSql).bind(...params).all();
@@ -360,7 +360,7 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
     `SELECT id, recurring, departure_date FROM listings
      WHERE status = 'published' AND recurring IS NOT NULL
        AND departure_date IS NOT NULL AND departure_date < date('now', '+3 hours')
-       AND COALESCE(published_at, created_at) > datetime('now', '-45 days')
+       AND datetime(COALESCE(published_at, created_at)) > datetime('now', '-45 days')
      LIMIT 200`
   ).all();
   for (const row of (stale.results ?? []) as unknown as Array<Record<string, unknown>>) {
@@ -400,7 +400,7 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
   const prune = await env.DB.prepare(
     `DELETE FROM listings
      WHERE recurring IS NOT NULL
-       AND COALESCE(published_at, created_at) < datetime('now', '-45 days')`
+       AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-45 days')`
   ).run();
 
   // 5) Скрытые заявки без даты выезда (сайт, без контакта): дата в форме
@@ -410,13 +410,13 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
     `UPDATE listings SET status = 'expired'
      WHERE hidden = 1 AND status = 'published'
        AND departure_date IS NULL
-       AND created_at < datetime('now', '-30 days')`
+       AND datetime(created_at) < datetime('now', '-30 days')`
   ).run();
   const delHidden = await env.DB.prepare(
     `DELETE FROM listings
      WHERE hidden = 1 AND status = 'expired'
        AND departure_date IS NULL
-       AND created_at < datetime('now', '-60 days')`
+       AND datetime(created_at) < datetime('now', '-60 days')`
   ).run();
 
   // 6) Видимые заявки БЕЗ даты выезда: стареть им было не от чего, поэтому
@@ -429,13 +429,13 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
     `UPDATE listings SET status = 'expired'
      WHERE COALESCE(hidden, 0) = 0 AND status = 'published'
        AND departure_date IS NULL AND recurring IS NULL
-       AND COALESCE(published_at, created_at) < datetime('now', '-21 days')`
+       AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-21 days')`
   ).run();
   const delNoDate = await env.DB.prepare(
     `DELETE FROM listings
      WHERE COALESCE(hidden, 0) = 0 AND status = 'expired'
        AND departure_date IS NULL AND recurring IS NULL
-       AND COALESCE(published_at, created_at) < datetime('now', '-51 days')`
+       AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-51 days')`
   ).run();
 
   return {
@@ -490,7 +490,7 @@ export async function listAdminBoard(env: Env, limit = 200, q?: string, odd = fa
   const res = await env.DB.prepare(
     `SELECT * FROM listings WHERE status IN ('published', 'expired') ${where}
      ORDER BY (CASE WHEN pinned_until IS NOT NULL AND pinned_until > datetime('now') THEN 0 ELSE 1 END),
-              COALESCE(published_at, created_at) DESC LIMIT ?`
+              datetime(COALESCE(published_at, created_at)) DESC LIMIT ?`
   ).bind(...params, limit).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
@@ -620,7 +620,7 @@ export async function clearRejected(env: Env): Promise<number> {
 /** Cron: отклонённые старше 90 дней не нужны никому. */
 export async function pruneRejected(env: Env): Promise<void> {
   await env.DB.prepare(
-    "DELETE FROM listings WHERE status = 'rejected' AND COALESCE(published_at, created_at) < date('now', '-90 days')"
+    "DELETE FROM listings WHERE status = 'rejected' AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-90 days')"
   ).run();
 }
 
@@ -862,7 +862,7 @@ export async function findRelated(
   };
   const reverse = await run(
     `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ? AND from_city = ? AND to_city = ?
-     ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+     ORDER BY datetime(COALESCE(published_at, created_at)) DESC LIMIT 5`,
     l.id, l.toCity, l.fromCity
   );
   const same = l.departureDate
@@ -873,12 +873,12 @@ export async function findRelated(
         l.id, l.fromCity, l.toCity, l.departureDate)
     : await run(
         `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ? AND from_city = ? AND to_city = ?
-         ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+         ORDER BY datetime(COALESCE(published_at, created_at)) DESC LIMIT 5`,
         l.id, l.fromCity, l.toCity);
   const sameContact = await run(
     `SELECT * FROM listings WHERE status IN ${statuses} AND id <> ?
      AND ((telegram IS NOT NULL AND telegram = ?) OR (phone IS NOT NULL AND phone = ?))
-     ORDER BY COALESCE(published_at, created_at) DESC LIMIT 5`,
+     ORDER BY datetime(COALESCE(published_at, created_at)) DESC LIMIT 5`,
     l.id, l.telegram ?? '', l.phone ?? ''
   );
   return { reverse, same, sameContact };
@@ -1654,8 +1654,8 @@ export async function touchListing(env: Env, id: string): Promise<Listing | null
   if (!listing) return null;
   if (listing.status === 'published') {
     await env.DB.prepare(
-      "UPDATE listings SET published_at = datetime('now') WHERE id = ?"
-    ).bind(id).run();
+      "UPDATE listings SET published_at = ? WHERE id = ?"
+    ).bind(new Date().toISOString(), id).run();
   }
   return getListingById(env, id);
 }
@@ -1709,7 +1709,7 @@ export async function listForDuplicateSweep(
     : "('pending', 'published')";
   const res = await env.DB.prepare(
     `SELECT * FROM listings WHERE status IN ${statuses}
-     ORDER BY COALESCE(published_at, created_at) DESC LIMIT ?`
+     ORDER BY datetime(COALESCE(published_at, created_at)) DESC LIMIT ?`
   ).bind(limit).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
@@ -2012,7 +2012,7 @@ export async function listMonthRows(env: Env, month: string): Promise<MonthRow[]
        FROM listings
       WHERE status IN ('published', 'expired')
         AND ${MONTH_EXPR} = ?
-      ORDER BY COALESCE(published_at, created_at)`
+      ORDER BY datetime(COALESCE(published_at, created_at))`
   ).bind(month).all();
 
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({

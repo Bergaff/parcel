@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Env } from '../src/types';
-import { archiveExpired, resetSearchColumnsCache } from '../src/store';
+import { archiveExpired, listListings, pruneRejected, resetSearchColumnsCache, touchListing } from '../src/store';
 
 interface Call { sql: string; params: unknown[] }
 
@@ -156,5 +156,74 @@ describe('archiveExpired — скрытые заявки без контакта
     const firstHidden = calls.findIndex((c) => /hidden = 1/.test(c.sql));
     expect(pragma).toBeGreaterThanOrEqual(0);
     expect(firstHidden).toBeGreaterThan(pragma);
+  });
+});
+
+/* Метки времени в базе лежат в двух форматах: toISOString() при создании
+   ('2026-10-01T11:55:00.000Z') и datetime('now') при освежении заявки
+   ('2026-10-01 11:55:00'). SQLite сравнивает их как СТРОКИ, а 'T' (0x54)
+   больше пробела (0x20), поэтому ISO-метка на границе срока выглядит
+   «моложе», чем есть. Замер на настоящей D1:
+   SELECT '2026-10-02T01:00:00.000Z' < datetime('now','-21 days')  → 0
+   SELECT '2026-10-02 01:00:00'     < datetime('now','-21 days')  → 1
+   при границе '2026-10-02 06:22:15'. На доске 23.10.2026 так висели две
+   заявки возрастом 22 дня вместо того, чтобы уйти в архив на 21-й.
+   Поэтому и сравнения, и сортировки — через datetime(). */
+describe('формат метки времени не влияет ни на возраст, ни на порядок', () => {
+  const NOW = new Date('2026-10-23T00:00:00Z');
+
+  it('все пороги возраста сравниваются через datetime()', async () => {
+    const { env, calls } = fakeDb([]);
+    await archiveExpired(env, NOW);
+    const bare = calls.map((c) => c.sql)
+      .filter((sql) => /(?:COALESCE\(published_at, created_at\)|created_at)\s*[<>]\s*datetime\(/.test(sql));
+    expect(bare).toEqual([]);
+    // чтобы тест не проверял пустоту: порогов в archiveExpired шесть
+    const wrapped = calls.map((c) => c.sql)
+      .filter((sql) => /datetime\((?:COALESCE\(published_at, created_at\)|created_at)\)\s*[<>]/.test(sql));
+    expect(wrapped.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('чистка отклонённых старше 90 дней — тоже через datetime()', async () => {
+    const { env, calls } = fakeDb([]);
+    await pruneRejected(env);
+    const del = calls.find((c) => c.sql.startsWith('DELETE FROM listings'));
+    expect(del!.sql).toContain("datetime(COALESCE(published_at, created_at)) < datetime('now', '-90 days')");
+  });
+
+  it('доска сортируется по нормализованной метке', async () => {
+    // иначе освежённая заявка (формат datetime('now')) оказывалась ниже
+    // всех созданных в тот же день (формат toISOString) — «освежить» не работало
+    const { env, calls } = fakeDb([]);
+    await listListings(env, {});
+    const q = calls.find((c) => c.sql.startsWith('SELECT * FROM listings'));
+    expect(q!.sql).toContain('datetime(COALESCE(published_at, created_at)) DESC');
+  });
+
+  it('освежение пишет метку в том же формате, что и создание', async () => {
+    const calls: Call[] = [];
+    const row = {
+      id: 'aaaa1111-2222-3333-4444-555555555555', type: 'offer',
+      from_city: 'Минск', to_city: 'Варшава', description: 'Еду, возьму посылку',
+      status: 'published', source: 'site', views: 0,
+      created_at: '2026-10-01T10:00:00.000Z', published_at: '2026-10-01T10:05:00.000Z',
+    };
+    const make = (sql: string) => {
+      const call: Call = { sql, params: [] };
+      calls.push(call);
+      const stmt = {
+        bind(...params: unknown[]) { call.params = params; return stmt; },
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+        async first() { return row; },
+      };
+      return stmt;
+    };
+    const env = { DB: { prepare: make } } as unknown as Env;
+    await touchListing(env, row.id);
+    const upd = calls.find((c) => c.sql.startsWith('UPDATE listings SET published_at'));
+    expect(upd, 'освежение должно обновлять published_at').toBeTruthy();
+    expect(upd!.sql).toContain('published_at = ?');
+    expect(String(upd!.params[0])).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   });
 });
