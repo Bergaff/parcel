@@ -48,13 +48,13 @@ export function sourceLabel(l: Listing): string {
   return 'с сайта';
 }
 
-/** Публичная ссылка на исходное сообщение (t.me/c/… для супергрупп). */
+/** Публичная ссылка-подпись источника: только та, что админ задал сам для
+ *  чата (chatLinks). Ссылки на конкретное сообщение на доске нет: они ведут
+ *  к автору и истории чата — это данные для админов (админ-панель, карточки
+ *  модератору). Совпадает с sourceLinkUrl() в public/app.js. */
 export function sourceLinkUrl(l: Listing, chatLinks: Record<string, string> = {}): string | null {
-  if (l.sourceChatId && chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId] ?? null;
   if (!l.sourceChatId) return null;
-  const m = /^-100(\d+)$/.exec(l.sourceChatId);
-  if (!m) return null;
-  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+  return chatLinks[l.sourceChatId] ?? null;
 }
 
 function sourceHtml(l: Listing, chatLinks: Record<string, string> = {}): string {

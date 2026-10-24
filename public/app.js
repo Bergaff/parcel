@@ -127,14 +127,26 @@ function sourceLabel(l) {
   return 'с сайта';
 }
 
-/* Ссылка на исходное сообщение: t.me/c/… — для супергрупп и каналов (id -100…),
- * открывается у участников чата. Пересылки от людей и обычные группы — без ссылки. */
+/* Ссылка-подпись источника для ПУБЛИЧНЫХ карточек: только та, что админ задал
+ * сам для чата (chatLinks). Ссылки на конкретное сообщение здесь нет: она ведёт
+ * к автору и истории чата — это данные для админов, см. messageLinkUrl(). */
 function sourceLinkUrl(l) {
   if (!l.sourceChatId) return null;
-  if (chatLinks[l.sourceChatId]) return chatLinks[l.sourceChatId]; // ссылка, заданная админом
-  const m = /^-100(\d+)$/.exec(l.sourceChatId);
+  return chatLinks[l.sourceChatId] || null;
+}
+
+/* Ссылка на исходное сообщение — только для админки. Публичный чат:
+ * t.me/<чат>/<тема>/<сообщение> (открывается у всех); приватная супергруппа:
+ * t.me/c/… (открывается у участников). Пересылки от людей — без ссылки. */
+function messageLinkUrl(l) {
+  if (l.sourceMessageId == null) return null;
+  if (l.sourceChatUsername) {
+    const thread = l.sourceThreadId != null ? `${l.sourceThreadId}/` : '';
+    return `https://t.me/${l.sourceChatUsername}/${thread}${l.sourceMessageId}`;
+  }
+  const m = /^-100(\d+)$/.exec(l.sourceChatId || '');
   if (!m) return null;
-  return `https://t.me/c/${m[1]}${l.sourceMessageId != null ? '/' + l.sourceMessageId : ''}`;
+  return `https://t.me/c/${m[1]}/${l.sourceMessageId}`;
 }
 
 /* Подпись источника — кликабельная, когда есть ссылка на оригинал */
@@ -968,7 +980,17 @@ function adminCard(l, mode = 'pending') {
     l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : null,
     l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
     l.price ? el('span', { class: 'mono', text: l.price }) : null,
-    el('span', { class: 'src' }, [sourceContent(l)]),
+    el('span', { class: 'src' }, [
+      sourceContent(l),
+      // происхождение с точностью до сообщения: админу видно, откуда заявка,
+      // даже когда чат приватный и публичной ссылки на него нет
+      ...(() => {
+        const url = messageLinkUrl(l);
+        return url
+          ? [el('a', { href: url, target: '_blank', rel: 'noopener', text: ` · сообщение ${l.sourceMessageId}` })]
+          : [];
+      })(),
+    ]),
   ];
   const editBtn = el('button', {
     class: 'btn btn-line btn-sm',

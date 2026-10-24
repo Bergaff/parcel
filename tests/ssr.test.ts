@@ -284,12 +284,19 @@ describe('строка доски в SSR', () => {
     expect(renderRowHtml(listing(), { openLink: true })).toContain('href="/item/b5023c82-e043-4863-9fae-ee19a095f211">открыть</a>');
   });
 
-  it('источник: чат со ссылкой для супергрупп, иначе текст', () => {
+  it('источник: публично — только ссылка, заданная админом; сообщение чата не светится', () => {
     expect(sourceLabel(listing({ sourceChat: 'Переслано от Иван' }))).toBe('Переслано от Иван');
     expect(sourceLabel(listing({ sourceChat: 'Варшава Минск чат' }))).toBe('из чата «Варшава Минск чат»');
     expect(sourceLabel(listing({ source: 'site', sourceChat: null }))).toBe('с сайта');
+    // приватная супергруппа: подпись текстом, без t.me/c — ссылка на исходное
+    // сообщение ведёт к автору и истории чата, посторонним она не нужна
     const row = renderRowHtml(listing({ sourceChatId: '-1001234567890', sourceMessageId: 42, sourceChat: null }));
-    expect(row).toContain('href="https://t.me/c/1234567890/42"');
+    expect(row).not.toContain('t.me/c/');
+    // админ задал ссылку для чата — она и печатается
+    const linked = renderRowHtml(
+      listing({ sourceChatId: '-1001234567890', sourceMessageId: 42, sourceChat: null }),
+      { chatLinks: { '-1001234567890': 'https://t.me/warszawa_minsk' } });
+    expect(linked).toContain('href="https://t.me/warszawa_minsk"');
   });
 });
 

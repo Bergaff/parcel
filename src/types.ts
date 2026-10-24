@@ -52,6 +52,11 @@ export interface ListingInput {
   sourceChat?: string | null;
   sourceChatId?: string | null;
   sourceMessageId?: number | null;
+  /** Публичный username чата-источника: даёт ссылку на сообщение для всех,
+   *  а не только для участников (t.me/<username>/…). null — чат приватный. */
+  sourceChatUsername?: string | null;
+  /** Тема форума (message_thread_id), где лежало сообщение. */
+  sourceThreadId?: number | null;
   /** Заявку подал администратор (свой Telegram ID боту или форма с ключом
    *  админки) — а не посторонний человек с сайта. Определяет поведение
    *  дедупликации и метку в очереди модерации. */

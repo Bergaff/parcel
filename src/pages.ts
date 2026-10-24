@@ -8,7 +8,7 @@
  * жили за «#», которого для поисковика не существует.
  */
 import type { Env, Listing } from './types';
-import { getCounts, getListingById, listListings, getChatLinks, relatedListings } from './store';
+import { getCounts, getListingById, listListings, getChatLinks, publicListing, relatedListings } from './store';
 import { normalizeCity } from './parser';
 import { escapeHtml } from './util';
 import { plural, fmtDayShort, fmtPeriod, fmtPeriodGen, currentPeriod } from './format';
@@ -231,7 +231,9 @@ export async function buildHomePage(env: Env, origin: string, url: URL): Promise
     total,
     counts,
     listHtml: items.length > 0 ? renderRowsHtml(items, { chatLinks }) : '',
-    listData: items,
+    // данные в window.__SSR__ видит любой посетитель: происхождение с точностью
+    // до сообщения (номер, username чата, тема) срезаем — это данные админов
+    listData: items.map(publicListing),
     jsonLd: [
       webSiteLd(origin),
       itemListLd(origin, filtered ? `Заявки: ${f.from ?? ''} → ${f.to ?? ''}` : 'Заявки на доске', items.map((l) => ({
@@ -305,7 +307,7 @@ export async function buildItemPage(
     image: `${origin}/og/${encodeURIComponent(listing.id)}.png`,
     imageAlt: `${listing.fromCity} → ${listing.toCity}: ${listing.type === 'offer' ? 'водитель везёт' : 'нужно передать'}`,
     detailHtml: renderDetailHtml(listing, { origin, routePath, cityPath: cityFromPath, chatLinks, related }),
-    detailData: listing,
+    detailData: publicListing(listing),
     jsonLd: [
       breadcrumbsLd(origin, [
         { name: 'Доска', path: '/' },

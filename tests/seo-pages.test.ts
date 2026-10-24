@@ -32,6 +32,9 @@ vi.mock('../src/store', () => ({
   listSitemapItems: async () => db.items,
   getChatLinks: async () => ({}) as Record<string, string>,
   getCounts: async () => ({ offer: 3, request: 2 }),
+  // публичная проекция заявки (срезает происхождение до сообщения) — здесь
+  // каноники, данные не важны: пропускаем как есть
+  publicListing: (l: Listing) => l,
 }));
 
 import {

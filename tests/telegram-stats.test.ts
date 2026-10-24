@@ -228,7 +228,8 @@ function dbFake(opts: { pendingRows?: Array<Record<string, unknown>>; pendingTot
     // порядок колонок INSERT INTO listings из src/store.ts (createListing)
     const COLS = ['id', 'type', 'from_city', 'to_city', 'departure_date', 'recurring', 'weight_kg',
       'price', 'description', 'phone', 'telegram', 'status', 'source', 'source_chat', 'source_chat_id',
-      'source_message_id', 'by_admin', 'hidden', 'created_at', 'published_at', 'from_city_lc',
+      'source_message_id', 'source_chat_username', 'source_thread_id',
+      'by_admin', 'hidden', 'created_at', 'published_at', 'from_city_lc',
       'to_city_lc', 'description_lc', 'reject_reason'];
     const calls: Array<{ sql: string; params: unknown[] }> = [];
     const make = (sql: string) => {

@@ -133,7 +133,12 @@ function makeFetch(calls: string[]) {
         };
       }
       if (path === '/api/listings') {
-        const items = [listing(), listing({ id: REQ, type: 'request', fromCity: 'Минск', toCity: 'Варшава', telegram: null })];
+        const items = [listing(), listing({
+          id: REQ, type: 'request', fromCity: 'Минск', toCity: 'Варшава', telegram: null,
+          // происхождение: публичная строка показывает только подпись чата
+          sourceChat: 'Граница BY-LT-PL', sourceChatId: '-1001234567890', sourceMessageId: 42,
+          sourceChatUsername: 'granica_BY_LT_PL', sourceThreadId: 7,
+        })];
         const filtered = q.get('type') ? items.filter((l) => l.type === q.get('type')) : items;
         return { body: { items: filtered, hasMore: false, page: 1, total: filtered.length, counts: { offer: 1, request: 1 } } };
       }
@@ -182,6 +187,9 @@ function makeFetch(calls: string[]) {
               publishedAt: null,
               byAdmin: true, // пересылка от админского Telegram — как пометит воркер
               description: 'Та же заявка, пересланная на следующий день',
+              // происхождение с точностью до сообщения: админу — ссылка в карточке
+              sourceChat: 'Граница BY-LT-PL', sourceChatId: '-1001234567890',
+              sourceMessageId: 153048, sourceChatUsername: 'granica_BY_LT_PL', sourceThreadId: 153043,
               duplicate: { id: ID, kind: 'duplicate', status: 'published', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', why: 'тот же маршрут и даты, контакт совпадает' },
             }),
           ];
@@ -463,6 +471,16 @@ describe('доска: строка объявления', () => {
     // никаких костылей для «кликабельного div»: переход делает браузер
     expect(row.hasAttribute('tabindex')).toBe(false);
     expect(row.hasAttribute('role')).toBe(false);
+  });
+
+  it('строка с доски: чат-источник подписан, ссылка на сообщение не видна', () => {
+    // происхождение («что откуда сообщение») — данные админов: публично
+    // остаётся только подпись чата, без t.me/c/… и без username-ссылки
+    const row = rows().find((r) => (r.textContent || '').startsWith('Минск'));
+    expect(row, 'строка встречной заявки').toBeTruthy();
+    expect(row!.textContent).toContain('из чата «Граница BY-LT-PL»');
+    expect(row!.innerHTML).not.toContain('t.me/c/');
+    expect(row!.innerHTML).not.toContain('granica_BY_LT_PL');
   });
 
   it('в строке видны маршрут, дата, контакт и «пожаловаться»', () => {
@@ -1079,6 +1097,18 @@ describe('админка', () => {
     // у админской карточки такого штампа нет
     expect(win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"] .stamp-person`)).toBeNull();
     server.pendingNoContact = false;
+  });
+
+  it('карточка админа: ссылка на исходное сообщение в чате', async () => {
+    byId('admin-refresh').click();
+    await settle(80);
+    const src = win.document.querySelector(`#admin-list .admin-card[data-id="${DUP}"] .src`);
+    expect(src, 'блок источника в карточке').not.toBeNull();
+    expect(src!.textContent).toContain('из чата «Граница BY-LT-PL»');
+    const a = src!.querySelector('a') as HTMLAnchorElement | null;
+    expect(a, 'ссылка на исходное сообщение').not.toBeNull();
+    expect(a!.getAttribute('href')).toBe('https://t.me/granica_BY_LT_PL/153043/153048');
+    expect(a!.textContent).toContain('сообщение 153048');
   });
 
   it('подбор: скрыть неактуальный юзернейм — его пары исчезают, заявки остаются', async () => {

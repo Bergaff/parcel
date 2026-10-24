@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -272,7 +272,9 @@ app.get('/api/listings', async (c) => {
   const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
   const { items, hasMore } = await listListings(c.env, { type, from, to, date, q, page, archive });
   const counts = await getCounts(c.env, { from, to, date, q, archive });
-  return c.json({ items, hasMore, page, total: counts.offer + counts.request, counts });
+  // происхождение с точностью до сообщения — данные админов: из публичного
+  // JSON номер сообщения, username чата и тема срезаются (publicListing)
+  return c.json({ items: items.map(publicListing), hasMore, page, total: counts.offer + counts.request, counts });
 });
 
 app.get('/api/listings/:id', async (c) => {
@@ -290,7 +292,7 @@ app.get('/api/listings/:id', async (c) => {
     relatedListings(c.env, listing),
     routePathFor(c.env, listing.fromCity, listing.toCity),
   ]);
-  return c.json({ item: listing, related, routePath, cityPath: cityPathFor(listing.fromCity) });
+  return c.json({ item: publicListing(listing), related: related.map(publicListing), routePath, cityPath: cityPathFor(listing.fromCity) });
 });
 
 app.post('/api/listings', async (c) => {

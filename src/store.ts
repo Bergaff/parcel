@@ -26,6 +26,8 @@ function mapRow(row: Record<string, unknown>): Listing {
     sourceChat: row.source_chat ? String(row.source_chat) : null,
     sourceChatId: row.source_chat_id ? String(row.source_chat_id) : null,
     sourceMessageId: row.source_message_id ? Number(row.source_message_id) : null,
+    sourceChatUsername: row.source_chat_username ? String(row.source_chat_username) : null,
+    sourceThreadId: row.source_thread_id != null ? Number(row.source_thread_id) : null,
     byAdmin: Number(row.by_admin ?? 0) === 1,
     fromPerson: Number(row.by_admin ?? 0) === 2,
     hidden: Number(row.hidden ?? 0) === 1,
@@ -36,6 +38,16 @@ function mapRow(row: Record<string, unknown>): Listing {
   };
 }
 
+/** Заявка для публичных ответов (доска, /api/listings, кэш __SSR__):
+ *  происхождение с точностью до сообщения — username чата, тема форума, номер
+ *  сообщения — данные админов, ссылка по ним ведёт к автору и истории чата.
+ *  Публично остаются только название чата и его id (подпись источника и
+ *  ссылка, которую админ задал сам). */
+export function publicListing(l: Listing): Listing {
+  if (l.sourceMessageId == null && l.sourceChatUsername == null && l.sourceThreadId == null) return l;
+  return { ...l, sourceMessageId: null, sourceChatUsername: null, sourceThreadId: null };
+}
+
 export async function createListing(env: Env, input: ListingInput): Promise<Listing> {
   // Колонки *_lc и recurring должны существовать до записи: на проде миграцию
   // могут применить позже деплоя, а без них INSERT упадёт.
@@ -43,6 +55,7 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   await ensureRecurringColumn(env);
   await ensureByAdminColumn(env);
   await ensureHiddenColumn(env);
+  await ensureSourceOriginColumns(env);
   await ensureRejectReasonColumn(env).catch(() => undefined);
   const now = new Date().toISOString();
   const id = crypto.randomUUID();
@@ -60,15 +73,16 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
+       source_chat_username, source_thread_id,
        by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc, reject_reason)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
       input.departureDate ?? null, input.recurring ?? null, input.weightKg ?? null, input.price ?? null,
       input.description, phone, telegram,
       status, input.source, input.sourceChat ?? null, input.sourceChatId ?? null,
-      input.sourceMessageId ?? null,
+      input.sourceMessageId ?? null, input.sourceChatUsername ?? null, input.sourceThreadId ?? null,
       // 1 — подал админ, 2 — посторонний человек сам (личка бота, форма без ключа),
       // 0 — взято из чата или старая строка до появления колонки
       input.byAdmin ? 1 : input.fromPerson ? 2 : 0,
@@ -1097,6 +1111,29 @@ export function ensureRecurringColumn(env: Env): Promise<void> {
  * от заявок посторонних людей с сайта: дедупликация для них работает
  * по-разному, и в очереди модерации происхождение видно штампом.
  */
+let sourceOriginColumnsReady: Promise<void> | null = null;
+
+/** Колонки происхождения сообщения (username чата и тема форума): на проде
+ *  миграцию могут применить позже деплоя, а INSERT с ними упадёт. */
+export function ensureSourceOriginColumns(env: Env): Promise<void> {
+  if (!sourceOriginColumnsReady) {
+    sourceOriginColumnsReady = (async () => {
+      const info = await env.DB.prepare(`PRAGMA table_info(listings)`).all();
+      const names = new Set(
+        ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
+      );
+      if (!names.has('source_chat_username')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN source_chat_username TEXT`).run();
+      }
+      if (!names.has('source_thread_id')) {
+        await env.DB.prepare(`ALTER TABLE listings ADD COLUMN source_thread_id INTEGER`).run();
+      }
+    })();
+    sourceOriginColumnsReady.catch(() => { sourceOriginColumnsReady = null; });
+  }
+  return sourceOriginColumnsReady;
+}
+
 export function ensureByAdminColumn(env: Env): Promise<void> {
   if (!byAdminColumnReady) {
     byAdminColumnReady = (async () => {

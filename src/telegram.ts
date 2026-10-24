@@ -10,7 +10,8 @@ import {
   admins, countryInsteadOfCity, countryNotCityMessage, dedupeDescription, escapeHtml, isRussianCity,
   mskTodayIso, normalizeContacts,
   normalizeTelegram, rateLimit, sanitizeContact, sanitizeText, tgLink, uniqueContacts,
-} from './util';
+} from './util';import { contactsInText } from './dedupe';
+
 import { aiExtractListing, type AiFields } from './ai';
 import { currentPeriod, fmtPeriod, fmtPeriodGen, plural } from './format';
 import { CITY_COUNTRY } from './seo-routes';
@@ -104,7 +105,7 @@ function approveKeyboard(listingId: string): Record<string, unknown> {
 /* ------------------------------------------------------------------ */
 
 /** Карточка заявки для модератора (и ответ бота в личке). Экспортирована для тестов. */
-export function formatListing(l: Listing, sourceNote = ''): string {
+export function formatListing(l: Listing, sourceNote = '', audience: 'admin' | 'chat' = 'admin'): string {
   const typeLabel = l.type === 'offer' ? 'Водитель везёт' : 'Нужно передать';
   const parts = [
     `#${l.id.slice(0, 8)} ${typeLabel}`,
@@ -122,14 +123,19 @@ export function formatListing(l: Listing, sourceNote = ''): string {
   // Контакты без дублей: раньше один и тот же номер печатался двумя строками
   const contacts = uniqueContacts(l.telegram, l.phone);
   if (contacts.length) parts.push(`Контакты: ${escapeHtml(contacts.join(', '))}`);
-  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId);
+  const srcLink = listingSourceLink(l.sourceChatId, l.sourceMessageId, l.sourceChatUsername, l.sourceThreadId);
   const srcRef = l.sourceChat
     ? (l.sourceChat.startsWith('Переслано от ') ? escapeHtml(l.sourceChat) : `чат «${escapeHtml(l.sourceChat)}»`)
     : '';
   const srcLinkTag = srcLink ? ` — <a href="${srcLink}">исходное сообщение</a>` : '';
   // Чем разобран текст (правилами или ИИ) — внутренняя деталь, людям она не нужна.
-  // В карточке остаются только автор пересылки / чат и ссылка на исходное сообщение.
-  if (l.sourceChat) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
+  // Источник сообщения — данные для админов: ссылка ведёт к автору и истории
+  // чата, посторонним в общих чатах это не нужно. Исключение — когда в карточке
+  // вообще нет контакта (ни в полях, ни в тексте): тогда исходное сообщение
+  // единственный способ связаться с человеком, и ссылку оставляем.
+  const inText = contactsInText(l.description);
+  const hasContact = contacts.length > 0 || Boolean(inText.telegram || inText.phone);
+  if (l.sourceChat && (audience === 'admin' || !hasContact)) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -139,8 +145,16 @@ export function formatListing(l: Listing, sourceNote = ''): string {
  *  пересылки от людей и обычные группы честно остаются без ссылки. */
 export function listingSourceLink(
   sourceChatId: string | null | undefined,
-  sourceMessageId: number | null | undefined
+  sourceMessageId: number | null | undefined,
+  sourceChatUsername?: string | null,
+  sourceThreadId?: number | null
 ): string | null {
+  // Публичный чат: ссылка открывается у любого человека, тема форума — частью
+  // пути (t.me/<чат>/<тема>/<сообщение>), как её показывает сам Telegram.
+  if (sourceChatUsername && sourceMessageId != null) {
+    const thread = sourceThreadId != null ? `${sourceThreadId}/` : '';
+    return `https://t.me/${sourceChatUsername}/${thread}${sourceMessageId}`;
+  }
   if (!sourceChatId) return null;
   const m = /^-100(\d+)$/.exec(sourceChatId);
   if (!m) return null;
@@ -728,6 +742,7 @@ async function cascade(
  *  название источника и @username автора пересланного сообщения. */
 function extractForwardOrigin(msg: TgMessage): {
   chatId?: number; messageId?: number; title?: string; authorUsername?: string;
+  username?: string;
 } {
   const o = (msg.forward_origin ?? {}) as Record<string, unknown>;
   const chat = (o.chat ?? null) as Record<string, unknown> | null;
@@ -736,6 +751,9 @@ function extractForwardOrigin(msg: TgMessage): {
   const hiddenName = typeof o.sender_user_name === 'string' ? o.sender_user_name : undefined;
   const chatId = chat && typeof chat.id === 'number' ? chat.id : undefined;
   const messageId = typeof o.message_id === 'number' ? o.message_id : undefined;
+  // публичный username чата: с ним ссылка на сообщение открывается у всех,
+  // а не только у участников (t.me/<username>/<сообщение>)
+  const username = chat && typeof chat.username === 'string' && chat.username ? chat.username : undefined;
   const authorUsername =
     senderUser && typeof senderUser.username === 'string' && senderUser.username
       ? `@${senderUser.username}`
@@ -749,7 +767,7 @@ function extractForwardOrigin(msg: TgMessage): {
     chat && typeof chat.title === 'string' ? chat.title
     : authorName ? `Переслано от ${authorName}`
     : undefined;
-  return { chatId, messageId, title, authorUsername };
+  return { chatId, messageId, title, authorUsername, username };
 }
 
 /**
@@ -843,6 +861,9 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         sourceChat: origin.title ?? 'Пересланное сообщение',
         sourceChatId: seenChat,
         sourceMessageId: origin.messageId ?? null,
+        sourceChatUsername: origin.username ?? null,
+        // у пересылки Bot API не отдаёт тему исходного сообщения
+        sourceThreadId: null,
         byAdmin: isAdmin,
         fromPerson: !isAdmin,
       };
@@ -869,7 +890,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       return;
     }
     await sendText(env, chatId,
-      created.map((l) => formatListing(l) + listingStatusNote(l)).join('\n\n') +
+      created.map((l) => formatListing(l, '', 'chat') + listingStatusNote(l)).join('\n\n') +
       (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
     return;
   }
@@ -1086,7 +1107,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           }
           if (created.length > 0) {
             await sendText(env, chatId,
-              created.map((l) => formatListing(l) + listingStatusNote(l)).join('\n\n') +
+              created.map((l) => formatListing(l, '', 'chat') + listingStatusNote(l)).join('\n\n') +
               (repeats.length ? `\n\n${repeatReply(repeats)}` : ''));
             return;
           }
@@ -1211,7 +1232,7 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
   const dupNote = res.duplicateOf
     ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
     : '';
-  await sendText(env, chatId, formatListing(listing) + statusNote + dupNote);
+  await sendText(env, chatId, formatListing(listing, '', 'chat') + statusNote + dupNote);
   await notifyCreated(env, listing, res.duplicateOf
     ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !input.byAdmin }
     : null);
@@ -1338,6 +1359,8 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
       sourceChat: msg.chat.title ?? null,
       sourceChatId,
       sourceMessageId: msg.message_id,
+      sourceChatUsername: msg.chat.username ?? null,
+      sourceThreadId: msg.message_thread_id ?? null,
     };
     try {
       const res = await createListingSafe(env, input);
@@ -1941,7 +1964,7 @@ async function handleWatchStart(env: Env, chatId: number, listingId: string): Pr
   }
   if (listing.status === 'published') {
     const site = (env.SITE_URL ?? '').replace(/\/$/, '');
-    await sendText(env, chatId, `Эта заявка уже на доске ✅\n\n${formatListing(listing)}`
+    await sendText(env, chatId, `Эта заявка уже на доске ✅\n\n${formatListing(listing, '', 'chat')}`
       + (site ? `\n\n${site}/item/${encodeURIComponent(listing.id)}` : ''));
     return;
   }
@@ -1973,7 +1996,7 @@ export async function notifyListingPublished(env: Env, listing: Listing): Promis
   for (const chatId of chatIds) {
     try {
       await sendText(env, Number(chatId),
-        `✅ <b>Ваша заявка опубликована на доске.</b>\n\n${formatListing(listing)}`
+        `✅ <b>Ваша заявка опубликована на доске.</b>\n\n${formatListing(listing, '', 'chat')}`
         + (link ? `\n\n${link}` : '')
         + '\n\nЕсли что-то поменялось — напишите мне, поправлю или сниму.');
       // наблюдение одноразовое: снимаем только после успешной отправки
