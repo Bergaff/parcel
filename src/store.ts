@@ -951,6 +951,30 @@ export async function setSeenListing(env: Env, chatId: string, messageId: number
   ).bind(listingId, chatId, messageId).run();
 }
 
+/** Дозаписать происхождение заявки (username чата, тему форума, номер сообщения).
+ *  Радар шлёт ссылку на исходное сообщение отдельным ответом на пересылку:
+ *  сама пересылка темы не несёт — Bot API её не отдаёт, а в ссылке она есть.
+ *  Пустые поля не трогает: заполняются только те, что пришли в ссылке. */
+export async function updateSourceOrigin(
+  env: Env,
+  listingId: string,
+  origin: { username?: string | null; chatId?: string | null; threadId?: number | null; messageId?: number | null }
+): Promise<boolean> {
+  await ensureSourceOriginColumns(env);
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if (origin.username != null) { sets.push('source_chat_username = ?'); params.push(origin.username); }
+  if (origin.threadId != null) { sets.push('source_thread_id = ?'); params.push(origin.threadId); }
+  if (origin.messageId != null) { sets.push('source_message_id = ?'); params.push(origin.messageId); }
+  if (origin.chatId != null) { sets.push('source_chat_id = ?'); params.push(origin.chatId); }
+  if (sets.length === 0) return false;
+  params.push(listingId);
+  const res = await env.DB.prepare(
+    `UPDATE listings SET ${sets.join(', ')} WHERE id = ?`
+  ).bind(...params).run();
+  return (res.meta.changes ?? 0) > 0;
+}
+
 function escapeLike(s: string): string {
   return s.replace(/([%_\\])/g, '\\$1');
 }

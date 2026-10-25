@@ -4,7 +4,7 @@ import { logBotChat } from './visit-stats';
 import { formatMatchDigest, pairListings } from './match';
 import {
   addReport, addWatcher, createListing, createListingSafe, findByIdPrefix, findRelated, getListingById, listForMatching,
-  bumpForumStat, countPending, getSetting, listForumStats, listForumStatEvents, listingFlowCounts, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, updateListingStatus,
+  bumpForumStat, countPending, getSetting, listForumStats, listForumStatEvents, listingFlowCounts, listPending, listWatchers, markSeen, removeWatcher, saveMatchRun, searchByCity, setSeenListing, setSetting, getSeenListing, updateSourceOrigin, updateListingStatus,
 } from './store';
 import {
   admins, countryInsteadOfCity, countryNotCityMessage, dedupeDescription, escapeHtml, isRussianCity,
@@ -135,7 +135,13 @@ export function formatListing(l: Listing, sourceNote = '', audience: 'admin' | '
   // единственный способ связаться с человеком, и ссылку оставляем.
   const inText = contactsInText(l.description);
   const hasContact = contacts.length > 0 || Boolean(inText.telegram || inText.phone);
-  if (l.sourceChat && (audience === 'admin' || !hasContact)) parts.push(`Источник: ${srcRef}${srcLinkTag}`);
+  if ((srcRef || srcLink) && (audience === 'admin' || !hasContact)) {
+    // названия чата может не быть (текстовая копия из защищённого чата) —
+    // тогда «Источник» показывает саму ссылку на исходное сообщение
+    parts.push(srcRef
+      ? `Источник: ${srcRef}${srcLinkTag}`
+      : `Источник: <a href="${srcLink}">исходное сообщение</a>`);
+  }
   if (sourceNote) parts.push(sourceNote);
   return parts.join('\n');
 }
@@ -159,6 +165,43 @@ export function listingSourceLink(
   const m = /^-100(\d+)$/.exec(sourceChatId);
   if (!m) return null;
   return `https://t.me/c/${m[1]}${sourceMessageId != null ? `/${sourceMessageId}` : ''}`;
+}
+
+/** Разбор ссылки на исходное сообщение: t.me/<чат>/[<тема>/]<номер> или
+ *  t.me/c/<внутренний id>/[<тема>/]<номер> (приватные супергруппы), плюс
+ *  веб-превью t.me/s/<канал>/<номер>. Не ссылка, ссылка без номера или
+ *  диплинк бота (t.me/<бот>?start=…) — null. */
+export function parseOriginLink(text: string): {
+  username: string | null; chatId: string | null; threadId: number | null; messageId: number | null;
+} | null {
+  const m = /^(?:https?:\/\/)?(?:www\.)?t\.me\/([^\s?]+)\/?$/i.exec(text.trim());
+  if (!m) return null;
+  const parts = m[1]!.split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+  let username: string | null = null;
+  let chatId: string | null = null;
+  let rest: string[];
+  const head = parts[0]!.toLowerCase();
+  if (head === 'c') {
+    // приватная супергруппа: t.me/c/<id без -100>/…
+    if (parts.length < 3 || !/^\d+$/.test(parts[1]!)) return null;
+    chatId = `-100${parts[1]}`;
+    rest = parts.slice(2);
+  } else if (head === 's') {
+    // веб-превью канала: t.me/s/<канал>/<номер>
+    if (parts.length < 3) return null;
+    username = parts[1]!;
+    rest = parts.slice(2);
+  } else {
+    username = parts[0]!;
+    rest = parts.slice(1);
+  }
+  if (rest.length === 0 || rest.length > 2) return null;
+  const nums = rest.map(Number);
+  if (nums.some((n) => !Number.isInteger(n) || n <= 0)) return null;
+  const threadId = rest.length === 2 ? nums[0]! : null;
+  const messageId = rest.length === 2 ? nums[1]! : nums[0]!;
+  return { username, chatId, threadId, messageId };
 }
 
 /* ------------------------------------------------------------------ */
@@ -805,9 +848,37 @@ export function cityAnswer(raw: string): { ok: true; city: string } | { ok: fals
   return { ok: true, city: canonical };
 }
 
+/** Ответ радара со ссылкой на исходное сообщение.
+ *  Возвращает true, если сообщение поглощено (это ссылка-ответ), — даже когда
+ *  заявку найти не удалось: голая ссылка в любом случае не объявление. */
+async function tryOriginLinkReply(env: Env, msg: TgMessage): Promise<boolean> {
+  const replyTo = msg.reply_to_message?.message_id;
+  if (replyTo == null) return false;
+  const link = parseOriginLink(msg.text ?? '');
+  if (!link) return false;
+  const chatId = msg.chat.id;
+  // Пересылки запоминаются под ключом pm:<чат>, текстовые копии — под id чата
+  const listingId = (await getSeenListing(env, `pm:${chatId}`, replyTo))
+    ?? (await getSeenListing(env, String(chatId), replyTo));
+  if (listingId) {
+    const ok = await updateSourceOrigin(env, listingId, link).catch((e) => {
+      console.error('updateSourceOrigin failed', e);
+      return false;
+    });
+    console.log('origin link reply', JSON.stringify({ listingId, ...link, updated: ok }));
+  }
+  return true;
+}
+
 async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
   const text = (msg.text ?? '').trim();
   const chatId = msg.chat.id;
+
+  // Радар после каждой пересылки (и текстовой копии из защищённого чата)
+  // шлёт ответом ссылку на исходное сообщение — с темой форума, которую
+  // Bot API в самой пересылке не отдаёт. Дозаписываем происхождение заявки
+  // и глотаем сообщение: голая ссылка — не объявление и не ответ мастера.
+  if (await tryOriginLinkReply(env, msg)) return;
 
   // Пересланное сообщение → заявка на модерацию. Так объявления попадают
   // на доску даже из чатов, куда бота не добавили: пересылайте их боту.
@@ -878,6 +949,12 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
         continue;
       }
       created.push(res.listing);
+      if (created.length === 1) {
+        // связь «сообщение в личке → заявка»: по ней ссылка-ответ радара
+        // (reply на пересылку) найдёт заявку и допишет тему форума
+        await markSeen(env, `pm:${chatId}`, msg.message_id);
+        await setSeenListing(env, `pm:${chatId}`, msg.message_id, res.listing.id);
+      }
       await notifyCreated(env, res.listing, res.duplicateOf
         ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !isAdmin }
         : similarNote(res));
@@ -1098,6 +1175,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               continue;
             }
             created.push(res.listing);
+            if (created.length === 1) {
+              // связь «сообщение-копия → заявка» для ссылки-ответа радара
+              await setSeenListing(env, String(chatId), msg.message_id, res.listing.id);
+            }
             await notifyCreated(env, res.listing, res.duplicateOf
               ? { id: res.duplicateOf.id, why: res.why, selfSubmitted: !fromAdmin }
               : similarNote(res));
