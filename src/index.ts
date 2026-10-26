@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -1221,6 +1221,9 @@ app.post('/api/admin/match', async (c) => {
 /** GET /api/admin/match — история прогонов подбора. */
 app.get('/api/admin/match', async (c) => {
   const limit = Math.min(100, Math.max(1, Number(c.req.query('limit')) || 30));
+  // Прогоны старше 3 дней выметаем прямо перед показом: админ не должен
+  // видеть устаревшую историю, а счётчик «История подборов: N» — врать
+  await pruneMatchRuns(c.env).catch((e) => console.error('prune match runs failed', e));
   return c.json({ runs: await listMatchRuns(c.env, limit) });
 });
 
@@ -1401,6 +1404,14 @@ const worker = {
       await pruneRejected(env);
     } catch (e) {
       console.error('prune rejected failed', e);
+    }
+
+    // история прогонов подбора живёт 3 дня
+    try {
+      const pruned = await pruneMatchRuns(env);
+      if (pruned > 0) console.log('pruneMatchRuns:', JSON.stringify({ pruned }));
+    } catch (e) {
+      console.error('prune match runs failed', e);
     }
 
     // SEO-видимость раз в неделю: краулы Common Crawl выходят примерно раз в

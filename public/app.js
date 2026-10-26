@@ -1772,14 +1772,19 @@ function matchResultsBox() {
 
 function matchHistoryBox() {
   const head = el('h3', { class: 'match-history-head', text: `История подборов: ${matchRuns.length}` });
+  // срок хранения виден сразу: прогоны старше 3 дней удаляются автоматически
+  // (cron ежедневно + выметание перед показом истории), старых в списке не будет
+  const retention = el('p', { class: 'empty-note', text: 'История хранится 3 дня — старые прогоны удаляются автоматически.' });
   if (!matchRuns.length) {
     return el('section', { class: 'match-history' }, [
       head,
+      retention,
       el('p', { class: 'empty-note', text: 'Прогонов пока нет. Нажмите «подобрать пары» — прогон сохранится здесь.' }),
     ]);
   }
   return el('section', { class: 'match-history' }, [
     head,
+    retention,
     ...matchRuns.map((r) => el('article', {
       class: `admin-card match-run${matchOpenRunId === r.id ? ' match-run-open' : ''}`,
     }, [

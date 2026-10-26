@@ -1662,6 +1662,27 @@ export async function deleteMatchRun(env: Env, id: string): Promise<boolean> {
   return Number(res[1]?.meta.changes ?? 0) > 0;
 }
 
+/** История прогонов подбора живёт 3 дня: пары хранят снимки заявок, и уже
+ *  через пару дней они никому не нужны — заявки либо разобраны, либо устарели.
+ *  Удаляет cron раз в сутки и админка прямо перед показом истории.
+ *  Пары вычищаются явно, до прогонов: на ON DELETE CASCADE у match_pairs
+ *  полагаться не будем. Порог — через datetime() с обеих сторон: created_at
+ *  пишется toISOString(), а голое сравнение строк ломается на 'T' (урок v0.4.44). */
+export async function pruneMatchRuns(env: Env, days = 3): Promise<number> {
+  await ensureMatchTables(env);
+  const edge = `-${Math.max(1, Math.floor(days))} days`;
+  const res = await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM match_pairs WHERE run_id IN
+         (SELECT id FROM match_runs WHERE datetime(created_at) < datetime('now', ?))`
+    ).bind(edge),
+    env.DB.prepare(
+      `DELETE FROM match_runs WHERE datetime(created_at) < datetime('now', ?)`
+    ).bind(edge),
+  ]);
+  return Number(res[1]?.meta.changes ?? 0);
+}
+
 /* ------------------------------------------------------------------ */
 /* Дубликаты: одно и то же объявление, присланное несколько раз         */
 /* ------------------------------------------------------------------ */
