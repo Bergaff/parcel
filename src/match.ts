@@ -279,6 +279,13 @@ export interface ListingSnapshot {
   description: string;
   status: string;
   sourceChat: string | null;
+  /** Происхождение с точностью до сообщения: админу в подборе нужна та же
+   *  ссылка на исходное сообщение, что и в карточке очереди. У снимков,
+   *  сохранённых до v0.4.49, полей нет — поэтому опциональные. */
+  sourceChatId?: string | null;
+  sourceMessageId?: number | null;
+  sourceChatUsername?: string | null;
+  sourceThreadId?: number | null;
   createdAt: string;
 }
 
@@ -297,6 +304,10 @@ export function listingSnapshot(l: Listing): ListingSnapshot {
     description: (l.description ?? '').slice(0, 160),
     status: l.status,
     sourceChat: l.sourceChat ?? null,
+    sourceChatId: l.sourceChatId ?? null,
+    sourceMessageId: l.sourceMessageId ?? null,
+    sourceChatUsername: l.sourceChatUsername ?? null,
+    sourceThreadId: l.sourceThreadId ?? null,
     createdAt: l.createdAt,
   };
 }
@@ -398,9 +409,14 @@ export function filterHiddenPairs<T extends { offer: unknown; request: unknown }
   const kept: T[] = [];
   let hiddenCount = 0;
   for (const p of pairs) {
-    const offer = p.offer as Parameters<typeof sideContactKeys>[0] | null;
-    const request = p.request as Parameters<typeof sideContactKeys>[0] | null;
+    const offer = p.offer as (Parameters<typeof sideContactKeys>[0] & { id?: unknown }) | null;
+    const request = p.request as (Parameters<typeof sideContactKeys>[0] & { id?: unknown }) | null;
     const keys = [...(offer ? sideContactKeys(offer) : []), ...(request ? sideContactKeys(request) : [])];
+    // заявка без контакта ключом контакта не скрывается — для неё ключ id:<uuid>
+    // (id есть и у живых заявок, и у снимков пар в истории)
+    for (const side of [offer, request]) {
+      if (side && typeof side.id === 'string') keys.push(`id:${side.id}`);
+    }
     if (keys.some((k) => hidden.has(k))) hiddenCount += 1;
     else kept.push(p);
   }
@@ -423,5 +439,7 @@ export async function loadHiddenContacts(env: Env): Promise<HiddenContact[]> {
 }
 
 export async function setHiddenContacts(env: Env, list: HiddenContact[]): Promise<void> {
-  await env.KV.put(HIDDEN_CONTACTS_KV, JSON.stringify(list.slice(0, 200)));
+  // 200 — потолок KV-списка; при переполнении выбрасываем старейших,
+  // иначе новое скрытие молча терялось бы (slice(0,200) резал хвост)
+  await env.KV.put(HIDDEN_CONTACTS_KV, JSON.stringify(list.slice(-200)));
 }

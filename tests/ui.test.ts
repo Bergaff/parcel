@@ -71,8 +71,15 @@ const server = {
   matchPairs: [
     {
       score: 80, reasons: ['маршрут', 'даты рядом'],
-      offer: { id: 'm1', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20', contacts: ['@stale_guy'], description: 'везу', status: 'published' },
-      request: { id: 'm2', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-21', contacts: ['@other'], description: 'передать', status: 'published' },
+      offer: {
+        id: 'm1', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-20',
+        contacts: ['@stale_guy'], description: 'везу', status: 'published',
+        // происхождение до сообщения: ссылка на исходное в публичном чате с темой
+        sourceChat: 'Граница BY-LT-PL', sourceChatId: '-1001234567890',
+        sourceMessageId: 153048, sourceChatUsername: 'granica_BY_LT_PL', sourceThreadId: 153043,
+      },
+      // заявка без контакта: скрыть юзернеймом нельзя — только по id заявки
+      request: { id: 'm2', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-21', contacts: [], description: 'передать', status: 'published' },
     },
     {
       score: 70, reasons: ['маршрут'],
@@ -333,17 +340,22 @@ function makeFetch(calls: string[]) {
       if (path === '/api/admin/match' && method === 'GET') return { body: { runs: [] } };
       if (path === '/api/admin/match/hidden') return { body: { hidden: server.matchHidden } };
       if (path === '/api/admin/match/hide' && method === 'POST') {
-        const { contact, hide } = JSON.parse(init.body || '{}') as { contact?: string; hide?: boolean };
-        const key = mKey(contact ?? '');
+        const { contact, hide, listingId, label } = JSON.parse(init.body || '{}') as {
+          contact?: string; hide?: boolean; listingId?: string; label?: string;
+        };
+        // заявка без контакта скрывается ключом id:<uuid> (как в воркере)
+        const key = listingId ? `id:${listingId}` : mKey(contact ?? '');
+        const lbl = listingId ? (label ?? `заявка ${listingId.slice(0, 8)}`) : (contact ?? '');
         server.matchHidden = hide !== false
-          ? (server.matchHidden.some((h) => h.key === key) ? server.matchHidden : [...server.matchHidden, { key, label: contact ?? '' }])
+          ? (server.matchHidden.some((h) => h.key === key) ? server.matchHidden : [...server.matchHidden, { key, label: lbl }])
           : server.matchHidden.filter((h) => h.key !== key);
         return { body: { ok: true, key, hidden: server.matchHidden } };
       }
       if (path === '/api/admin/match' && method === 'POST') {
         const hidden = new Set(server.matchHidden.map((h) => h.key));
         const pairs = server.matchPairs.filter((p) =>
-          ![...(p.offer.contacts ?? []), ...(p.request.contacts ?? [])].some((c) => hidden.has(mKey(c))));
+          ![...(p.offer.contacts ?? []), ...(p.request.contacts ?? [])].some((c) => hidden.has(mKey(c)))
+          && !hidden.has(`id:${p.offer.id}`) && !hidden.has(`id:${p.request.id}`));
         return {
           body: {
             run: { id: 'run1', createdAt: '2026-09-22T10:00:00.000Z', daysWindow: 3, offersTotal: 2, requestsTotal: 2, pairsFound: pairs.length, notified: false, includeArchive: false, partial: false, note: '' },
@@ -1142,6 +1154,46 @@ describe('админка', () => {
     expect(win.document.querySelectorAll('.match-pair')).toHaveLength(2);
 
     // возвращаем вкладку «заявки» — следующие тести работают с очередью
+    byId('admin-tab-pending').click();
+    await settle(100);
+  });
+
+  it('подбор: ссылка на исходное сообщение; заявку без контакта можно скрыть', async () => {
+    byId('admin-tab-match').click();
+    await settle(100);
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(2);
+
+    // происхождение водителя m1: ссылка на сообщение в публичном чате с темой
+    const link = win.document.querySelector('.match-msg-link') as HTMLAnchorElement | null;
+    expect(link, 'ссылка на исходное сообщение в паре').not.toBeNull();
+    expect(link!.getAttribute('href')).toBe('https://t.me/granica_BY_LT_PL/153043/153048');
+    expect(link!.textContent).toContain('сообщение 153048');
+
+    // сторона без контакта (m2): «скрыть заявку» — по id, не по юзернейму
+    calls.length = 0;
+    const noContact = win.document.querySelector('.match-nocontact') as HTMLElement;
+    expect(noContact.textContent).toContain('контакта нет');
+    (noContact.querySelector('.match-hide-btn') as HTMLElement).click();
+    await settle(100);
+    expect(calls).toContain('POST /api/admin/match/hide');
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(1);
+    expect(text('toast')).toContain('Скрыл заявку');
+
+    // скрытая заявка видна списком с подписью и кнопкой «вернуть»
+    const box = win.document.querySelector('.match-hidden') as HTMLElement;
+    expect(box.textContent).toContain('m2');
+    (box.querySelector('button') as HTMLElement).click();
+    await settle(100);
+    expect(win.document.querySelector('.match-hidden')).toBeNull();
+
+    // новый прогон после возврата — снова две пары
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+    expect(win.document.querySelectorAll('.match-pair')).toHaveLength(2);
+
+    // возвращаем вкладку «заявки» — следующие тесты работают с очередью
     byId('admin-tab-pending').click();
     await settle(100);
   });

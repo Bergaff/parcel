@@ -9,7 +9,9 @@ import {
   pairListings,
   parseSnapshot,
   scorePair,
+  setHiddenContacts,
 } from '../src/match';
+import type { Env } from '../src/types';
 import { matchArgCities, matchArgDays, splitDigest } from '../src/telegram';
 import type { Listing } from '../src/types';
 
@@ -211,6 +213,24 @@ describe('вспомогательные функции', () => {
     expect(isArchivedListing(driver({ departureDate: null }), TODAY)).toBe(false);
   });
 
+  it('снимок несёт происхождение до сообщения — ссылка на исходное в подборе', () => {
+    const snap = listingSnapshot(driver({
+      sourceChatId: '-1001234567890', sourceMessageId: 153048,
+      sourceChatUsername: 'granica_BY_LT_PL', sourceThreadId: 153043,
+    }));
+    expect(snap.sourceChatUsername).toBe('granica_BY_LT_PL');
+    expect(snap.sourceThreadId).toBe(153043);
+    expect(snap.sourceMessageId).toBe(153048);
+    expect(snap.sourceChatId).toBe('-1001234567890');
+    // снимки сохраняются JSON'ом в match_pairs — поля переживают цикл
+    const back = parseSnapshot(JSON.stringify(snap));
+    expect(back?.sourceChatUsername).toBe('granica_BY_LT_PL');
+    expect(back?.sourceThreadId).toBe(153043);
+    // старый снимок без полей происхождения парсится и даёт undefined
+    const legacy = parseSnapshot(JSON.stringify({ id: 'x', type: 'offer', fromCity: 'А', toCity: 'Б' }));
+    expect(legacy?.sourceChatUsername).toBeUndefined();
+  });
+
   it('снимок заявки переживает JSON-цикл и сохраняет контакты списком', () => {
     const snap = listingSnapshot(driver({ phone: '+48579264254', telegram: '@driver' }));
     const back = parseSnapshot(JSON.stringify(snap));
@@ -351,8 +371,37 @@ describe('скрытые контакты подбора', () => {
     expect(res2.hiddenCount).toBe(1);
   });
 
+  it('заявка без контакта скрывается ключом id — с любой стороны', () => {
+    const pairs = [
+      { offer: { id: 'o1', contacts: [] }, request: { id: 'r1', contacts: [] } },
+      { offer: { id: 'o2', contacts: ['@x'] }, request: { id: 'r2', contacts: ['@y'] } },
+    ];
+    const res = filterHiddenPairs(pairs, new Set(['id:r1']));
+    expect(res.pairs).toHaveLength(1);
+    expect(res.hiddenCount).toBe(1);
+    expect((res.pairs[0]!.offer as { id: string }).id).toBe('o2');
+    // id-ключи работают вместе с контактными
+    const res2 = filterHiddenPairs(pairs, new Set(['tg:x', 'id:r1']));
+    expect(res2.pairs).toHaveLength(0);
+    expect(res2.hiddenCount).toBe(2);
+  });
+
   it('пустой список скрытых ничего не меняет', () => {
     const pairs = [{ offer: { contacts: ['@x'] }, request: { contacts: ['@y'] } }];
     expect(filterHiddenPairs(pairs, new Set())).toEqual({ pairs, hiddenCount: 0 });
+  });
+
+  it('потолок списка скрытых: новейшие сохраняются, старейшие выпадают', async () => {
+    let saved = '';
+    const env = {
+      KV: { get: async () => null, put: async (_k: string, v: string) => { saved = String(v); } },
+    } as unknown as Env;
+    const list = Array.from({ length: 210 }, (_, i) => ({ key: `tg:u${i}`, label: `@u${i}` }));
+    await setHiddenContacts(env, list);
+    const back = JSON.parse(saved) as Array<{ key: string }>;
+    expect(back).toHaveLength(200);
+    // раньше slice(0,200) отбрасывал НОВОЕ добавление — теперь выпадают старейшие
+    expect(back[0]!.key).toBe('tg:u10');
+    expect(back[199]!.key).toBe('tg:u209');
   });
 });

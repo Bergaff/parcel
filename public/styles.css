@@ -588,6 +588,8 @@ button { font-family: inherit; }
 .match-desc { font-size: 13.5px; color: var(--ink-soft); margin: 4px 0; }
 .match-contact { font-size: 13.5px; margin: 4px 0 0; }
 .match-nocontact { color: var(--accent); }
+/* ссылка на исходное сообщение в паре подбора — рядом с «№ заявки» */
+.match-msg-link { font-size: 13px; white-space: nowrap; }
 .match-history { margin-top: 26px; }
 .match-history-head { font-size: 16px; margin: 0 0 12px; }
 .match-run { padding: 12px 16px; }

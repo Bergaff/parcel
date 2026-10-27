@@ -1519,6 +1519,14 @@ function matchSide(s, icon) {
     s.price ? el('span', { class: 'mono', text: s.price }) : null,
     s.status === 'expired' ? el('span', { class: 'stamp stamp-expired', text: 'архив' }) : null,
     el('span', { class: 'mono', text: `№ ${String(s.id).slice(0, 8)}` }),
+    // происхождение видно админу и здесь: та же ссылка на исходное сообщение,
+    // что в карточке очереди (у снимков до v0.4.49 полей нет — ссылки не будет)
+    ...(() => {
+      const url = messageLinkUrl(s);
+      return url
+        ? [el('a', { class: 'match-msg-link', href: url, target: '_blank', rel: 'noopener', text: `сообщение ${s.sourceMessageId}` })]
+        : [];
+    })(),
   ].filter(Boolean);
   const contacts = Array.isArray(s.contacts) ? s.contacts : [];
   return el('div', { class: 'match-side' }, [
@@ -1537,7 +1545,14 @@ function matchSide(s, icon) {
             ' ',
           ]),
         ])
-      : el('p', { class: 'match-contact match-nocontact', text: 'контакта нет — допишите его в карточке заявки («править»)' }),
+      : el('p', { class: 'match-contact match-nocontact' }, [
+          'контакта нет — допишите его в карточке заявки («править») ',
+          el('button', {
+            class: 'link-btn match-hide-btn', type: 'button', text: 'скрыть заявку',
+            title: 'не показывать пары с этой заявкой (заявка останется на доске)',
+            onclick: () => matchHideListing(s, true),
+          }),
+        ]),
   ].filter(Boolean));
 }
 
@@ -1617,6 +1632,13 @@ function sideHasHiddenContact(side) {
   });
 }
 
+/* Сторона пары скрыта: контактом (как раньше) или сама заявка по id —
+   для заявок без контакта, которые юзернеймом не скрыть. */
+function sideIsHidden(side) {
+  if (side?.id && matchHidden.some((h) => h.key === `id:${side.id}`)) return true;
+  return sideHasHiddenContact(side);
+}
+
 async function matchHideContact(contact, hide) {
   try {
     const res = await adminApi('/api/admin/match/hide', {
@@ -1629,7 +1651,7 @@ async function matchHideContact(contact, hide) {
     matchHidden = Array.isArray(data.hidden) ? data.hidden : matchHidden;
     if (matchView) {
       const before = matchView.pairs.length;
-      matchView.pairs = matchView.pairs.filter((p) => !sideHasHiddenContact(p.offer) && !sideHasHiddenContact(p.request));
+      matchView.pairs = matchView.pairs.filter((p) => !sideIsHidden(p.offer) && !sideIsHidden(p.request));
       if (before !== matchView.pairs.length) {
         matchView.title = matchView.title.replace(/пар: \d+/, `пар: ${matchView.pairs.length}`);
       }
@@ -1643,20 +1665,54 @@ async function matchHideContact(contact, hide) {
   }
 }
 
+/* Скрыть заявку по id: для пар, где сторону не скрыть контактом (его нет).
+   Ключ id:<uuid> живёт в том же KV-списке, что и контактные ключи, поэтому
+   действует и на будущие прогоны, и на историю. */
+async function matchHideListing(side, hide) {
+  const label = `№ ${String(side.id).slice(0, 8)}${side.fromCity ? ` · ${side.fromCity} → ${side.toCity}` : ''}`;
+  try {
+    const res = await adminApi('/api/admin/match/hide', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ listingId: side.id, label, hide }),
+    });
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    matchHidden = Array.isArray(data.hidden) ? data.hidden : matchHidden;
+    if (matchView) {
+      const before = matchView.pairs.length;
+      matchView.pairs = matchView.pairs.filter((p) => !sideIsHidden(p.offer) && !sideIsHidden(p.request));
+      if (before !== matchView.pairs.length) {
+        matchView.title = matchView.title.replace(/пар: \d+/, `пар: ${matchView.pairs.length}`);
+      }
+    }
+    renderMatchTab();
+    toast(hide
+      ? 'Скрыл заявку: её пар больше нет — и в новых прогонах тоже.'
+      : 'Вернул заявку — пары появятся в новых прогонах.');
+  } catch {
+    toast('Не получилось. Попробуйте ещё раз.');
+  }
+}
+
 function matchHiddenBox() {
   if (!matchHidden.length) return null;
   return el('section', { class: 'match-hidden admin-card' }, [
     el('h3', { class: 'match-history-head', text: `Скрытые в подборе: ${matchHidden.length}` }),
     el('p', {
       class: 'admin-contact',
-      text: 'Пары с этими контактами не показываются (заявки остаются на доске и в истории):',
+      text: 'Пары с этими контактами и заявками не показываются (сами заявки остаются на доске и в истории):',
     }),
     el('p', { class: 'match-hidden-list' }, matchHidden.flatMap((h) => [
       el('span', { class: 'match-hidden-item' }, [
         el('b', { text: h.label }),
         el('button', {
           class: 'link-btn', type: 'button', text: 'вернуть',
-          onclick: () => matchHideContact(h.label, false),
+          // id-ключи (заявки без контакта) возвращаются своим ходом:
+          // matchHideContact принял бы подпись за контакт и сломал ключ
+          onclick: () => (h.key.startsWith('id:')
+            ? matchHideListing({ id: h.key.slice(3) }, false)
+            : matchHideContact(h.label, false)),
         }),
       ]),
       ' ',

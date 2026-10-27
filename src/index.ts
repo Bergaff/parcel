@@ -1335,15 +1335,30 @@ app.delete('/api/admin/match/hidden', async (c) => {
 });
 
 app.post('/api/admin/match/hide', async (c) => {
-  const b = (await c.req.json().catch(() => ({}))) as { contact?: unknown; hide?: unknown };
-  const contact = typeof b.contact === 'string' ? b.contact.trim() : '';
-  if (!contact) return c.json({ error: 'contact обязателен' }, 400);
-  const key = contactKeyOf(contact);
-  if (!key) return c.json({ error: 'не похоже на контакт' }, 400);
+  const b = (await c.req.json().catch(() => ({}))) as {
+    contact?: unknown; hide?: unknown; listingId?: unknown; label?: unknown;
+  };
   const hide = b.hide !== false;
+  const listingId = typeof b.listingId === 'string' ? b.listingId.trim() : '';
+  const contact = typeof b.contact === 'string' ? b.contact.trim() : '';
+  let key: string | null;
+  let label: string;
+  if (listingId) {
+    // заявка без контакта: скрываем её саму (ключ id:<uuid>) — контактного
+    // ключа у такой заявки нет, а неактуальную пару убрать нужно
+    if (!/^[\w-]{8,64}$/.test(listingId)) return c.json({ error: 'не похоже на id заявки' }, 400);
+    key = `id:${listingId}`;
+    label = sanitizeText(String(b.label ?? ''), 80) || `заявка ${listingId.slice(0, 8)}`;
+  } else if (contact) {
+    key = contactKeyOf(contact);
+    if (!key) return c.json({ error: 'не похоже на контакт' }, 400);
+    label = contact;
+  } else {
+    return c.json({ error: 'нужен contact или listingId' }, 400);
+  }
   const list = await loadHiddenContacts(c.env);
   const next = hide
-    ? (list.some((x) => x.key === key) ? list : [...list, { key, label: contact }])
+    ? (list.some((x) => x.key === key) ? list : [...list, { key, label }])
     : list.filter((x) => x.key !== key);
   await setHiddenContacts(c.env, next);
   return c.json({ ok: true, key, hidden: next });
