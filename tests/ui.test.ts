@@ -495,6 +495,18 @@ describe('доска: строка объявления', () => {
     expect(row!.innerHTML).not.toContain('granica_BY_LT_PL');
   });
 
+  it('приватный источник не виден в строке доски', () => {
+    // объявление ID подано пересылкой («Переслано от Иван»): на сайте
+    // подписи источника нет вовсе — span.src не печатается
+    // (карточка объявления проверена в INP-тесте: там тот же рендер без сети)
+    const row = rows()[0]!;
+    expect(row.textContent).not.toContain('Переслано');
+    expect(row.querySelector('.src')).toBeNull();
+    // чат-источник у встречной заявки остаётся видимым
+    const chatRow = rows().find((r) => (r.textContent || '').startsWith('Минск'));
+    expect(chatRow!.textContent).toContain('из чата «Граница BY-LT-PL»');
+  });
+
   it('в строке видны маршрут, дата, контакт и «пожаловаться»', () => {
     const row = rows()[0]!;
     const t = row.textContent || '';
@@ -555,9 +567,13 @@ describe('карточка: отклик на нажатие (INP)', () => {
     expect(detail.textContent).toContain('Варшава');
     expect(detail.textContent).not.toContain('достаю карточку');
     expect(detail.textContent, 'сеть ещё не ответила — ждём обновления').not.toContain(FRESH_MARK);
+    // приватный источник («Переслано от Иван»): ячейки «источник» нет
+    // ни в карточке из кэша, ни в обновлённой серверной
+    expect(detail.textContent).not.toContain('источник');
 
     await settle(400);
     expect(detail.textContent, 'после ответа сеть обновила карточку').toContain(FRESH_MARK);
+    expect(detail.textContent).not.toContain('источник');
   });
 
   it('на одно объявление — ровно один запрос', () => {

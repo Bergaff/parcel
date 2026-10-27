@@ -127,6 +127,24 @@ function sourceLabel(l) {
   return 'с сайта';
 }
 
+/* Подписи источника, которых на сайте не должно быть: имя переславшего,
+   безымянная пересылка, «Личное сообщение боту» — детали приватного общения
+   с ботом. Совпадает с isPrivateSourceChat() в src/ssr.ts. Админу видно всё. */
+function isPrivateSourceChat(sourceChat) {
+  if (!sourceChat) return false;
+  return sourceChat.startsWith('Переслано от ')
+    || sourceChat === 'Пересланное сообщение'
+    || sourceChat === 'Личное сообщение боту';
+}
+
+/* Подпись источника для сайта: приватные — null, строка не печатается вовсе.
+   Проверяем сырой sourceChat: «Пересланное сообщение» подпись завернула бы
+   в «из чата «…»». */
+function publicSourceLabel(l) {
+  if (isPrivateSourceChat(l.sourceChat)) return null;
+  return sourceLabel(l);
+}
+
 /* Ссылка-подпись источника для ПУБЛИЧНЫХ карточек: только та, что админ задал
  * сам для чата (chatLinks). Ссылки на конкретное сообщение здесь нет: она ведёт
  * к автору и истории чата — это данные для админов, см. messageLinkUrl(). */
@@ -150,10 +168,12 @@ function messageLinkUrl(l) {
 }
 
 /* Подпись источника — кликабельная, когда есть ссылка на оригинал */
-function sourceContent(l) {
+function sourceContent(l, audience = 'public') {
+  const label = audience === 'admin' ? sourceLabel(l) : publicSourceLabel(l);
+  if (!label) return null; // приватный источник: на сайте строки нет вовсе
   const url = sourceLinkUrl(l);
-  if (!url) return sourceLabel(l);
-  return el('a', { href: url, target: '_blank', rel: 'noopener', text: sourceLabel(l) });
+  if (!url) return label;
+  return el('a', { href: url, target: '_blank', rel: 'noopener', text: label });
 }
 
 /* ---------- скопировать ссылку на объявление ---------- */
@@ -366,7 +386,10 @@ function buildRow(l) {
           : l.departureDate ? el('span', { text: `выезд ${fmtDate(l.departureDate)}` }) : el('span', { text: 'дата не указана' }),
         l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
         l.price ? el('span', { class: 'mono', text: l.price }) : null,
-        el('span', { class: 'src' }, [sourceContent(l)]),
+        (() => {
+          const src = sourceContent(l);
+          return src ? el('span', { class: 'src' }, [src]) : null;
+        })(),
       ].filter(Boolean)),
     ]),
     el('div', { class: 'row-side' }, [
@@ -646,10 +669,15 @@ function renderDetail(l, meta) {
       el('span', { class: 'value', text: l.price }),
     ]));
   }
-  cells.push(el('div', { class: 'cell' }, [
-    el('span', { class: 'label', text: 'источник' }),
-    el('span', { class: 'value' }, [sourceContent(l)]),
-  ]));
+  // приватный источник («Переслано от …», «Личное сообщение боту») на сайте
+  // не показывается — ячейки «источник» просто нет, как и в серверной карточке
+  const srcContent = sourceContent(l);
+  if (srcContent) {
+    cells.push(el('div', { class: 'cell' }, [
+      el('span', { class: 'label', text: 'источник' }),
+      el('span', { class: 'value' }, [srcContent]),
+    ]));
+  }
   cells.push(el('div', { class: 'cell' }, [
     el('span', { class: 'label', text: 'добавлено' }),
     // полная дата, как в серверной карточке: относительное «3 дн. назад»
@@ -981,7 +1009,7 @@ function adminCard(l, mode = 'pending') {
     l.weightKg != null ? el('span', { class: 'mono', text: `${String(l.weightKg).replace('.', ',')} кг` }) : null,
     l.price ? el('span', { class: 'mono', text: l.price }) : null,
     el('span', { class: 'src' }, [
-      sourceContent(l),
+      sourceContent(l, 'admin'),
       // происхождение с точностью до сообщения: админу видно, откуда заявка,
       // даже когда чат приватный и публичной ссылки на него нет
       ...(() => {

@@ -9,8 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import type { Env, Listing } from '../src/types';
 import {
-  contactOf, isAppPath, isArchived, renderDetailHtml, renderRowHtml, renderRowsHtml,
-  renderShell, setView, sourceLabel, todayLine,
+  contactOf, isAppPath, isArchived, publicSourceLabel, renderDetailHtml, renderRowHtml,
+  renderRowsHtml, renderShell, setView, sourceLabel, todayLine,
 } from '../src/ssr';
 import { extractFaq, itemDescription, itemTitle, siteOrigin, STATIC_PAGES } from '../src/pages';
 import { SITE_VERSION } from '../src/version';
@@ -253,7 +253,10 @@ describe('строка доски в SSR', () => {
     expect(row).toContain('8 кг');
     expect(row).toContain('30 BYN');
     expect(row).toContain('href="https://t.me/ivan_waw"');
-    expect(row).toContain('Переслано от Иван');
+    // приватный источник («Переслано от …») на сайте не виден: ни подписи,
+    // ни самого span.src в строке нет
+    expect(row).not.toContain('Переслано от Иван');
+    expect(row).not.toContain('class="src"');
     expect(row).toContain('№ B502');
   });
 
@@ -297,6 +300,26 @@ describe('строка доски в SSR', () => {
       listing({ sourceChatId: '-1001234567890', sourceMessageId: 42, sourceChat: null }),
       { chatLinks: { '-1001234567890': 'https://t.me/warszawa_minsk' } });
     expect(linked).toContain('href="https://t.me/warszawa_minsk"');
+  });
+
+  it('приватный источник не виден на сайте: пересылки и личка бота', () => {
+    // полная подпись остаётся для админки и выгрузок
+    expect(sourceLabel(listing({ sourceChat: 'Переслано от Иван' }))).toBe('Переслано от Иван');
+    // публично — null: строка источника не печатается вовсе
+    expect(publicSourceLabel(listing({ sourceChat: 'Переслано от Иван' }))).toBeNull();
+    expect(publicSourceLabel(listing({ sourceChat: 'Пересланное сообщение' }))).toBeNull();
+    expect(publicSourceLabel(listing({ sourceChat: 'Личное сообщение боту' }))).toBeNull();
+    // чат и сайт остаются
+    expect(publicSourceLabel(listing({ sourceChat: 'Варшава Минск чат' }))).toBe('из чата «Варшава Минск чат»');
+    expect(publicSourceLabel(listing({ source: 'site', sourceChat: null }))).toBe('с сайта');
+
+    // карточка объявления: у приватного источника ячейки «источник» нет
+    const privateDetail = renderDetailHtml(listing({ sourceChat: 'Переслано от Иван' }), { origin: 'https://pop-utka.app' });
+    expect(privateDetail).not.toContain('источник');
+    expect(privateDetail).not.toContain('Переслано');
+    const chatDetail = renderDetailHtml(listing({ sourceChat: 'Варшава Минск чат' }), { origin: 'https://pop-utka.app' });
+    expect(chatDetail).toContain('источник');
+    expect(chatDetail).toContain('из чата «Варшава Минск чат»');
   });
 });
 

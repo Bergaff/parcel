@@ -48,6 +48,26 @@ export function sourceLabel(l: Listing): string {
   return 'с сайта';
 }
 
+/** Подписи источника, которых на сайте не должно быть: имя переславшего
+ *  («Переслано от Иван»), безымянная пересылка, «Личное сообщение боту» —
+ *  детали приватного общения с ботом, посторонним они ничего не говорят
+ *  и раскрывают, кто и как подавал заявку. Админу видно всё (админ-панель). */
+export function isPrivateSourceChat(sourceChat: string | null | undefined): boolean {
+  if (!sourceChat) return false;
+  return sourceChat.startsWith('Переслано от ')
+    || sourceChat === 'Пересланное сообщение'
+    || sourceChat === 'Личное сообщение боту';
+}
+
+/** Подпись источника для сайта: приватные — null (строка источника не
+ *  печатается вовсе), чаты и «с сайта» — как раньше. Проверяем сырой
+ *  sourceChat, а не подпись: «Пересланное сообщение» подпись завернула бы
+ *  в «из чата «…»». */
+export function publicSourceLabel(l: Listing): string | null {
+  if (isPrivateSourceChat(l.sourceChat)) return null;
+  return sourceLabel(l);
+}
+
 /** Публичная ссылка-подпись источника: только та, что админ задал сам для
  *  чата (chatLinks). Ссылки на конкретное сообщение на доске нет: они ведут
  *  к автору и истории чата — это данные для админов (админ-панель, карточки
@@ -58,7 +78,9 @@ export function sourceLinkUrl(l: Listing, chatLinks: Record<string, string> = {}
 }
 
 function sourceHtml(l: Listing, chatLinks: Record<string, string> = {}): string {
-  const label = escapeHtml(sourceLabel(l));
+  const pub = publicSourceLabel(l);
+  if (pub == null) return ''; // приватный источник: на сайте строки нет вовсе
+  const label = escapeHtml(pub);
   const url = sourceLinkUrl(l, chatLinks);
   return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${label}</a>` : label;
 }
@@ -98,7 +120,10 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
       : l.departureDate ? `<span>выезд ${escapeHtml(fmtDayShort(l.departureDate))}</span>` : '<span>дата не указана</span>',
     fmtWeight(l.weightKg) ? `<span class="mono">${escapeHtml(fmtWeight(l.weightKg)!)}</span>` : null,
     l.price ? `<span class="mono">${escapeHtml(l.price)}</span>` : null,
-    `<span class="src">${sourceHtml(l, opts.chatLinks)}</span>`,
+    (() => {
+      const src = sourceHtml(l, opts.chatLinks);
+      return src ? `<span class="src">${src}</span>` : null;
+    })(),
   ].filter(Boolean).join('');
 
   const side = [
@@ -192,7 +217,10 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
   ${l.recurring ? `<span class="stamp stamp-recur">регулярно</span>` : ''}
   ${archived ? '<span class="stamp stamp-expired">архив</span>' : ''}
 </div>
-<div class="d-meta">${cellsHtml}<div class="cell"><span class="label">источник</span><span class="value">${sourceHtml(l, opts.chatLinks)}</span></div><div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDateWithYear((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>
+<div class="d-meta">${cellsHtml}${(() => {
+    const src = sourceHtml(l, opts.chatLinks);
+    return src ? `<div class="cell"><span class="label">источник</span><span class="value">${src}</span></div>` : '';
+  })()}<div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDateWithYear((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>
 ${archived ? '<p class="d-note">Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.</p>' : ''}
 <p class="d-desc">${escapeHtml(l.description)}</p>
 <div class="d-actions">
