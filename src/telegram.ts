@@ -2355,7 +2355,7 @@ async function handleCallback(env: Env, cb: TgCallbackQuery): Promise<void> {
 /* Точка входа                                                          */
 /* ------------------------------------------------------------------ */
 
-export async function handleTelegramUpdate(env: Env, update: TgUpdate): Promise<{ ok: boolean }> {
+export async function handleTelegramUpdate(env: Env, update: TgUpdate): Promise<{ ok: boolean; retry?: boolean }> {
   try {
     if (update.message) {
       const msg = update.message;
@@ -2373,6 +2373,11 @@ export async function handleTelegramUpdate(env: Env, update: TgUpdate): Promise<
     return { ok: true };
   } catch (e) {
     console.error('telegram update failed', e);
-    return { ok: false };
+    // Авария D1: апдейт не обработан и не должен потеряться. На не-2xx ответ
+    // Telegram повторяет доставку webhook'а — после восстановления базы
+    // сообщение обработается. Ошибки разбора/логики не ретраим: повтор
+    // бесполезен, а штормить запросами нельзя.
+    const retry = e instanceof Error && /D1_ERROR|internal error/i.test(e.message);
+    return { ok: false, retry };
   }
 }

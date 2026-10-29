@@ -168,6 +168,12 @@ app.post('/api/telegram/:secret', async (c) => {
   const update = await c.req.json().catch(() => null);
   if (!update) return c.json({ ok: false }, 400);
   const result = await handleTelegramUpdate(c.env, update);
+  if (result.retry) {
+    // D1 временно недоступна: отвечаем 503, чтобы Telegram повторил
+    // доставку апдейта — иначе сообщение, пришедшее во время аварии,
+    // потерялось бы молча.
+    return c.json({ ok: false, retry: true }, 503);
+  }
   // Telegram требует ответить 200 как можно быстрее.
   return c.json({ ok: result.ok });
 });
@@ -1385,6 +1391,51 @@ app.delete('/api/admin/match/:id', async (c) => {
 
 /* Cron: раз в сутки архивируем просроченные заявки и подчищаем старый архив.
    Расписание — [triggers] в wrangler.toml; ручной запуск — POST /api/admin/archive. */
+/* -------------------- Временный сбой (например, авария D1) -------------------- */
+/* Непойманное исключение раньше доезжало до посетителя голым «Internal Server
+   Error»: при авариях D1 (платформенная ошибка «internal error; reference = …»)
+   весь сайт показывал системный текст, а поисковики получали 500. Теперь
+   возвращаем честные 503: человеку — понятную страницу «временно не отвечаем»,
+   API — JSON. Для краулеров 503 + Retry-After — сигнал «сбой временный,
+   страницу не выкидывать из индекса» (в отличие от 500). Edge-кэш 503 не
+   сохранит: cacheableStatus пропускает только 200/404. */
+const OUTAGE_PAGE = `<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Попутка временно не отвечает</title>
+</head>
+<body style="margin:0;background:#f2eee5;color:#201d17;font-family:Georgia,'Times New Roman','PT Serif',serif;">
+  <main style="max-width:600px;margin:0 auto;padding:80px 20px;text-align:center;">
+    <p style="font-size:34px;font-weight:700;margin:0;">Попутка<span style="color:#a43a10;">.</span></p>
+    <h1 style="font-size:22px;margin:22px 0 10px;">Сайт временно не отвечает</h1>
+    <p style="font-size:16px;line-height:1.55;color:#47423a;margin:0 0 16px;">
+      База данных объявлений недоступна из-за технического сбоя на стороне хостинга.
+      Обычно это проходит само за несколько минут — обновите страницу чуть позже.
+    </p>
+    <p style="font-size:14px;color:#6f675a;margin:0;">
+      Объявления, присланные в Telegram в это время, не потеряются:
+      бот получит их повторно и обработает, как только база снова ответит.
+    </p>
+  </main>
+</body>
+</html>`;
+
+app.onError((err, c) => {
+  console.error('unhandled error:', err?.message ?? String(err), err?.stack ?? '');
+  c.header('Retry-After', '300');
+  c.header('Cache-Control', 'no-store');
+  if (c.req.path.startsWith('/api/') || c.req.path.startsWith('/og-debug')) {
+    return c.json({ error: 'temporarily_unavailable' }, 503);
+  }
+  if (c.req.method !== 'GET') {
+    // форма/действие не прошли: клиентский код покажет свою ошибку по не-2xx
+    return c.json({ error: 'temporarily_unavailable' }, 503);
+  }
+  return c.html(OUTAGE_PAGE, 503);
+});
+
 const worker = {
   fetch: app.fetch,
   scheduled: async (_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> => {
