@@ -457,7 +457,7 @@ async function loadList(reset = false) {
     if (state.archive && state.total === 0) {
       listEl.append(el('p', {
         class: 'empty-note',
-        text: 'В архиве пока пусто. Заявки попадают сюда на следующий день после даты выезда и живут месяц.',
+        text: 'В архиве пока пусто. Заявки попадают сюда на следующий день после даты выезда и живут неделю.',
       }));
     }
     $('#load-more').hidden = !state.hasMore;
@@ -604,7 +604,7 @@ function renderDetail(l, meta) {
   if (box.dataset.ssr === '1' && box.dataset.id === l.id) return;
   box.removeAttribute('data-ssr');
   box.removeAttribute('data-id');
-  // Дата поездки прошла — заявка в архиве (месяц ещё доступна, потом удаляется).
+  // Дата поездки прошла — заявка в архиве (неделю ещё доступна, потом удаляется).
   // Регулярный рейс — не архив: дата показывает ближайший заезд, cron катит её вперёд.
   const archived =
     l.status === 'expired' ||
@@ -708,7 +708,7 @@ function renderDetail(l, meta) {
     ...(archived
       ? [el('p', {
           class: 'd-note',
-          text: 'Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
+          text: 'Дата поездки прошла — заявка в архиве. Ещё неделю она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.',
         })]
       : []),
     el('p', { class: 'd-desc', text: l.description }),

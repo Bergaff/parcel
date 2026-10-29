@@ -302,7 +302,7 @@ export async function buildItemPage(
     description: itemDescription(listing),
     canonical: `${origin}/item/${encodeURIComponent(listing.id)}`,
     origin,
-    // архив живёт месяц и всё равно снимется: в индекс его пускать незачем
+    // архив живёт неделю и всё равно снимется: в индекс его пускать незачем
     robots: archived ? 'noindex, follow' : undefined,
     image: `${origin}/og/${encodeURIComponent(listing.id)}.png`,
     imageAlt: `${listing.fromCity} → ${listing.toCity}: ${listing.type === 'offer' ? 'водитель везёт' : 'нужно передать'}`,
@@ -403,7 +403,7 @@ function monthRowHtml(stat: MonthStat): string {
 /**
  * Публичная страница итогов /itogi: цифры по месяцам и средние цены.
  *
- * Объявления живут на доске месяц после выезда, а потом удаляются кроном —
+ * Объявления живут на доске неделю после выезда, а потом удаляются кроном —
  * поэтому берём не живые строки, а снимки stats_months (см. src/stats.ts).
  * Если снимков ещё нет (первый запуск), считаем и сохраняем на месте.
  */

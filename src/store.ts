@@ -324,7 +324,7 @@ export async function pruneDuplicatePending(env: Env): Promise<number> {
 /**
  * Заявки по городу (куда ИЛИ откуда), без учёта регистра.
  * Кроме действующих показывает и архив — заявки с прошедшей датой,
- * которые ещё не удалились (30 дней после даты выезда). Активные — выше.
+ * которые ещё не удалились (7 дней после даты выезда). Активные — выше.
  */
 export async function searchByCity(env: Env, city: string, limit = 30): Promise<Listing[]> {
   // ORDER BY ниже смотрит в recurring — гарантируем и его
@@ -337,7 +337,7 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
      WHERE status IN ('published', 'expired')
        AND (hidden IS NULL OR hidden != 1)
        AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
-       AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-30 days'))
+       AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-7 days'))
      ORDER BY (CASE WHEN status = 'expired' OR (recurring IS NULL AND departure_date < date('now', '+3 hours')) THEN 1 ELSE 0 END),
               COALESCE(published_at, created_at) DESC
      LIMIT ?`
@@ -353,8 +353,8 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
  *    Живёт, пока её освежают (пересылки, touchListing); 45 дней тишины —
  *    расписание считается закончившимся, заявка уходит в архив;
  * 2) опубликованные заявки с прошедшей датой выезда → статус 'expired' (архив):
- *    они пропадают с доски, но месяц ещё доступны по ссылке и в /поиск;
- * 3) заявки старше 30 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE);
+ *    они пропадают с доски, но неделю ещё доступны по ссылке и в /поиск;
+ * 3) заявки старше 7 дней с даты выезда — удаляются насовсем (вместе с жалобами, ON DELETE CASCADE);
  * 4) регулярные рейсы без обновлений 45 дней — удаляются (расписание умерло).
  */
 export async function archiveExpired(env: Env, now: Date = new Date()): Promise<{
@@ -402,12 +402,12 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
        AND departure_date < date('now', '+3 hours')`
   ).run();
 
-  // 3) Архив старше 30 дней с даты выезда — удаляем
+  // 3) Архив старше 7 дней с даты выезда — удаляем
   const del = await env.DB.prepare(
     `DELETE FROM listings
      WHERE departure_date IS NOT NULL
        AND recurring IS NULL
-       AND departure_date < date('now', '+3 hours', '-30 days')`
+       AND departure_date < date('now', '+3 hours', '-7 days')`
   ).run();
 
   // 4) Мёртвые регулярные: 45 дней никто не пересылал и не освежал
@@ -419,7 +419,8 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
 
   // 5) Скрытые заявки без даты выезда (сайт, без контакта): дата в форме
   //    необязательна, поэтому живём по возрасту — 30 дней на доске-невидимке,
-  //    потом архив, ещё через 30 — удаление. С датой разбираются пункты 2–3.
+  //    потом архив, ещё через 7 — удаление (архив везде живёт неделю).
+  //    С датой разбираются пункты 2–3.
   const updHidden = await env.DB.prepare(
     `UPDATE listings SET status = 'expired'
      WHERE hidden = 1 AND status = 'published'
@@ -430,14 +431,14 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
     `DELETE FROM listings
      WHERE hidden = 1 AND status = 'expired'
        AND departure_date IS NULL
-       AND datetime(created_at) < datetime('now', '-60 days')`
+       AND datetime(created_at) < datetime('now', '-37 days')`
   ).run();
 
   // 6) Видимые заявки БЕЗ даты выезда: стареть им было не от чего, поэтому
   //    пункты 2–3 их не касались, а пункт 5 написан только для hidden = 1.
   //    На доске таких накопилось 422 (из 951 заявка без даты), 317 старше
   //    недели, 21 старше месяца — и куча росла бы вечно. Живём по возрасту:
-  //    21 день на доске → архив, ещё 30 → удаление. Регулярные рейсы не
+  //    21 день на доске → архив, ещё 7 → удаление (архив живёт неделю). Регулярные рейсы не
   //    трогаем: у них дату катит пункт 1, а мёртвых убирает пункт 4.
   const updNoDate = await env.DB.prepare(
     `UPDATE listings SET status = 'expired'
@@ -449,7 +450,7 @@ export async function archiveExpired(env: Env, now: Date = new Date()): Promise<
     `DELETE FROM listings
      WHERE COALESCE(hidden, 0) = 0 AND status = 'expired'
        AND departure_date IS NULL AND recurring IS NULL
-       AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-51 days')`
+       AND datetime(COALESCE(published_at, created_at)) < datetime('now', '-28 days')`
   ).run();
 
   return {
@@ -910,7 +911,7 @@ export async function deleteListing(env: Env, id: string): Promise<boolean> {
 
 export async function addReport(env: Env, listingId: string, reason: string | null, ip: string | null): Promise<{ ok: boolean; autoRejected: boolean; count: number }> {
   const listing = await getListingById(env, listingId);
-  // Жаловаться можно и на архивную заявку: она месяц висит по ссылке, автору
+  // Жаловаться можно и на архивную заявку: она неделю висит по ссылке, автору
   // всё ещё пишут. Раньше принимались только 'published' — кнопка на странице
   // архивной заявки отвечала «не получилось отправить жалобу».
   if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
@@ -1811,14 +1812,14 @@ export async function deleteListings(env: Env, ids: string[]): Promise<number> {
 
 /**
  * Что вообще видно на сайте: опубликованные заявки с не прошедшей датой
- * и архив (месяц после даты выезда, потом cron удаляет). Регулярные рейсы
+ * и архив (неделю после даты выезда, потом cron удаляет). Регулярные рейсы
  * («каждый четверг») видны всегда, пока cron катит их дату вперёд.
  * Тот же набор, что показывают доска и /api/listings — иначе страницы
  * маршрутов появлялись бы и исчезали каждый день.
  */
 const VISIBLE_WHERE = `(
     (status = 'published' AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL))
-    OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-30 days'))
+    OR (status = 'expired' AND departure_date IS NOT NULL AND departure_date >= date('now', '+3 hours', '-7 days'))
   ) AND (hidden IS NULL OR hidden != 1)`;
 
 /** Активная заявка: на доске прямо сейчас (не архив). */
@@ -1827,7 +1828,7 @@ const ACTIVE_EXPR = `CASE WHEN status = 'published' AND (departure_date IS NULL 
 export interface RoutePair {
   fromCity: string;
   toCity: string;
-  /** сколько заявок видно на сайте (активные + архив месяца) */
+  /** сколько заявок видно на сайте (активные + архив недели) */
   total: number;
   /** сколько из них на доске прямо сейчас */
   active: number;

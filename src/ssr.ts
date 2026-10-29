@@ -221,7 +221,7 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
     const src = sourceHtml(l, opts.chatLinks);
     return src ? `<div class="cell"><span class="label">источник</span><span class="value">${src}</span></div>` : '';
   })()}<div class="cell"><span class="label">добавлено</span><span class="value">${escapeHtml(fmtDateWithYear((l.publishedAt ?? l.createdAt).slice(0, 10)))}</span></div></div>
-${archived ? '<p class="d-note">Дата поездки прошла — заявка в архиве. Ещё месяц она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.</p>' : ''}
+${archived ? '<p class="d-note">Дата поездки прошла — заявка в архиве. Ещё неделю она доступна по ссылке, потом удалится. Автору всё ещё можно написать с вопросом.</p>' : ''}
 <p class="d-desc">${escapeHtml(l.description)}</p>
 <div class="d-actions">
       ${actions}

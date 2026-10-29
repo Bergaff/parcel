@@ -98,6 +98,16 @@ describe('archiveExpired — регулярные рейсы', () => {
     expect(select!.sql).toContain("datetime('now', '-45 days')");
   });
 
+  it('датированный архив удаляется через 7 дней после выезда', async () => {
+    const { env, calls } = fakeDb([]);
+    await archiveExpired(env, NOW);
+    const del = calls.find((c) => c.sql.startsWith('DELETE FROM listings') && c.sql.includes('departure_date <'));
+    expect(del, 'удаление архива с датой выезда').toBeTruthy();
+    // неделя после выезда — и заявка удаляется насовсем (v0.4.51; было 30 дней)
+    expect(del!.sql).toContain("departure_date < date('now', '+3 hours', '-7 days')");
+    expect(del!.sql).toContain('recurring IS NULL'); // регулярные — пункт 4 (45 дней)
+  });
+
   it('мёртвые расписания удаляются отдельным запросом', async () => {
     const { env, calls } = fakeDb([]);
     await archiveExpired(env, NOW);
@@ -110,7 +120,7 @@ describe('archiveExpired — регулярные рейсы', () => {
 describe('archiveExpired — скрытые заявки без контакта', () => {
   const NOW = new Date('2026-09-22T12:00:00Z');
 
-  it('без даты выезда: 30 дней живёт, потом архив, ещё 30 — удаление', async () => {
+  it('без даты выезда: 30 дней живёт, потом архив, ещё 7 — удаление', async () => {
     const { env, calls } = fakeDb([], { hiddenChanges: 2 });
     const res = await archiveExpired(env, NOW);
     const expire = calls.find((c) => /UPDATE listings SET status = 'expired'\s+WHERE hidden = 1/.test(c.sql));
@@ -119,13 +129,13 @@ describe('archiveExpired — скрытые заявки без контакта
     expect(expire!.sql).toContain("-30 days");
     const del = calls.find((c) => /DELETE FROM listings\s+WHERE hidden = 1/.test(c.sql));
     expect(del, 'архив скрытых удаляется').toBeTruthy();
-    expect(del!.sql).toContain("-60 days");
+    expect(del!.sql).toContain("-37 days"); // 30 до архива + 7 в архиве
     // статистика схлопывает обе категории (обычный архив дал бы 1 + скрытые 2)
     expect(res.archived).toBe(3);
     expect(res.deleted).toBe(3);
   });
 
-  it('видимые без даты: 21 день на доске → архив, 51 → удаление, и это видно в счёте', async () => {
+  it('видимые без даты: 21 день на доске → архив, 28 → удаление, и это видно в счёте', async () => {
     const { env, calls } = fakeDb([], { datelessChanges: 7 });
     const res = await archiveExpired(env, NOW);
     const expire = calls.find((c) => /UPDATE listings SET status = 'expired'\s+WHERE COALESCE\(hidden, 0\) = 0/.test(c.sql));
@@ -136,7 +146,7 @@ describe('archiveExpired — скрытые заявки без контакта
     expect(expire!.sql).toContain('COALESCE(published_at, created_at)'); // возраст считаем от публикации
     const del = calls.find((c) => /DELETE FROM listings\s+WHERE COALESCE\(hidden, 0\) = 0/.test(c.sql));
     expect(del, 'архив без даты удаляется').toBeTruthy();
-    expect(del!.sql).toContain("-51 days");
+    expect(del!.sql).toContain("-28 days"); // 21 на доске + 7 в архиве
     // счёт честный: обычные (1+1) + скрытые (0) + бездатные (7+7)
     expect(res.dateless).toBe(14);
     expect(res.archived).toBe(1 + 7);
