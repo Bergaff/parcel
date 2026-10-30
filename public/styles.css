@@ -246,6 +246,8 @@ button { font-family: inherit; }
 }
 .route-line .r-arrow { color: var(--accent); margin: 0 8px; font-weight: 400; }
 .route-line .r-to { font-weight: 700; }
+/* Маршрут-цепочка («Минск … Варшава»): вместо стрелки многоточие, все города — при наведении */
+.r-arrow.r-via { cursor: help; letter-spacing: 2px; }
 
 .desc {
   margin: 0 0 8px;

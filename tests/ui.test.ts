@@ -142,6 +142,8 @@ function makeFetch(calls: string[]) {
       if (path === '/api/listings') {
         const items = [listing(), listing({
           id: REQ, type: 'request', fromCity: 'Минск', toCity: 'Варшава', telegram: null,
+          // маршрут-цепочка: клиент рисует «Минск … Варшава» с городами при наведении
+          stops: ['Минск', 'Брест', 'Варшава'],
           // происхождение: публичная строка показывает только подпись чата
           sourceChat: 'Граница BY-LT-PL', sourceChatId: '-1001234567890', sourceMessageId: 42,
           sourceChatUsername: 'granica_BY_LT_PL', sourceThreadId: 7,
@@ -153,7 +155,7 @@ function makeFetch(calls: string[]) {
         const id = decodeURIComponent(path.slice('/api/listings/'.length));
         const known: Loose = {
           [ID]: listing(),
-          [REQ]: listing({ id: REQ, type: 'request' }),
+          [REQ]: listing({ id: REQ, type: 'request', stops: ['Минск', 'Брест', 'Варшава'] }),
           [COLD]: listing({ id: COLD, description: `${BOARD_DESC} ${FRESH_MARK}` }),
           [HIDDEN]: listing({ id: HIDDEN, type: 'request', status: 'published', hidden: true, telegram: null, phone: null }),
         };
@@ -490,6 +492,20 @@ describe('доска: строка объявления', () => {
     // никаких костылей для «кликабельного div»: переход делает браузер
     expect(row.hasAttribute('tabindex')).toBe(false);
     expect(row.hasAttribute('role')).toBe(false);
+  });
+
+  it('маршрут-цепочка: «Минск … Варшава», все города видны при наведении', () => {
+    const row = rows()[1]!;
+    const via = row.querySelector('.r-arrow.r-via') as HTMLElement | null;
+    expect(via, 'многоточие вместо стрелки').not.toBeNull();
+    expect(via!.textContent).toBe('…');
+    expect(via!.getAttribute('title')).toBe('Минск → Брест → Варшава');
+    expect(via!.getAttribute('aria-label')).toBe('через Брест');
+    const link = row.querySelector('a.row-link') as HTMLAnchorElement;
+    expect(link.getAttribute('aria-label')).toContain('Минск → Брест → Варшава: открыть объявление');
+    // обычная пара городов — прежняя стрелка
+    expect(rows()[0]!.querySelector('.r-arrow')!.textContent).toBe('→');
+    expect(rows()[0]!.querySelector('.r-via')).toBeNull();
   });
 
   it('строка с доски: чат-источник подписан, ссылка на сообщение не видна', () => {

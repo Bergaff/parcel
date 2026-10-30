@@ -76,7 +76,8 @@ describe('запросы к базе', () => {
     const { env, calls } = fakeDb();
     await listListings(env, { from: 'Амстердам' });
     const query = calls.find((c) => /^SELECT \* FROM listings/.test(c.sql))!;
-    expect(query.sql).toContain('from_city_lc LIKE ?');
+    // v0.4.55: посадка/высадка — по цепочке маршрута (COALESCE для старых строк)
+    expect(query.sql).toContain('COALESCE(from_stops_lc, from_city_lc) LIKE ?');
     expect(query.sql).not.toContain('GLOB');
     expect(query.params).toContain('%амстердам%');
   });
@@ -94,7 +95,7 @@ describe('запросы к базе', () => {
     const { env, calls } = fakeDb();
     await getCounts(env, { from: 'Санкт-Петербург' });
     const query = calls.find((c) => /COUNT\(\*\)/.test(c.sql))!;
-    expect(query.sql).toContain('from_city_lc LIKE ?');
+    expect(query.sql).toContain('COALESCE(from_stops_lc, from_city_lc) LIKE ?');
     expect(query.params).toContain('%санкт-петербург%');
   });
 
@@ -134,7 +135,8 @@ describe('колонки *_lc', () => {
 
   it('колонки уже есть — ALTER не повторяем', async () => {
     const { env, calls } = fakeDb({
-      columns: ['id', 'from_city', 'to_city', 'description', 'from_city_lc', 'to_city_lc', 'description_lc'],
+      columns: ['id', 'from_city', 'to_city', 'description', 'from_city_lc', 'to_city_lc', 'description_lc',
+        'stops', 'route_lc', 'from_stops_lc', 'to_stops_lc'],
     });
     await ensureSearchColumns(env);
     expect(calls.some((c) => c.sql.includes('ALTER TABLE'))).toBe(false);

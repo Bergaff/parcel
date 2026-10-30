@@ -26,6 +26,9 @@ export interface AiFields {
   type: ListingType;
   fromCity: string;
   toCity: string;
+  /** Цепочка городов маршрута по порядку (первый = fromCity, последний = toCity)
+   *  или null, когда городов два. Промежуточные участвуют в поиске по сегментам. */
+  stops?: string[] | null;
   departureDate: string | null;
   /** «каждый четверг», «ежедневно» — рейс регулярный, заявка не разовая. */
   recurring: string | null;
@@ -39,7 +42,7 @@ export interface AiFields {
 const SYSTEM_PROMPT = `Ты — строгий извлекатель данных из сообщений телеграм-чатов.
 Доска объявлений «попутка.» — ТОЛЬКО про передачу посылок и вещей попутными машинами.
 Верни ТОЛЬКО валидный JSON без пояснений и без markdown, по схеме:
-{"listings": [{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "departure_date": "YYYY-MM-DD", "recurring": "каждый четверг", "weight_kg": 5, "price": "50 zl", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}]}
+{"listings": [{"is_listing": true, "is_passenger": false, "type": "offer", "from_city": "Город", "to_city": "Город", "stops": ["Минск","Брест","Белосток","Варшава"], "departure_date": "YYYY-MM-DD", "recurring": "каждый четверг", "weight_kg": 5, "price": "50 zl", "telegram": "@username", "phone": null, "description": "сжатое описание до 300 символов"}]}
 
 Правила:
 - В одном сообщении может быть НЕСКОЛЬКО рейсов/направлений (туда и обратно, два маршрута, «18-19.9 туда, 20-21.9 обратно») — верни ОТДЕЛЬНЫЙ элемент listings на каждое направление (до 3), со своими городами и датой.
@@ -47,7 +50,7 @@ const SYSTEM_PROMPT = `Ты — строгий извлекатель данны
 - type — по тому, КТО действует. "offer" — автор едет сам и может взять/передать посылку («возьму», «везу», «есть место», «рейс»). "request" — автор ИЩЕТ перевозчика и сам ничего не везёт: «нужно передать», «ищу водителя», «кто везёт завтра?», «кто-то занимается перевозом посылок?», «занимаетесь доставкой?».
 - is_passenger: true — если это поиск или предложение ПОЕЗДКИ пассажиром БЕЗ посылок (пассажир, подвезти до, места в машине). «Попутчики + посылки/передачи» — НЕ пассажирское.
 - Города — по-русски, кириллицей: Warsaw → Варшава. Сокращения раскрывай по смыслу: «Гр» → Гродно, «Мог» → Могилёв.
-- from_city/to_city — крупные города начала и конца маршрута. Промежуточные города и пункты пропуска (Кузница, Брузги, Брест) — упомяни в description («через Кузницу»). Исключение: если такой город и есть КОНЕЧНАЯ точка маршрута («варшава-брест», «посылка до Бреста»), он — to_city (или from_city), выдумывать другой город нельзя.
+- from_city/to_city — города начала и конца маршрута. Всю цепочку городов по порядку верни в stops (первый = from_city, последний = to_city): «минск-брест-белосток-варшава» → stops ["Минск","Брест","Белосток","Варшава"]. Городов ровно два — stops = null. Пункты пропуска и посёлки, которые не города (Кузница, Брузги), в stops не добавляй — упомяни в description («через Кузницу»). Исключение: если промежуточный город и есть КОНЕЧНАЯ точка маршрута («варшава-брест», «посылка до Бреста»), он — to_city (или from_city), выдумывать другой город нельзя.
 - departure_date — ближайшая будущая дата относительно СЕГОДНЯ, формат YYYY-MM-DD. Даты нет — null. Даты «плавают» или альтернатив несколько («18/19.09», «20 или 21.09», «на выходных») — возьми САМУЮ РАННЮЮ конкретную дату, точную формулировку сохрани в description.
 - Несколько городов назначения («в Мадрид или Париж») — to_city = первый упомянутый, альтернативу обязательно в description.
 - Не выдумывай: чего нет в сообщении — null. weight_kg — число (кг) или null.
@@ -147,6 +150,22 @@ export function validateAiListing(
   // иначе в карточке «Контакты:» печатается дважды, а на сайте t.me/+48… не работает.
   const { telegram, phone } = normalizeContacts(b.telegram, b.phone);
 
+  // Цепочка городов (v0.4.55): промежуточные нормализуем, согласованность с
+  // концами обязательна — первый = fromCity, последний = toCity. Несогласованную
+  // цепочку выбрасываем: endpoints важнее, а поиск по сегментам не должен врать.
+  let stops: string[] | null = null;
+  if (Array.isArray(b.stops)) {
+    const chain: string[] = [];
+    for (const rawStop of b.stops.slice(0, 10)) {
+      if (typeof rawStop !== 'string') continue;
+      const city = normalizeCity(rawStop.trim()).slice(0, 40);
+      if (city.length < 2) continue;
+      if (chain[chain.length - 1] === city) continue;
+      chain.push(city);
+    }
+    if (chain.length > 2 && chain[0] === fromCity && chain[chain.length - 1] === toCity) stops = chain;
+  }
+
   // Описание: если ИИ не дал осмысленного — берём исходный текст
   let description = typeof b.description === 'string' ? b.description.trim() : '';
   const fromAi = description.length >= 5;
@@ -161,7 +180,7 @@ export function validateAiListing(
   ));
   if (description.length < 5) return null;
 
-  return { type, fromCity, toCity, departureDate, recurring, weightKg, price, telegram, phone, description };
+  return { type, fromCity, toCity, stops, departureDate, recurring, weightKg, price, telegram, phone, description };
 }
 
 /** Разобрать ответ ИИ (массив listings или старый одиночный объект)

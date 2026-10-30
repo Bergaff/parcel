@@ -13,7 +13,7 @@
  * иначе после гидрации контент «прыгал» бы.
  */
 import type { Env, Listing } from './types';
-import { escapeHtml, mskTodayIso, normalizeContacts } from './util';
+import { escapeHtml, mskTodayIso, normalizeContacts, routeStops } from './util';
 import { agoText, fmtDateWithYear, fmtDayShort, fmtWeight, plural, MONTHS_SHORT, WEEKDAY_NAMES } from './format';
 import { headMeta, jsonLdAll } from './seo';
 
@@ -108,6 +108,20 @@ export interface RowOptions {
   actions?: boolean;
 }
 
+/** «…» вместо стрелки у маршрута-цепочки (v0.4.55): при наведении видны все
+ *  города (title), скринридеру — aria-label «через …». Обычная пара — прежняя стрелка. */
+function routeArrowHtml(l: Listing): string {
+  const stops = routeStops(l);
+  if (stops.length <= 2) return '<span class="r-arrow">→</span>';
+  return `<span class="r-arrow r-via" title="${escapeHtml(stops.join(' → '))}"`
+    + ` aria-label="через ${escapeHtml(stops.slice(1, -1).join(', '))}">…</span>`;
+}
+
+/** Маршрут текстом: цепочка — через все города, пара — «A → B». */
+function routeText(l: Listing): string {
+  return routeStops(l).join(' → ');
+}
+
 /** Одна строка доски — та же разметка, что рисует buildRow() в public/app.js. */
 export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   const contact = contactOf(l);
@@ -141,9 +155,9 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   ].filter(Boolean).join('\n    ');
 
   return `<article class="row">
-  <a class="row-link" href="/item/${encodeURIComponent(l.id)}" aria-label="${escapeHtml(l.fromCity)} → ${escapeHtml(l.toCity)}: открыть объявление"></a>
+  <a class="row-link" href="/item/${encodeURIComponent(l.id)}" aria-label="${escapeHtml(routeText(l))}: открыть объявление"></a>
   <div class="row-main">
-    <h3 class="route-line">${escapeHtml(l.fromCity)}<span class="r-arrow">→</span><span class="r-to">${escapeHtml(l.toCity)}</span></h3>
+    <h3 class="route-line">${escapeHtml(l.fromCity)}${routeArrowHtml(l)}<span class="r-to">${escapeHtml(l.toCity)}</span></h3>
     <p class="desc">${escapeHtml(l.description)}</p>
     <div class="meta-line">${meta}</div>
   </div>
@@ -212,7 +226,7 @@ export function renderDetailHtml(l: Listing, opts: DetailOptions): string {
 
   return `<nav class="crumbs" aria-label="Хлебные крошки">${crumbs}</nav>
 <div class="d-head">
-  <h1 class="d-route">${escapeHtml(l.fromCity)} <span class="r-arrow">→</span> ${escapeHtml(l.toCity)}</h1>
+  <h1 class="d-route">${escapeHtml(l.fromCity)} ${routeArrowHtml(l)} ${escapeHtml(l.toCity)}</h1>
   <span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>
   ${l.recurring ? `<span class="stamp stamp-recur">регулярно</span>` : ''}
   ${archived ? '<span class="stamp stamp-expired">архив</span>' : ''}

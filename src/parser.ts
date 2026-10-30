@@ -457,8 +457,13 @@ function chained(text: string, a: CityHit, b: CityHit): boolean {
  * Кузница, Брест и Брузги по пути, но едет человек из Белостока в Гродно.
  * Раньше брали первую подходящую пару, и «Белосток-Кузница-Гродно»
  * превращался в «Белосток → Кузница».
+ *
+ * Вся цепочка возвращается в stops (v0.4.55): промежуточные города больше
+ * не теряются — заявка «Минск-Брест-Белосток-Варшава» находится в поиске
+ * по любой паре городов по порядку (Минск→Брест, Брест→Варшава, …) и
+ * показывается как «Минск … Варшава» с городами при наведении.
  */
-function extractRoute(text: string): { from: string; to: string } | null {
+function extractRoute(text: string): { from: string; to: string; stops: string[] } | null {
   // Один и тот же город ловится дважды (ключи «варшава» и «варшав»+окончание
   // совпадают в одной точке) — оставляем первое совпадение, иначе дубль рвёт цепочку
   const cities: CityHit[] = [];
@@ -485,8 +490,11 @@ function extractRoute(text: string): { from: string; to: string } | null {
     const to = best[best.length - 1]!;
     // Кольцо «Минск - Варшава - Минск»: конец тот же город — берём первую
     // пару, направление всё равно уточнят в переписке
-    if (from.city === to.city) return { from: from.city, to: best[1]!.city };
-    return { from: from.city, to: to.city };
+    if (from.city === to.city) return { from: from.city, to: best[1]!.city, stops: [from.city, best[1]!.city] };
+    // цепочка без идущих подряд дублей («Минск-Минск-Варшава» — опечатки)
+    const stops: string[] = [];
+    for (const c of best) if (stops[stops.length - 1] !== c.city) stops.push(c.city);
+    return { from: stops[0]!, to: stops[stops.length - 1]!, stops };
   }
   return null;
 }
@@ -742,6 +750,8 @@ export function parseTelegramMessage(text: string, now: Date = new Date()): Pars
     intent,
     fromCity: route?.from ?? null,
     toCity: route?.to ?? null,
+    // полная цепочка городов маршрута (включая конечные) или null
+    stops: route?.stops ?? null,
     departureDate: parseDate(text, now),
     // «каждый четверг» — заявка не разовая; дата при этом = ближайший заезд
     recurring: parseRecurring(text),

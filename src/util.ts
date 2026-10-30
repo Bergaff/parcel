@@ -282,6 +282,14 @@ export function normalizeContacts(
   return { telegram: tg, phone: ph };
 }
 
+/** Цепочка городов заявки: сохранённые промежуточные города либо обычная
+ *  пара [fromCity, toCity]. Единая точка для поиска, подбора и отображения —
+ *  «Минск … Варшава» рисуется, только когда городов больше двух. */
+export function routeStops(l: { fromCity: string; toCity: string; stops?: string[] | null }): string[] {
+  const stops = Array.isArray(l.stops) ? l.stops.filter((c) => typeof c === 'string' && c.trim()) : [];
+  return stops.length >= 2 ? stops : [l.fromCity, l.toCity];
+}
+
 /** Контакты заявки для показа: без дублей, telegram первым. Пусто — контактов нет. */
 export function uniqueContacts(
   telegram?: unknown,

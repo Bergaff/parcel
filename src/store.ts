@@ -8,12 +8,25 @@ import { nextRecurringDate } from './parser';
 // IndexNow: очередь адресов на переиндексацию (см. src/indexnow.ts)
 import { listingPaths, queueListingChange, queuePaths } from './indexnow';
 
+/** Цепочка городов из колонки stops (JSON): битые/несогласованные данные
+ *  лечатся обычной парой [from, to] — заявка не теряет маршрут. */
+function parseStops(raw: unknown, fromCity: string, toCity: string): string[] {
+  if (typeof raw === 'string' && raw) {
+    try {
+      const stops = normalizeStops(JSON.parse(raw), fromCity, toCity);
+      if (stops.length > 2) return stops;
+    } catch { /* мусор в колонке — обычная пара */ }
+  }
+  return [fromCity, toCity];
+}
+
 function mapRow(row: Record<string, unknown>): Listing {
   return {
     id: String(row.id),
     type: row.type as Listing['type'],
     fromCity: String(row.from_city),
     toCity: String(row.to_city),
+    stops: parseStops(row.stops, String(row.from_city), String(row.to_city)),
     departureDate: row.departure_date ? String(row.departure_date) : null,
     recurring: row.recurring ? String(row.recurring) : null,
     weightKg: row.weight_kg === null || row.weight_kg === undefined ? null : Number(row.weight_kg),
@@ -48,6 +61,23 @@ export function publicListing(l: Listing): Listing {
   return { ...l, sourceMessageId: null, sourceChatUsername: null, sourceThreadId: null };
 }
 
+/** Валидная цепочка маршрута: без пустых и идущих подряд дублей, первый город
+ *  = fromCity, последний = toCity. Несогласованная цепочка схлопывается
+ *  в обычную пару — endpoints всегда важнее промежуточных. */
+export function normalizeStops(stops: unknown, fromCity: string, toCity: string): string[] {
+  const pair = [fromCity, toCity];
+  if (!Array.isArray(stops)) return pair;
+  const chain: string[] = [];
+  for (const raw of stops) {
+    const city = typeof raw === 'string' ? raw.trim() : '';
+    if (!city || chain[chain.length - 1] === city) continue;
+    chain.push(city);
+  }
+  if (chain.length < 2) return pair;
+  if (chain[0] !== fromCity || chain[chain.length - 1] !== toCity) return pair;
+  return chain;
+}
+
 export async function createListing(env: Env, input: ListingInput): Promise<Listing> {
   // Колонки *_lc и recurring должны существовать до записи: на проде миграцию
   // могут применить позже деплоя, а без них INSERT упадёт.
@@ -69,13 +99,23 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   const status = auto ? auto.status : input.status;
   const hidden = auto ? auto.hidden : input.hidden === true;
   const publishedAt = status === 'published' ? now : null;
+  // Цепочка маршрута (v0.4.55): «Минск-Брест-Белосток-Варшава» хранится целиком.
+  // Рядом — три нижнерегистровые колонки для поиска: вся цепочка (порядок
+  // городов через instr), города посадки (все кроме последнего) и города
+  // высадки (все кроме первого). Обычная пара — те же колонки из двух городов.
+  const stops = normalizeStops(input.stops, input.fromCity, input.toCity);
+  const lc = stops.map((c) => c.toLowerCase());
+  const routeLc = lc.join(' ');
+  const fromStopsLc = lc.slice(0, -1).join(' ');
+  const toStopsLc = lc.slice(1).join(' ');
   await env.DB.prepare(
     `INSERT INTO listings
       (id, type, from_city, to_city, departure_date, recurring, weight_kg, price, description,
        phone, telegram, status, source, source_chat, source_chat_id, source_message_id,
        source_chat_username, source_thread_id,
-       by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc, reject_reason)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       by_admin, hidden, created_at, published_at, from_city_lc, to_city_lc, description_lc, reject_reason,
+       stops, route_lc, from_stops_lc, to_stops_lc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
     .bind(
       id, input.type, input.fromCity, input.toCity,
@@ -91,7 +131,8 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
       input.fromCity.toLowerCase(), input.toCity.toLowerCase(), (input.description ?? '').toLowerCase(),
       // авто-отказ «водитель без контакта» — сразу с причиной, чтобы в ведре
       // отклонённых было видно, почему заявка туда попала
-      auto?.status === 'rejected' ? 'no_contact' : null
+      auto?.status === 'rejected' ? 'no_contact' : null,
+      JSON.stringify(stops), routeLc, fromStopsLc, toStopsLc
     )
     .run();
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -336,12 +377,12 @@ export async function searchByCity(env: Env, city: string, limit = 30): Promise<
     `SELECT * FROM listings
      WHERE status IN ('published', 'expired')
        AND (hidden IS NULL OR hidden != 1)
-       AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')
+       AND (from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\' OR route_lc LIKE ? ESCAPE '\\')
        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours', '-7 days'))
      ORDER BY (CASE WHEN status = 'expired' OR (recurring IS NULL AND departure_date < date('now', '+3 hours')) THEN 1 ELSE 0 END),
               COALESCE(published_at, created_at) DESC
      LIMIT ?`
-  ).bind(pattern, pattern, limit).all();
+  ).bind(pattern, pattern, pattern, limit).all();
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
@@ -565,18 +606,34 @@ export async function updateListing(
   await ensureRecurringColumn(env);
   // Те же правила, что при создании: контакты без дублей и каждый в своём поле
   const { telegram, phone } = normalizeContacts(patch.telegram, patch.phone);
+  // Цепочка промежуточных городов: в админ-форме полей цепочки нет, поэтому
+  // правка ГОРОДОВ схлопывает её в обычную пару (старая цепочка врала бы про
+  // новый маршрут), а правка остальных полей (цена, описание…) цепочку бережёт.
+  const before = (await env.DB.prepare(
+    'SELECT from_city, to_city, stops, route_lc, from_stops_lc, to_stops_lc FROM listings WHERE id = ?'
+  ).bind(id).first()) as Record<string, unknown> | null;
+  if (!before) return null;
+  const citiesChanged =
+    String(before.from_city ?? '') !== (patch.fromCity ?? '') ||
+    String(before.to_city ?? '') !== (patch.toCity ?? '');
   const res = await env.DB.prepare(
     `UPDATE listings SET
        type = ?, from_city = ?, to_city = ?, departure_date = ?, recurring = ?, weight_kg = ?,
        price = ?, description = ?, telegram = ?, phone = ?,
-       from_city_lc = ?, to_city_lc = ?, description_lc = ?
+       from_city_lc = ?, to_city_lc = ?, description_lc = ?,
+       stops = ?, route_lc = ?, from_stops_lc = ?, to_stops_lc = ?
      WHERE id = ?`
   ).bind(
     patch.type ?? 'offer', patch.fromCity ?? '', patch.toCity ?? '',
     patch.departureDate ?? null, patch.recurring ?? null, patch.weightKg ?? null, patch.price ?? null,
     patch.description ?? '', telegram, phone,
     (patch.fromCity ?? '').toLowerCase(), (patch.toCity ?? '').toLowerCase(),
-    (patch.description ?? '').toLowerCase(), id
+    (patch.description ?? '').toLowerCase(),
+    citiesChanged ? null : before.stops ?? null,
+    citiesChanged ? null : before.route_lc ?? null,
+    citiesChanged ? null : before.from_stops_lc ?? null,
+    citiesChanged ? null : before.to_stops_lc ?? null,
+    id
   ).run();
   if ((res.meta.changes ?? 0) === 0) return null;
   const row = (await env.DB.prepare('SELECT * FROM listings WHERE id = ?').bind(id).first()) as
@@ -1011,6 +1068,7 @@ export function likeContains(q: string): string {
 }
 
 const LC_COLUMNS = ['from_city_lc', 'to_city_lc', 'description_lc'] as const;
+const STOPS_COLUMNS = ['stops', 'route_lc', 'from_stops_lc', 'to_stops_lc'] as const;
 
 let searchColumnsReady: Promise<void> | null = null;
 let recurringColumnReady: Promise<void> | null = null;
@@ -1039,6 +1097,12 @@ export function ensureSearchColumns(env: Env): Promise<void> {
         ((info.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => String(r.name))
       );
       for (const col of LC_COLUMNS) {
+        if (!names.has(col)) await env.DB.prepare(`ALTER TABLE listings ADD COLUMN ${col} TEXT`).run();
+      }
+      // цепочка маршрута + поисковые колонки сегментов (v0.4.55). Старые строки
+      // не заполняем: NULL читается как «обычная пара» (COALESCE в запросах,
+      // parseStops в mapRow) — backfill не нужен.
+      for (const col of STOPS_COLUMNS) {
         if (!names.has(col)) await env.DB.prepare(`ALTER TABLE listings ADD COLUMN ${col} TEXT`).run();
       }
       await env.DB.prepare(
@@ -1283,13 +1347,27 @@ function buildWhere(f: ListFilters): WhereClause {
       sql += ' AND (hidden IS NULL OR hidden != 1)';
     }
   }
-  if (f.from) { sql += ` AND from_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
-  if (f.to) { sql += ` AND to_city_lc LIKE ? ESCAPE '\\'`; params.push(likeContains(f.to)); }
+  // Города посадки/высадки: для цепочки «Минск-Брест-Белосток-Варшава» сесть
+  // можно в любом городе кроме последнего, выйти — в любом кроме первого.
+  // У обычных заявок from_stops_lc NULL — COALESCE возвращает прежнее поведение.
+  if (f.from) { sql += ` AND COALESCE(from_stops_lc, from_city_lc) LIKE ? ESCAPE '\\'`; params.push(likeContains(f.from)); }
+  if (f.to) { sql += ` AND COALESCE(to_stops_lc, to_city_lc) LIKE ? ESCAPE '\\'`; params.push(likeContains(f.to)); }
+  // Оба города: направление имеет значение — «Брест → Варшава» по цепочке
+  // Минск-Брест-Белосток-Варшава едет, а «Варшава → Брест» нет. instr —
+  // позиция подстроки: from должен встречаться в цепочке раньше to.
+  // (LIKE-условия выше гарантируют, что оба города в цепочке есть, поэтому
+  // нулевые instr не мешают: нет города — нет и строки.)
+  if (f.from && f.to) {
+    const route = `COALESCE(route_lc, from_city_lc || ' ' || to_city_lc)`;
+    sql += ` AND instr(${route}, ?) < instr(${route}, ?)`;
+    params.push(f.from.toLowerCase().trim(), f.to.toLowerCase().trim());
+  }
   if (f.date) { sql += ' AND departure_date = ?'; params.push(f.date); }
   if (f.q) {
     const pattern = likeContains(f.q);
-    sql += ` AND (description_lc LIKE ? ESCAPE '\\' OR from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\')`;
-    params.push(pattern, pattern, pattern);
+    // q ищет и по промежуточным городам цепочки (route_lc)
+    sql += ` AND (description_lc LIKE ? ESCAPE '\\' OR from_city_lc LIKE ? ESCAPE '\\' OR to_city_lc LIKE ? ESCAPE '\\' OR route_lc LIKE ? ESCAPE '\\')`;
+    params.push(pattern, pattern, pattern, pattern);
   }
   return { sql, params };
 }

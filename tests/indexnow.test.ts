@@ -50,6 +50,8 @@ function fakeEnv(opts: {
       },
       async first() {
         if (/SELECT id, from_city, to_city FROM listings/.test(sql)) return opts.listing ?? null;
+        // updateListing перед правкой читает города и цепочку stops (v0.4.55)
+        if (/SELECT from_city, to_city, stops/.test(sql)) return opts.row ?? null;
         if (/SELECT \* FROM listings/.test(sql)) return opts.row ?? null;
         return null;
       },

@@ -172,7 +172,8 @@ const COLS = ['id', 'type', 'from_city', 'to_city', 'departure_date', 'recurring
   'price', 'description', 'phone', 'telegram', 'status', 'source', 'source_chat', 'source_chat_id',
   'source_message_id', 'source_chat_username', 'source_thread_id',
   'by_admin', 'hidden', 'created_at', 'published_at', 'from_city_lc',
-  'to_city_lc', 'description_lc', 'reject_reason'];
+  'to_city_lc', 'description_lc', 'reject_reason',
+  'stops', 'route_lc', 'from_stops_lc', 'to_stops_lc'];
 
 /** D1-подделка: PRAGMA «колонок нет» (воркер добавит сам), строка — из параметров INSERT. */
 function fakeDb() {

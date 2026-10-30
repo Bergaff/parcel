@@ -748,6 +748,8 @@ function rulesFields(
     type: parsed.intent ?? 'offer',
     fromCity: parsed.fromCity ?? 'не указано',
     toCity: parsed.toCity ?? 'не указано',
+    // цепочка длиннее пары — промежуточные города доедут до базы (поиск по сегментам)
+    stops: parsed.stops && parsed.stops.length > 2 ? parsed.stops : null,
     departureDate: parsed.departureDate,
     recurring: parsed.recurring,
     weightKg: parsed.weightKg,

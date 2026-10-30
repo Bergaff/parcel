@@ -27,6 +27,29 @@ async function api(path, options = {}) {
 
 /* ---------- мелкие помощники ---------- */
 
+/* Маршрут-цепочка (v0.4.55): «Минск-Брест-Белосток-Варшава» показывается как
+   «Минск … Варшава», все города — при наведении (title). Зеркало серверных
+   routeArrowHtml/routeText из src/ssr.ts — строки доски и карточка рисуются
+   одинаково и сервером, и клиентом. */
+function routeStops(l) {
+  const stops = Array.isArray(l.stops) ? l.stops.filter((c) => typeof c === 'string' && c.trim()) : [];
+  return stops.length >= 2 ? stops : [l.fromCity, l.toCity];
+}
+function routeText(l) {
+  return routeStops(l).join(' → ');
+}
+function routeArrow(l) {
+  const stops = routeStops(l);
+  return stops.length > 2
+    ? el('span', {
+      class: 'r-arrow r-via',
+      title: stops.join(' → '),
+      'aria-label': `через ${stops.slice(1, -1).join(', ')}`,
+      text: '…',
+    })
+    : el('span', { class: 'r-arrow', text: '→' });
+}
+
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -370,12 +393,12 @@ function buildRow(l) {
     el('a', {
       class: 'row-link',
       href: `/item/${l.id}`,
-      'aria-label': `${l.fromCity} → ${l.toCity}: открыть объявление`,
+      'aria-label': `${routeText(l)}: открыть объявление`,
     }),
     el('div', { class: 'row-main' }, [
       el('h3', { class: 'route-line' }, [
         l.fromCity,
-        el('span', { class: 'r-arrow', text: '→' }),
+        routeArrow(l),
         el('span', { class: 'r-to', text: l.toCity }),
       ]),
       el('p', { class: 'desc', text: l.description }),
@@ -696,7 +719,7 @@ function renderDetail(l, meta) {
       el('h1', { class: 'd-route' }, [
         l.fromCity,
         ' ',
-        el('span', { class: 'r-arrow', text: '→' }),
+        routeArrow(l),
         ' ',
         el('span', { class: 'r-to', text: l.toCity }),
       ]),
@@ -1087,7 +1110,7 @@ function adminCard(l, mode = 'pending') {
     oddDepartureNote(l),
     el('h3', { class: 'route-line' }, [
       l.fromCity,
-      el('span', { class: 'r-arrow', text: '→' }),
+      routeArrow(l),
       el('span', { class: 'r-to', text: l.toCity }),
       el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
       l.byAdmin ? el('span', { class: 'stamp stamp-admin', text: 'от админа' }) : null,

@@ -12,7 +12,7 @@
  */
 import type { Env, Listing } from './types';
 import { normalizeCity } from './parser';
-import { escapeHtml, mskTodayIso, uniqueContacts } from './util';
+import { escapeHtml, mskTodayIso, uniqueContacts , routeStops} from './util';
 
 export interface MatchFilters {
   /** Фильтр по городу: берём заявки, у которых город встречается в маршруте. */
@@ -70,11 +70,29 @@ function cityEq(a: string | null | undefined, b: string | null | undefined): boo
   return Boolean(ka) && ka === kb;
 }
 
-/** Заявка касается города (с любой стороны маршрута). Пустой фильтр — подходит всё. */
+/** Заявка касается города (с любой стороны маршрута, включая промежуточные
+ *  города цепочки). Пустой фильтр — подходит всё. */
 export function listingTouchesCity(l: Listing, city: string | null | undefined): boolean {
   if (!city || !city.trim()) return true;
   const key = cityKey(city);
-  return cityKey(l.fromCity) === key || cityKey(l.toCity) === key;
+  return routeStops(l).some((s) => cityKey(s) === key);
+}
+
+/** Маршрут заявки покрывает сегмент A→B: город A встречается в цепочке раньше
+ *  города B (не обязательно подряд). «Минск-Брест-Белосток-Варшава» покрывает
+ *  и «Брест → Варшава», и «Минск → Белосток», но не «Варшава → Брест». */
+export function routeCovers(
+  l: Listing,
+  from: string | null | undefined,
+  to: string | null | undefined
+): boolean {
+  const kf = cityKey(from);
+  const kt = cityKey(to);
+  if (!kf || !kt || kf === kt) return false;
+  const chain = routeStops(l).map(cityKey);
+  const i = chain.indexOf(kf);
+  if (i < 0) return false;
+  return chain.indexOf(kt, i + 1) >= 0;
 }
 
 /** Заявка уже не актуальна: архивный статус или дата выезда прошла. */
@@ -124,9 +142,22 @@ export function scorePair(
   // Маршрут
   const sameFrom = cityEq(offer.fromCity, request.fromCity);
   const sameTo = cityEq(offer.toCity, request.toCity);
+  // Цепочки (v0.4.55): водитель «Минск-Брест-Белосток-Варшава» везёт посылку
+  // «Брест → Варшава» (сегмент его маршрута) — почти полное совпадение.
+  // И наоборот: водитель едет участок цепочки самой посылки («Минск → Брест»
+  // при заявке «Минск-Брест-Варшава») — relay, оцениваем ниже, но предлагаем.
+  const offerCovers = !(sameFrom && sameTo) && routeCovers(offer, request.fromCity, request.toCity);
+  const requestCovers = !(sameFrom && sameTo) && !offerCovers
+    && routeCovers(request, offer.fromCity, offer.toCity);
   if (sameFrom && sameTo) {
     score += 60;
     reasons.push(`маршрут совпадает: ${offer.fromCity} → ${offer.toCity}`);
+  } else if (offerCovers) {
+    score += 55;
+    reasons.push(`водитель проезжает сегмент ${request.fromCity} → ${request.toCity} (его маршрут: ${routeStops(offer).join(' → ')})`);
+  } else if (requestCovers) {
+    score += 45;
+    reasons.push(`водитель везёт участок ${offer.fromCity} → ${offer.toCity} маршрута посылки (${routeStops(request).join(' → ')})`);
   } else if (sameFrom || sameTo) {
     if (!opts.partial) {
       return {
@@ -270,6 +301,8 @@ export interface ListingSnapshot {
   type: 'offer' | 'request';
   fromCity: string;
   toCity: string;
+  /** Цепочка городов (когда их больше двух). У снимков до v0.4.55 поля нет. */
+  stops?: string[] | null;
   departureDate: string | null;
   /** «каждый четверг» — регулярный рейс (показ в сводке /подбор). */
   recurring?: string | null;
@@ -296,6 +329,7 @@ export function listingSnapshot(l: Listing): ListingSnapshot {
     type: l.type,
     fromCity: l.fromCity,
     toCity: l.toCity,
+    stops: (() => { const chain = routeStops(l); return chain.length > 2 ? chain : null; })(),
     departureDate: l.departureDate ?? null,
     recurring: l.recurring ?? null,
     weightKg: l.weightKg ?? null,

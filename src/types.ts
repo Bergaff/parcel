@@ -38,6 +38,11 @@ export interface ListingInput {
   type: ListingType;
   fromCity: string;
   toCity: string;
+  /** Цепочка городов маршрута по порядку, включая конечные (первый = fromCity,
+   *  последний = toCity). Два города или пусто — обычный точечный маршрут.
+   *  Промежуточные города участвуют в поиске (любая пара по порядку) и
+   *  показываются при наведении на «…» между городами. В базе — колонка stops. */
+  stops?: string[] | null;
   departureDate?: string | null;
   /** «каждый четверг», «по будням», «ежедневно» — рейс повторяется, а не разовый.
    *  Дата выезда при этом показывает ближайший заезд (cron катит её вперёд). */
@@ -99,6 +104,9 @@ export interface ParsedMessage {
   intent: 'offer' | 'request' | null;
   fromCity: string | null;
   toCity: string | null;
+  /** Полная цепочка городов маршрута включая конечные («Минск-Брест-Белосток-
+   *  Варшава» → все четыре) или null, когда маршрута нет / городов два. */
+  stops: string[] | null;
   departureDate: string | null;
   /** Расписание регулярного рейса («каждый четверг») или null у разового. */
   recurring: string | null;
