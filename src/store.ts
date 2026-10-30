@@ -2088,6 +2088,57 @@ export async function listMostViewed(env: Env, limit = 10): Promise<Listing[]> {
   return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
 }
 
+/** Один юзернейм в отчёте «кто чаще всего мелькает в заявках». */
+export interface UsernameStat {
+  /** как сохранён в заявке — с @ («@ivan») */
+  username: string;
+  /** всего заявок с этим контактом */
+  total: number;
+  /** из них «везёт» (offer) */
+  offers: number;
+  /** из них «ищет попутчика» (request) */
+  requests: number;
+  /** когда последний раз попадался (datetime или null) */
+  lastAt: string | null;
+}
+
+/** Отчёт по юзернеймам: какие контакты чаще всего встречаются в заявках.
+ *  Считаем живые и архивные (status != 'rejected'), удалённых в базе нет.
+ *  Группируем без учёта регистра (Telegram-юзернеймы регистронезависимы),
+ *  показываем вариант написания из базы. `withContact` — сколько всего
+ *  заявок с юзернеймом: знаменатель для доли в таблице. */
+export async function listTopUsernames(
+  env: Env,
+  limit = 20
+): Promise<{ rows: UsernameStat[]; withContact: number }> {
+  const cap = Math.min(100, Math.max(1, limit));
+  const res = await env.DB.prepare(
+    `SELECT telegram AS username,
+            COUNT(*) AS total,
+            SUM(CASE WHEN type = 'offer' THEN 1 ELSE 0 END) AS offers,
+            SUM(CASE WHEN type = 'request' THEN 1 ELSE 0 END) AS requests,
+            MAX(datetime(COALESCE(published_at, created_at))) AS last_at
+       FROM listings
+      WHERE telegram IS NOT NULL AND trim(telegram) != '' AND status != 'rejected'
+      GROUP BY lower(telegram)
+      ORDER BY total DESC, last_at DESC
+      LIMIT ?`
+  ).bind(cap).all();
+  const rows = ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map((r) => ({
+    username: String(r.username ?? ''),
+    total: Number(r.total ?? 0),
+    offers: Number(r.offers ?? 0),
+    requests: Number(r.requests ?? 0),
+    lastAt: r.last_at == null ? null : String(r.last_at),
+  }));
+  const totalRes = (await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM listings
+      WHERE telegram IS NOT NULL AND trim(telegram) != '' AND status != 'rejected'`
+  ).first()) as Record<string, unknown> | null;
+  const withContact = Number(totalRes?.n ?? 0);
+  return { rows, withContact };
+}
+
 /** Объявления месяца — сырьё для подсчёта (цена как написана человеком). */
 export async function listMonthRows(env: Env, month: string): Promise<MonthRow[]> {
   const res = await env.DB.prepare(

@@ -2322,6 +2322,40 @@ function viewedBox(topViewed) {
   ]);
 }
 
+function usernamesBox(data) {
+  const rows = data && Array.isArray(data.rows) ? data.rows : [];
+  if (!rows.length) return null;
+  const withContact = Number((data && data.withContact) || 0);
+  return el('section', { class: 'admin-card stats-usernames' }, [
+    el('h3', { class: 'match-history-head', text: 'Чьи юзернеймы чаще всего в заявках' }),
+    el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'юзернейм' }), el('th', { text: 'заявок' }),
+        el('th', { text: 'везёт / ищет' }), el('th', { text: 'доля' }),
+        el('th', { text: 'последняя' }),
+      ])]),
+      el('tbody', {}, rows.map((u) => {
+        const uname = String(u.username || '').replace(/^@/, '');
+        const share = withContact > 0 ? Math.round((Number(u.total || 0) / withContact) * 100) : 0;
+        return el('tr', {}, [
+          el('th', { scope: 'row' }, [el('a', {
+            href: `https://t.me/${uname}`, target: '_blank', rel: 'noopener',
+            text: String(u.username || ''),
+          })]),
+          el('td', { class: 'mono', text: String(u.total ?? 0) }),
+          el('td', { class: 'mono', text: `${u.offers ?? 0} / ${u.requests ?? 0}` }),
+          el('td', { class: 'mono', text: `${share}%` }),
+          el('td', { class: 'mono', text: u.lastAt ? fmtDate(String(u.lastAt).slice(0, 10)) : '—' }),
+        ]);
+      })),
+    ]),
+    el('p', {
+      class: 'form-note',
+      text: `По всем заявкам с юзернеймом в контакте (живые и архив) — всего ${withContact}. Доля считается от этого числа; регистр не важен (@Ivan и @ivan — один человек).`,
+    }),
+  ]);
+}
+
 async function renderAdminStats() {
   const listEl = $('#admin-list');
   $('#admin-count').textContent = 'Итоги месяца: сколько объявлений прошло через доску и по чём договаривались.';
@@ -2343,10 +2377,12 @@ async function renderAdminStats() {
   // объявлений ещё нет (например, всё отклонили)
   const flow = flowBox(data.flow);
   const viewed = viewedBox(data.topViewed);
+  const usernames = usernamesBox(data.topUsernames);
   if (months.length === 0) {
     listEl.replaceChildren();
     if (flow) listEl.append(flow);
     if (viewed) listEl.append(viewed);
+    if (usernames) listEl.append(usernames);
     listEl.append(el('p', {
       class: 'empty-note',
       text: 'Итогов месяцев пока нет: на доске не было опубликованных объявлений. Как только появится первое, пересчитайте итоги здесь или дождитесь ночного cron.',
@@ -2424,6 +2460,7 @@ async function renderAdminStats() {
 
   if (flow) listEl.append(flow);
   if (viewed) listEl.append(viewed);
+  if (usernames) listEl.append(usernames);
 
   listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn, pageLink, summaryBtn]));
 

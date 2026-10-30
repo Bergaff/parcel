@@ -303,6 +303,13 @@ function makeFetch(calls: string[]) {
             topViewed: [
               { id: ID, fromCity: 'Варшава', toCity: 'Минск', views: 42, status: 'published', departureDate: '2030-05-20', createdAt: '2026-09-10T08:00:00.000Z', path: `/item/${ID}` },
             ],
+            topUsernames: {
+              rows: [
+                { username: '@ivan', total: 7, offers: 5, requests: 2, lastAt: '2026-09-20 12:00:00' },
+                { username: '@maria', total: 3, offers: 0, requests: 3, lastAt: null },
+              ],
+              withContact: 10,
+            },
           },
         };
       }
@@ -1275,6 +1282,15 @@ describe('админка', () => {
     const link = viewed.querySelector('tbody a') as HTMLAnchorElement;
     expect(link.getAttribute('href')).toBe(`/item/${ID}`);
     expect(viewed.textContent).toContain('42');
+
+    // отчёт по юзернеймам — кто чаще всего мелькает в заявках
+    const unames = win.document.querySelector('.stats-usernames') as HTMLElement;
+    expect(unames, 'блок юзернеймов').not.toBeNull();
+    const ulink = unames.querySelector('tbody a') as HTMLAnchorElement;
+    expect(ulink.getAttribute('href'), 'ссылка на Telegram').toBe('https://t.me/ivan');
+    expect(unames.textContent).toContain('@ivan');
+    expect(unames.textContent).toContain('5 / 2'); // везёт / ищет
+    expect(unames.textContent).toContain('70%');   // доля 7 из 10
 
     // текст поста тоже на вкладке — ничего не потеряли
     expect(win.document.querySelector('.stats-post')).not.toBeNull();
