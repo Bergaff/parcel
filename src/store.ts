@@ -2078,14 +2078,26 @@ export async function listDailyStats(env: Env, limit = 90): Promise<DailyCount[]
   }));
 }
 
-/** Самые просматриваемые заявки (живые и архив — не удалённые). */
+/** Самые просматриваемые заявки (живые и архив — не удалённые).
+ *  Просмотры считаем честно из stat_item_views: только живые люди (без ботов
+ *  и без собственных заходов владельца), 1 человек = 1 просмотр в сутки на
+ *  заявку. Учитываются и прямые/поисковые заходы на карточку, и клики внутри
+ *  сайта. Сырой счётчик listings.views (крутится на каждом открытии API,
+ *  включая ботов) для отчёта больше не используется. */
 export async function listMostViewed(env: Env, limit = 10): Promise<Listing[]> {
+  const cap = Math.min(50, Math.max(1, limit));
   const res = await env.DB.prepare(
-    `SELECT * FROM listings
-      WHERE status IN ('published', 'expired') AND (hidden IS NULL OR hidden != 1)
-      ORDER BY views DESC LIMIT ?`
-  ).bind(Math.min(50, Math.max(1, limit))).all();
-  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>).map(mapRow);
+    `SELECT l.*, COUNT(*) AS human_views
+       FROM stat_item_views v
+       JOIN listings l ON l.id = v.listing_id
+      WHERE v.bot = 0 AND v.own = 0
+        AND l.status IN ('published', 'expired') AND (l.hidden IS NULL OR l.hidden != 1)
+      GROUP BY v.listing_id
+      ORDER BY human_views DESC, datetime(COALESCE(l.published_at, l.created_at)) DESC
+      LIMIT ?`
+  ).bind(cap).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => ({ ...mapRow(r), views: Number(r.human_views ?? 0) }));
 }
 
 /** Один юзернейм в отчёте «кто чаще всего мелькает в заявках». */

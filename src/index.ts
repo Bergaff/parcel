@@ -8,7 +8,7 @@ import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
 import {
   confirmJsVisit, gatherVisitStats, isTrackablePage, OWN_COOKIE, pruneVisitStats, renderAudiencePage, setOwnVisitor,
-  renderDailyCsv, trackPageView,
+  renderDailyCsv, trackPageView, trackItemView,
 } from './visit-stats';
 import { getIp, rateLimit, sanitizeCity, sanitizeText, escapeHtml, hasContactHint, isRussianCity, mskTodayIso, normalizeContacts, countryInsteadOfCity, countryNotCityMessage } from './util';
 import { groupDuplicates } from './dedupe';
@@ -75,17 +75,25 @@ app.use('*', async (c, next) => {
     const path = new URL(c.req.url).pathname;
     if (!isTrackablePage(path)) return;
     const cf = (c.req.raw as { cf?: { country?: string; asOrganization?: string } }).cf;
+    const ip = getIp(c);
+    const ua = c.req.header('user-agent') ?? '';
+    // браузер владельца помечен кукой из /mediakit — такие просмотры
+    // не попадают ни в цифры медиакита, ни в отчёт по заявкам
+    const own = getCookie(c.req.raw, OWN_COOKIE) === '1';
     c.executionCtx.waitUntil(trackPageView(c.env, {
-      path,
-      ip: getIp(c),
-      ua: c.req.header('user-agent') ?? '',
+      path, ip, ua,
       country: cf?.country ?? null,
       asOrg: cf?.asOrganization ?? null,
       referer: c.req.header('referer') ?? null,
-      // браузер владельца помечен кукой из /mediakit — такие просмотры
-      // не попадают в цифры медиакита
-      own: getCookie(c.req.raw, OWN_COOKIE) === '1',
+      own,
     }));
+    // Заход на карточку — в счётчик конкретной заявки («Самые просматриваемые»).
+    // Здесь ловятся прямые и поисковые визиты на /item/:id (SSR); клики внутри
+    // сайта досчитывает API-роут. Дедупликация «человек-заявка-сутки» — в таблице.
+    if (path.startsWith('/item/')) {
+      const listingId = decodeURIComponent(path.slice('/item/'.length));
+      c.executionCtx.waitUntil(trackItemView(c.env, { listingId, ip, ua, own }).catch(() => undefined));
+    }
   } catch { /* статистика не должна ломать сайт */ }
 });
 
@@ -291,6 +299,16 @@ app.get('/api/listings/:id', async (c) => {
   if (!listing || (listing.status !== 'published' && listing.status !== 'expired')) {
     return c.json({ error: 'not_found' }, 404);
   }
+  // Клик внутри сайта — в счётчик этой заявки (честный отчёт считает уникальных
+  // людей; прямые/поисковые заходы на /item/:id ловит мидлварь). Дедупликация
+  // «человек-заявка-сутки» — в stat_item_views, поэтому SSR и клик в один день
+  // дадут один просмотр. Сырой listings.views (hitView) остаётся как есть.
+  c.executionCtx.waitUntil(trackItemView(c.env, {
+    listingId: id,
+    ip: getIp(c),
+    ua: c.req.header('user-agent') ?? '',
+    own: getCookie(c.req.raw, OWN_COOKIE) === '1',
+  }).catch(() => undefined));
   // Вместе с заявкой отдаём то, из чего сервер собрал карточку: пути для хлебных
   // крошек и похожие заявки. Клиент рисует их сам, когда объявление открыли
   // кликом с доски, — карточка не «беднеет» после перехода.

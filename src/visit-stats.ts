@@ -154,6 +154,15 @@ export function ensureStatTables(env: Env): Promise<void> {
           dc INTEGER NOT NULL DEFAULT 0, ref_group TEXT, ref_host TEXT)`),
         env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_stat_views_day ON stat_views(day)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_js (day TEXT NOT NULL, vid TEXT NOT NULL, PRIMARY KEY (day, vid))'),
+        // Просмотры конкретных заявок (отчёт «Самые просматриваемые»). Одна
+        // строка на человека в сутки на заявку (PRIMARY KEY day+listing+vid):
+        // обновление страницы не накручивает счётчик. bot/own — чтобы считать
+        // только живых людей (роботы и владелец сайта в отчёт не попадают).
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS stat_item_views (
+          day TEXT NOT NULL, listing_id TEXT NOT NULL, vid TEXT NOT NULL,
+          bot INTEGER NOT NULL DEFAULT 0, own INTEGER NOT NULL DEFAULT 0, ts TEXT NOT NULL,
+          PRIMARY KEY (day, listing_id, vid))`),
+        env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_stat_item_views_listing ON stat_item_views(listing_id)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_bot_chats (chat_id TEXT PRIMARY KEY, last_seen TEXT NOT NULL)'),
         // «свои» визиты: владелец сайта помечает себя в /mediakit, и его
         // просмотры не попадают в цифры медиакита
@@ -220,6 +229,37 @@ export async function trackPageView(env: Env, v: PageViewInput): Promise<void> {
 }
 
 /**
+ * Просмотр конкретной заявки — для отчёта «Самые просматриваемые».
+ * Пишет уникального посетителя на заявку в сутки (PRIMARY KEY day+listing+vid,
+ * INSERT OR IGNORE): повторное открытие/обновление страницы не накручивает счёт.
+ * Помечает роботов (bot) и владельца сайта (own) — отчёт считает только живых
+ * людей (bot=0 AND own=0). Вызывается и на прямом/поисковом заходе (SSR
+ * /item/:id) и на клике внутри сайта (API), поэтому учитываются все реальные
+ * просмотры, а не только переходы по доске.
+ */
+export async function trackItemView(
+  env: Env,
+  v: { listingId: string; ip: string; ua: string; own?: boolean }
+): Promise<void> {
+  const listingId = (v.listingId ?? '').trim();
+  if (!listingId) return;
+  await ensureStatTables(env);
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const ua = classifyUserAgent(v.ua);
+  const vid = ua.bot ? 'bot' : await visitorId(v.ip, v.ua, day, await ensureSalt(env));
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO stat_item_views (day, listing_id, vid, bot, own, ts)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(
+    day, listingId, vid,
+    ua.bot ? 1 : 0,
+    (!ua.bot && v.own) ? 1 : 0,
+    now.toISOString()
+  ).run();
+}
+
+/**
  * Пометить (или снять пометку) визиты этого браузера как «свои».
  * Возвращает vid дня — его же исключают агрегаты. Роботов не помечаем.
  */
@@ -261,11 +301,14 @@ export async function logBotChat(env: Env, chatId: string): Promise<void> {
   ).bind(chatId, new Date().toISOString()).run();
 }
 
-/** Чистка старых сырых данных (cron, раз в сутки): храним 90 дней. */
+/** Чистка старых сырых данных (cron, раз в сутки): храним 90 дней.
+ *  Просмотры заявок — 400 дней: отчёт «Самые просматриваемые» почти «за всё
+ *  время», но таблица не растёт бесконечно (строка на человека в сутки мала). */
 export async function pruneVisitStats(env: Env): Promise<void> {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM stat_views WHERE day < date('now', '-90 days')"),
     env.DB.prepare("DELETE FROM stat_js WHERE day < date('now', '-90 days')"),
+    env.DB.prepare("DELETE FROM stat_item_views WHERE day < date('now', '-400 days')"),
   ]);
 }
 
