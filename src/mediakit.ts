@@ -60,9 +60,15 @@ export async function gatherMediaStats(env: Env): Promise<MediaStats> {
          UNION SELECT to_city FROM listings WHERE ${window30}
        )`
     ).first()) as { n: number } | null,
+    // Честные просмотры карточек: живые люди из stat_item_views — один человек
+    // на заявку в сутки, без роботов и визитов владельца; считаются и прямые
+    // заходы (поиск, мессенджеры), и клики по доске. Раньше здесь был
+    // SUM(listings.views) — сырой счётчик: только клики внутри сайта, боты и
+    // обновления страницы его накручивали (повод — «цифры не должны врать»).
+    // Таблица появляется вместе со счётчиком: пока её нет, показываем 0.
     (await env.DB.prepare(
-      `SELECT COALESCE(SUM(views), 0) AS v FROM listings WHERE status IN ('published','expired')`
-    ).first()) as { v: number } | null,
+      'SELECT COUNT(*) AS v FROM stat_item_views WHERE bot = 0 AND own = 0'
+    ).first().catch(() => ({ v: 0 }))) as { v: number } | null,
   ]);
 
   const srcRows = ((srcRes.results ?? []) as unknown as Array<{ source?: string; n?: number }>)

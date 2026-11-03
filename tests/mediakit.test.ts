@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Env } from '../src/types';
 import {
   checkMediaCredentials,
+  gatherMediaStats,
   getCookie,
   isMediaAuthed,
   mediaCookieValue,
@@ -237,6 +238,7 @@ describe('страница и CSV', () => {
       'Скачать CSV', 'Печать / PDF', 'Выйти', 'Период покрыт данными на 3 из 7',
       '/mediakit?days=30', '/mediakit?days=1',
       'объявлений на доске', // сводка площадки
+      'просмотров карточек людьми', '5230',
     ]) {
       expect(html).toContain(marker);
     }
@@ -320,5 +322,42 @@ describe('агрегаты — только живая аудитория', () =
     for (const org of ['BELTELECOM', 'MTS Belarus', 'Deutsche Telekom', 'Orange Polska']) {
       expect(isDatacenterOrg(org), org).toBe(false);
     }
+  });
+});
+
+describe('плитка «просмотров карточек людьми» — честный счётчик', () => {
+  /** Заглушка D1: stat_item_views отдаёт число (или «таблицы нет»). */
+  function statsEnv(opts: { views?: number; noTable?: boolean } = {}): Env {
+    const make = (sql: string) => {
+      const stmt = {
+        bind: () => stmt,
+        async run() { return { meta: { changes: 0 } }; },
+        async all() {
+          if (/PRAGMA table_info/.test(sql)) return { results: [{ name: 'recurring' }] };
+          return { results: [] };
+        },
+        async first(): Promise<unknown> {
+          if (/FROM stat_item_views/.test(sql)) {
+            if (opts.noTable) throw new Error('D1_ERROR: no such table: stat_item_views');
+            return { v: opts.views ?? 0 };
+          }
+          if (/FROM settings/.test(sql)) return null;
+          if (/COUNT\(\*\) AS n FROM \(/.test(sql)) return { n: 3 }; // города в обороте
+          return null;
+        },
+      };
+      return stmt;
+    };
+    return { DB: { prepare: make, batch: async (s: unknown[]) => s } } as unknown as Env;
+  }
+
+  it('берёт живые просмотры из stat_item_views, а не сырой listings.views', async () => {
+    const stats = await gatherMediaStats(statsEnv({ views: 42 }));
+    expect(stats.viewsTotal).toBe(42);
+  });
+
+  it('таблицы ещё нет (счётчик не задеплоен) — 0 без падения страницы', async () => {
+    const stats = await gatherMediaStats(statsEnv({ noTable: true }));
+    expect(stats.viewsTotal).toBe(0);
   });
 });

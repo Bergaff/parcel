@@ -273,15 +273,19 @@ describe('updateListing — цепочка при правке', () => {
 
 /* ------------------------------- подбор ------------------------------- */
 
+// дата отправления — относительно сегодняшнего дня: selectCandidates считает
+// заявку с прошедшей датой архивной, хардкод даты со временем бы «протух»
+const SOON = new Date(Date.now() + 3 * 86400e3).toISOString().slice(0, 10);
+
 const chainOffer = {
   id: 'o1', type: 'offer', fromCity: 'Минск', toCity: 'Варшава', stops: CHAIN,
-  departureDate: '2026-10-31', telegram: '@driver', phone: null, weightKg: null,
+  departureDate: SOON, telegram: '@driver', phone: null, weightKg: null,
   status: 'published', createdAt: '2026-10-29T08:00:00.000Z',
 } as unknown as Listing;
 
 const segmentRequest = (from: string, to: string, over: Partial<Listing> = {}) => ({
   id: 'r1', type: 'request', fromCity: from, toCity: to,
-  departureDate: '2026-10-31', telegram: '@person', phone: null, weightKg: null,
+  departureDate: SOON, telegram: '@person', phone: null, weightKg: null,
   status: 'published', createdAt: '2026-10-29T09:00:00.000Z',
   ...over,
 }) as unknown as Listing;
