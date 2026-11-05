@@ -2237,6 +2237,65 @@ export interface UsernameStat {
  *  Группируем без учёта регистра (Telegram-юзернеймы регистронезависимы),
  *  показываем вариант написания из базы. `withContact` — сколько всего
  *  заявок с юзернеймом: знаменатель для доли в таблице. */
+/* ------------------------------------------------------------------ */
+/* «Что передают»: категории по словам в описаниях                     */
+/* ------------------------------------------------------------------ */
+
+/** Категории передач по ключевым словам в описаниях. Описания заполнены на
+ *  100% (в отличие от «цены» — 1%), поэтому что реально передают — видно
+ *  только из текста. Слова — основы без ловушек: «договор» (цена договорная),
+ *  «телефон» (контакт), «детали», «машина»→«шин», «который»→«кот» исключены.
+ *  Заявка может попасть в несколько категорий — это упоминания, не разделы. */
+export const CARRY_CATEGORIES: Array<{ key: string; label: string; words: string[] }> = [
+  { key: 'docs', label: 'Документы', words: ['документ', 'паспорт', 'виза', 'визу', 'визы', 'шенген', 'справк', 'доверенност', 'свидетельств', 'диплом', 'нотари', 'конверт'] },
+  { key: 'medicine', label: 'Лекарства', words: ['лекарст', 'таблет', 'медикамент', 'препарат', 'инсулин', 'витамин', 'бады', 'аптек'] },
+  { key: 'food', label: 'Продукты и еда', words: ['продукт', 'колбас', 'сыр', 'консерв', 'конфет', 'шоколад', 'сладост', 'кофе', 'вино', 'торт', 'печен'] },
+  { key: 'tech', label: 'Техника и электроника', words: ['смартфон', 'айфон', 'iphone', 'ноутбук', 'планшет', 'техник', 'электроник', 'наушник', 'зарядк', 'гаджет', 'монитор', 'камер', 'фото'] },
+  { key: 'keys', label: 'Ключи', words: ['ключ'] },
+  { key: 'animals', label: 'Животные', words: ['животн', 'кошк', 'кота', 'коту', 'котен', 'собак', 'щен', 'питомец', 'попугай', 'хомяк'] },
+  { key: 'parts', label: 'Автозапчасти', words: ['запчаст', 'колес', 'покрыш', 'аккумулятор'] },
+  { key: 'money', label: 'Деньги', words: ['деньг', 'наличн', 'валют', 'купюр'] },
+  { key: 'kids', label: 'Детское', words: ['детск', 'ребенк', 'малыш', 'коляск', 'подгузник'] },
+  { key: 'flowers', label: 'Цветы', words: ['цвет'] },
+  { key: 'things', label: 'Вещи, сумки, чемоданы', words: ['вещ', 'сумк', 'чемодан', 'рюкзак', 'одежд', 'обув', 'пакет'] },
+  { key: 'parcel', label: 'Посылки и коробки', words: ['посылк', 'посылоч', 'коробк', 'ящик', 'груз'] },
+];
+
+export interface CarryStat { key: string; label: string; total: number; offers: number; requests: number; last30: number }
+export interface CarryStats { total: number; categories: CarryStat[]; other: CarryStat }
+
+/** Отчёт «что передают»: один проход по descriptions_lc (живые и архив, без
+ *  отклонённых). Пустые категории не возвращаем; «прочее» — описания, где не
+ *  нашлось ни одного ключевого слова. */
+export async function listCarryStats(env: Env): Promise<CarryStats> {
+  const window30 = "datetime(created_at) >= datetime('now', '-30 days', '+3 hours')";
+  const hit = (words: string[]) =>
+    `(${words.map((w) => `description_lc LIKE '%${escapeLike(w)}%'`).join(' OR ')})`;
+  const cells: string[] = ['COUNT(*) AS total'];
+  const cell4 = (alias: string, cond: string) => {
+    cells.push(`SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) AS ${alias}`);
+    cells.push(`SUM(CASE WHEN ${cond} AND type = 'offer' THEN 1 ELSE 0 END) AS ${alias}_o`);
+    cells.push(`SUM(CASE WHEN ${cond} AND type = 'request' THEN 1 ELSE 0 END) AS ${alias}_r`);
+    cells.push(`SUM(CASE WHEN ${cond} AND ${window30} THEN 1 ELSE 0 END) AS ${alias}_30`);
+  };
+  CARRY_CATEGORIES.forEach((c, i) => cell4(`c${i}`, hit(c.words)));
+  cell4('oth', `NOT ${hit(CARRY_CATEGORIES.flatMap((c) => c.words))}`);
+  const row = (await env.DB.prepare(
+    `SELECT ${cells.join(', ')} FROM listings
+      WHERE status IN ('published','expired') AND description_lc IS NOT NULL AND description_lc != ''`
+  ).first()) as Record<string, unknown> | null;
+  const num = (k: string) => Number((row ?? {})[k] ?? 0);
+  const stat = (key: string, label: string, alias: string): CarryStat => ({
+    key, label,
+    total: num(alias), offers: num(`${alias}_o`), requests: num(`${alias}_r`), last30: num(`${alias}_30`),
+  });
+  const categories = CARRY_CATEGORIES
+    .map((c, i) => stat(c.key, c.label, `c${i}`))
+    .filter((c) => c.total > 0)
+    .sort((a, b) => b.total - a.total);
+  return { total: num('total'), categories, other: stat('other', 'Прочее (без ключевых слов)', 'oth') };
+}
+
 export async function listTopUsernames(
   env: Env,
   limit = 20

@@ -2427,6 +2427,38 @@ function scrubBox() {
   ]);
 }
 
+/* «Что передают»: категории по словам в описаниях — темы для рекламных
+   текстов и SEO-страниц. Заявка может попасть в несколько категорий
+   (упоминания, не разделы), «прочее» — описания без совпадений. */
+function carryBox(data) {
+  const cats = data && Array.isArray(data.categories) ? data.categories : [];
+  if (!cats.length) return null;
+  const total = Number((data && data.total) || 0);
+  const pct = (n) => (total > 0 ? Math.round((Number(n || 0) / total) * 100) : 0);
+  const rows = cats.slice();
+  if (data.other && Number(data.other.total) > 0) rows.push(data.other);
+  return el('section', { class: 'admin-card stats-carry' }, [
+    el('h3', { class: 'match-history-head', text: 'Что передают' }),
+    el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'категория' }), el('th', { text: 'заявок' }), el('th', { text: 'доля' }),
+        el('th', { text: 'везёт / ищет' }), el('th', { text: 'за 30 дней' }),
+      ])]),
+      el('tbody', {}, rows.map((c) => el('tr', {}, [
+        el('th', { scope: 'row', text: String(c.label || c.key) }),
+        el('td', { class: 'mono', text: String(c.total ?? 0) }),
+        el('td', { class: 'mono', text: `${pct(c.total)}%` }),
+        el('td', { class: 'mono', text: `${c.offers ?? 0} / ${c.requests ?? 0}` }),
+        el('td', { class: 'mono', text: String(c.last30 ?? 0) }),
+      ]))),
+    ]),
+    el('p', {
+      class: 'form-note',
+      text: `Поиск по словам в описаниях (живые и архив, без отклонённых) — всего заявок ${total}. Заявка может попадать в несколько категорий: это упоминания, а не разделы.`,
+    }),
+  ]);
+}
+
 async function renderAdminStats() {
   const listEl = $('#admin-list');
   $('#admin-count').textContent = 'Итоги месяца: сколько объявлений прошло через доску и по чём договаривались.';
@@ -2449,11 +2481,13 @@ async function renderAdminStats() {
   const flow = flowBox(data.flow);
   const viewed = viewedBox(data.topViewed);
   const usernames = usernamesBox(data.topUsernames);
+  const carry = carryBox(data.carry);
   if (months.length === 0) {
     listEl.replaceChildren();
     if (flow) listEl.append(flow);
     if (viewed) listEl.append(viewed);
     if (usernames) listEl.append(usernames);
+    if (carry) listEl.append(carry);
     listEl.append(el('p', {
       class: 'empty-note',
       text: 'Итогов месяцев пока нет: на доске не было опубликованных объявлений. Как только появится первое, пересчитайте итоги здесь или дождитесь ночного cron.',
@@ -2532,6 +2566,7 @@ async function renderAdminStats() {
   if (flow) listEl.append(flow);
   if (viewed) listEl.append(viewed);
   if (usernames) listEl.append(usernames);
+  if (carry) listEl.append(carry);
 
   listEl.append(el('div', { class: 'stats-controls' }, [select, refreshBtn, pageLink, summaryBtn]));
 

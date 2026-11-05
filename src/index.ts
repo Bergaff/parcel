@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listCarryStats, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -1276,6 +1276,8 @@ async function statsPayload(env: Env, origin: string) {
   const days = (await listDailyStats(env, 90)).slice().reverse(); // старые → новые
   const topViewed = await listMostViewed(env, 10).catch(() => []);
   const topUsernames = await listTopUsernames(env, 20).catch(() => ({ rows: [], withContact: 0 }));
+  // «что передают» — категории по словам в описаниях (тексты для рекламы и SEO)
+  const carry = await listCarryStats(env).catch(() => null);
   return {
     months: withPosts,
     currentMonth: current,
@@ -1297,6 +1299,7 @@ async function statsPayload(env: Env, origin: string) {
       path: `/item/${l.id}`,
     })),
     topUsernames,
+    carry,
   };
 }
 

@@ -312,6 +312,13 @@ function makeFetch(calls: string[]) {
               ],
               withContact: 10,
             },
+            carry: {
+              total: 100,
+              categories: [
+                { key: 'docs', label: 'Документы', total: 40, offers: 30, requests: 10, last30: 12 },
+              ],
+              other: { key: 'other', label: 'Прочее (без ключевых слов)', total: 60, offers: 50, requests: 10, last30: 20 },
+            },
           },
         };
       }
@@ -1321,6 +1328,13 @@ describe('админка', () => {
     expect(unames.textContent).toContain('@ivan');
     expect(unames.textContent).toContain('5 / 2'); // везёт / ищет
     expect(unames.textContent).toContain('70%');   // доля 7 из 10
+
+    // что передают — категории по словам в описаниях
+    const carry = win.document.querySelector('.stats-carry') as HTMLElement;
+    expect(carry, 'блок «что передают»').not.toBeNull();
+    expect(carry.textContent).toContain('Документы');
+    expect(carry.textContent).toContain('Прочее');
+    expect(carry.textContent).toContain('30 / 10'); // везёт / ищет
 
     // текст поста тоже на вкладке — ничего не потеряли
     expect(win.document.querySelector('.stats-post')).not.toBeNull();
