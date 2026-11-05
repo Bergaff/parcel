@@ -427,7 +427,7 @@ function buildRow(l) {
         : null,
       contact
         ? el('a', { class: 'write-link', href: contact.href, target: '_blank', rel: 'noopener', text: contact.kind === 'phone' ? 'позвонить' : 'написать' })
-        : el('span', { class: 'write-link', style: 'cursor:default', text: 'контакт в карточке' }),
+        : el('span', { class: 'write-link', style: 'cursor:default', text: 'без контакта' }),
       el('a', { class: 'write-link share-link', text: 'скопировать', onclick: (e) => { e.preventDefault(); e.stopPropagation(); copyListingLink(l); } }),
       el('a', {
         class: 'write-link report-link',
@@ -2379,6 +2379,44 @@ function usernamesBox(data) {
       class: 'form-note',
       text: `По всем заявкам с юзернеймом в контакте (живые и архив) — всего ${withContact}. Доля считается от этого числа; регистр не важен (@Ivan и @ivan — один человек).`,
     }),
+    scrubBox(),
+  ]);
+}
+
+/* «Нечеловеческие» контакты: ник чата-источника или аккаунта-релея.
+   Очистить во всех заявках — останется настоящий автор, а способ связаться
+   никуда не денется: ссылка на исходное сообщение живёт в тексте заявки. */
+function scrubBox() {
+  const input = el('input', {
+    class: 'q', type: 'text', placeholder: '@granica_belarus_chat, @Daniil06496',
+    'aria-label': 'Юзернеймы, которые не люди (через запятую)',
+  });
+  const result = el('p', { class: 'form-note', text: '' });
+  const btn = el('button', { class: 'btn btn-line btn-sm', type: 'button', text: 'очистить контакт в заявках' });
+  btn.addEventListener('click', async () => {
+    const usernames = input.value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    if (usernames.length === 0) { input.focus(); return; }
+    btn.disabled = true;
+    result.textContent = 'чищу…';
+    try {
+      const res = await adminApi('/api/admin/listings/scrub-contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usernames }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error('bad');
+      result.textContent = `Очищено заявок: ${data.scrubbed ?? 0}. Нажмите «обновить», чтобы пересчитать отчёт.`;
+      input.value = '';
+    } catch {
+      result.textContent = 'Не получилось — проверьте ключ и связь.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  return el('div', { class: 'scrub-contacts' }, [
+    el('p', { class: 'form-note', text: 'Ник чата или релея в контактах — не человек: очистите, и в заявках останется только настоящий автор.' }),
+    input, btn, result,
   ]);
 }
 

@@ -1030,7 +1030,42 @@ export async function updateSourceOrigin(
   const res = await env.DB.prepare(
     `UPDATE listings SET ${sets.join(', ')} WHERE id = ?`
   ).bind(...params).run();
-  return (res.meta.changes ?? 0) > 0;
+  const ok = (res.meta.changes ?? 0) > 0;
+  // Исходный чат — не автор заявки: если его ник записан контактом (старый
+  // парсер брал его из ссылок t.me/чат/123), обнуляем. Ссылка на сообщение
+  // остаётся в тексте заявки, карточка без контакта не становится мёртвой.
+  if (ok && origin.username) {
+    const uname = String(origin.username).replace(/^@/, '').toLowerCase();
+    await env.DB.prepare(
+      `UPDATE listings SET telegram = NULL WHERE id = ? AND telegram IS NOT NULL
+         AND (lower(telegram) = '@' || lower(?) OR lower(telegram) = lower(?))`
+    ).bind(listingId, uname, uname).run().catch(() => undefined);
+  }
+  return ok;
+}
+
+/** Разовая чистка «нечеловеческих» контактов: ник чата-источника и ники из
+ *  списка (аккаунты радара-релея). Задевает только заявки с записанным
+ *  исходным чатом — настоящую личную подачу однофамильца не стирает.
+ *  Заявки не удаляются: обнуляется только контакт. */
+export async function scrubContactUsernames(env: Env, usernames: string[]): Promise<number> {
+  const bare = [...new Set(
+    usernames.map((u) => String(u ?? '').trim().replace(/^@/, '').toLowerCase())
+      .filter((u) => u.length >= 2 && u.length <= 32)
+  )].slice(0, 20);
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (bare.length > 0) {
+    clauses.push(`lower(replace(telegram, '@', '')) IN (${bare.map(() => '?').join(', ')})`);
+    params.push(...bare);
+  }
+  clauses.push("lower(replace(telegram, '@', '')) = lower(replace(source_chat_username, '@', ''))");
+  const res = await env.DB.prepare(
+    `UPDATE listings SET telegram = NULL
+     WHERE telegram IS NOT NULL AND source_chat_username IS NOT NULL
+       AND (${clauses.join(' OR ')})`
+  ).bind(...params).run();
+  return Number(res.meta.changes ?? 0);
 }
 
 function escapeLike(s: string): string {
@@ -1308,6 +1343,9 @@ export function autoStatusFor(
     if (input.description && hasContactHint(input.description)) return null;
     return { status: 'rejected', hidden: false };
   }
+  // Ссылка на исходное сообщение/чат в тексте — способ связаться (радар
+  // оставляет её в копиях из защищённых чатов): такую просьбу не прячем.
+  if (input.description && hasContactHint(input.description)) return null;
   return { status: 'published', hidden: true };
 }
 

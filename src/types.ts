@@ -10,6 +10,8 @@ export interface Env {
   AUTO_APPROVE?: string;
   SITE_URL?: string;
   BOT_USERNAME?: string;
+  /** Ники аккаунтов-ретрансляторов (радара), через запятую: не считаются авторами заявок. */
+  RADAR_USERNAMES?: string;
   ADMIN_API_TOKEN?: string;
   /** "1" — бот отвечает в группах после распознавания объявления (по умолчанию молчит). */
   REPLY_IN_GROUPS?: string;

@@ -147,7 +147,7 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
     archived ? '<span class="stamp stamp-expired">архив</span>' : null,
     contact
       ? `<a class="write-link" href="${escapeHtml(contact.href)}" target="_blank" rel="noopener">${contact.kind === 'phone' ? 'позвонить' : 'написать'}</a>`
-      : '<span class="write-link" style="cursor:default">контакт в карточке</span>',
+      : '<span class="write-link" style="cursor:default">без контакта</span>',
     opts.openLink ? `<a class="write-link" href="/item/${encodeURIComponent(l.id)}">открыть</a>` : null,
     opts.actions ? `<a class="write-link share-link" href="/item/${encodeURIComponent(l.id)}" data-copy="${escapeHtml(l.id)}">скопировать</a>` : null,
     opts.actions ? `<a class="write-link report-link" href="/item/${encodeURIComponent(l.id)}" data-report="${escapeHtml(l.id)}">пожаловаться</a>` : null,

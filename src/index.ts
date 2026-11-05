@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
@@ -1320,6 +1320,18 @@ app.get('/api/admin/forum-stats', async (c) => {
 app.post('/api/admin/forum-stats/reset', async (c) => {
   await resetForumStats(c.env);
   return c.json({ ok: true });
+});
+
+/* «Нечеловеческие» контакты: ник чата-источника (старый парсер брал его из
+ * ссылок t.me/чат/123) и ники релея из списка. Обнуляется только контакт —
+ * заявки остаются, ссылка на исходное сообщение живёт в тексте. */
+app.post('/api/admin/listings/scrub-contacts', async (c) => {
+  const body = await c.req.json().catch(() => ({})) as { usernames?: unknown };
+  const list = Array.isArray(body.usernames)
+    ? body.usernames.map(String)
+    : String(body.usernames ?? '').split(/[,\s]+/);
+  const scrubbed = await scrubContactUsernames(c.env, list);
+  return c.json({ ok: true, scrubbed });
 });
 
 /* Убрать с доски все объявления с подозрительно далёкой датой выезда

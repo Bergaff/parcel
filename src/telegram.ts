@@ -36,6 +36,8 @@ interface TgMessage {
   /** Признак пересланного сообщения (Bot API: forward_origin). */
   forward_origin?: unknown;
   forward_from?: TgUser;
+  /** Сообщение «от имени группы» / пост канала: отправитель — не человек (Bot API). */
+  sender_chat?: { id?: number; username?: string; type?: string };
 }
 interface TgCallbackQuery {
   id: string;
@@ -850,6 +852,27 @@ export function cityAnswer(raw: string): { ok: true; city: string } | { ok: fals
   return { ok: true, city: canonical };
 }
 
+/** Контакт — никогда не сам чат, не бот и не аккаунт-ретранслятор (радар):
+ *  писать туда — не значит написать автору заявки. Совпал с запрещённым
+ *  (регистр и «@» не важны) — возвращается null. */
+export function validContact(env: Env, tg: string | null, forbidden: Array<string | null | undefined>): string | null {
+  if (!tg) return null;
+  const bare = String(tg).replace(/^@/, '').trim().toLowerCase();
+  if (!bare) return null;
+  for (const f of forbidden) {
+    const fb = String(f ?? '').replace(/^@/, '').trim().toLowerCase();
+    if (fb && fb === bare) return null;
+  }
+  return tg;
+}
+
+/** Аккаунты радара (RADAR_USERNAMES, через запятую): их ник не подставляется
+ *  контактом — текстовую копию из защищённого чата отправляет радар, а не автор. */
+export function radarUsernames(env: Env): string[] {
+  return String(env.RADAR_USERNAMES ?? '')
+    .split(',').map((s) => s.trim().replace(/^@/, '')).filter(Boolean);
+}
+
 /** Ответ радара со ссылкой на исходное сообщение.
  *  Возвращает true, если сообщение поглощено (это ссылка-ответ), — даже когда
  *  заявку найти не удалось: голая ссылка в любом случае не объявление. */
@@ -927,8 +950,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
     for (const fields of list) {
       const input: ListingInput = {
         ...fields,
-        // контакт — автор сообщения (из forward-данных), а не тот, кто переслал
-        telegram: fields.telegram ?? origin.authorUsername ?? null,
+        // контакт — автор сообщения (из forward-данных), а не тот, кто переслал;
+        // сам исходный чат и бот авторами не бывают
+        telegram: validContact(env, fields.telegram ?? origin.authorUsername ?? null,
+          [origin.username, env.BOT_USERNAME]),
         status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
         source,
         sourceChat: origin.title ?? 'Пересланное сообщение',
@@ -1159,7 +1184,11 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
           for (const fields of list) {
             const input: ListingInput = {
               ...fields,
-              telegram: fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+              // В личке отправитель обычно и есть автор; но копию из защищённого
+              // чата шлёт радар (RADAR_USERNAMES) — его ник не контакт
+              telegram: validContact(env,
+                fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+                [env.BOT_USERNAME, ...radarUsernames(env)]),
               status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
               source,
               sourceChat: 'Личное сообщение боту',
@@ -1295,7 +1324,7 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     departureDate: d.date,
     recurring: d.recurring ?? null,
     description: d.details,
-    telegram: isTg ? contact : null,
+    telegram: isTg ? validContact(env, contact, [env.BOT_USERNAME]) : null,
     phone: isTg ? null : contact,
     status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
     source: 'telegram',
@@ -1433,7 +1462,11 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const repeats: Repeat[] = [];
   const similarBy = new Map<string, { id: string; why: string }>();
   for (const fields of list) {
-    const telegram = fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null);
+    // Контакт — никогда не сам чат (включая «от имени группы») и не бот:
+    // только ник из текста или живой автор сообщения
+    const telegram = validContact(env,
+      fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
+      [msg.chat.username, msg.sender_chat?.username, env.BOT_USERNAME]);
     const input: ListingInput = {
       ...fields,
       telegram,

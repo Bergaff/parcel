@@ -272,8 +272,8 @@ describe('строка доски в SSR', () => {
     expect(row).not.toContain('t.me/+48');
   });
 
-  it('без контакта — подпись «контакт в карточке»', () => {
-    expect(renderRowHtml(listing({ telegram: null, phone: null }))).toContain('контакт в карточке');
+  it('без контакта — честная подпись «без контакта»', () => {
+    expect(renderRowHtml(listing({ telegram: null, phone: null }))).toContain('без контакта');
   });
 
   it('HTML в описании экранируется', () => {
