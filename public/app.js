@@ -400,6 +400,9 @@ function buildRow(l) {
         l.fromCity,
         routeArrow(l),
         el('span', { class: 'r-to', text: l.toCity }),
+        // дубль плашки типа для телефона: CSS показывает её в строке маршрута
+        // на ≤640px, а плашку в правом столбце (.stamp-side) там прячет
+        el('span', { class: `stamp stamp-${l.type} stamp-route`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
       ]),
       el('p', { class: 'desc', text: l.description }),
       el('div', { class: 'meta-line' }, [
@@ -416,7 +419,7 @@ function buildRow(l) {
       ].filter(Boolean)),
     ]),
     el('div', { class: 'row-side' }, [
-      el('span', { class: `stamp stamp-${l.type}`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
+      el('span', { class: `stamp stamp-${l.type} stamp-side`, text: l.type === 'offer' ? 'водитель везёт' : 'ищу передачу' }),
       l.pinnedUntil && l.pinnedUntil > new Date().toISOString()
         ? el('span', { class: 'stamp stamp-pinned', text: 'закреплено' })
         : null,

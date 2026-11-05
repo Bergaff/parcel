@@ -272,6 +272,12 @@ describe('строка доски в SSR', () => {
     expect(row).not.toContain('t.me/+48');
   });
 
+  it('плашка типа: дубль в строке маршрута (телефон) и в правом столбце (десктоп)', () => {
+    const html = renderRowHtml(listing());
+    expect(html).toContain('<span class="stamp stamp-offer stamp-route">водитель везёт</span>');
+    expect(html).toContain('<span class="stamp stamp-offer stamp-side">водитель везёт</span>');
+  });
+
   it('без контакта — честная подпись «без контакта»', () => {
     expect(renderRowHtml(listing({ telegram: null, phone: null }))).toContain('без контакта');
   });

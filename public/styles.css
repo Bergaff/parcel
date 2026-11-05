@@ -248,6 +248,10 @@ button { font-family: inherit; }
 .route-line .r-to { font-weight: 700; }
 /* Маршрут-цепочка («Минск … Варшава»): вместо стрелки многоточие, все города — при наведении */
 .r-arrow.r-via { cursor: help; letter-spacing: 2px; }
+/* Плашка типа («водитель везёт») в строке маршрута — только на телефоне (≤640px):
+   там она встаёт на уровень маршрута, а действия помещаются в одну строку ниже.
+   На десктопе плашка по-прежнему в правом столбце, этот дубль скрыт. */
+.stamp-route { display: none; }
 
 .desc {
   margin: 0 0 8px;
@@ -485,7 +489,12 @@ button { font-family: inherit; }
   .route-search .q, .q.date { flex: 1 1 100%; width: 100%; }
   .route-arrow { display: none; }
   .row { grid-template-columns: 1fr; }
-  .row-side { flex-direction: row; align-items: center; gap: 14px; min-width: 0; }
+  .row-side { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px 14px; min-width: 0; }
+  /* тип заявки — на уровне маршрута, остальное (написать/скопировать/
+     пожаловаться/архив/регулярно/№) — в одну оставшуюся строку, с переносом
+     вместо вылета за экран */
+  .route-line .stamp-route { display: inline-block; margin-left: 10px; vertical-align: 3px; }
+  .row-side .stamp-side { display: none; }
   .row-no { margin-left: auto; }
   .pair { grid-template-columns: 1fr; }
   .pair-arrow { display: none; }

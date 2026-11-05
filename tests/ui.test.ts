@@ -494,6 +494,20 @@ describe('доска: строка объявления', () => {
     expect(row.hasAttribute('role')).toBe(false);
   });
 
+  it('на телефоне плашка типа встаёт в строку маршрута, действия — в одну оставшуюся строку', () => {
+    const row = rows()[0]!;
+    const inRoute = row.querySelector('.route-line .stamp-route') as HTMLElement | null;
+    expect(inRoute, 'дубль плашки в маршруте (CSS показывает его на ≤640px)').not.toBeNull();
+    expect(inRoute!.textContent).toBe('водитель везёт');
+    expect(row.querySelector('.row-side .stamp-side'), 'плашка в правом столбце (десктоп)').not.toBeNull();
+    // десктоп: дубль в маршруте скрыт; телефон: плашка в столбце скрыта,
+    // остальные чипы переносятся вместо вылета за экран
+    expect(cssSource).toMatch(/\.stamp-route \{ display: none; \}/);
+    expect(cssSource).toContain('.route-line .stamp-route { display: inline-block;');
+    expect(cssSource).toContain('.row-side .stamp-side { display: none; }');
+    expect(cssSource).toMatch(/\.row-side \{[^}]*flex-wrap: wrap/);
+  });
+
   it('маршрут-цепочка: «Минск … Варшава», все города видны при наведении', () => {
     const row = rows()[1]!;
     const via = row.querySelector('.r-arrow.r-via') as HTMLElement | null;

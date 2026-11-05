@@ -141,7 +141,7 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   ].filter(Boolean).join('');
 
   const side = [
-    `<span class="stamp stamp-${l.type}">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>`,
+    `<span class="stamp stamp-${l.type} stamp-side">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span>`,
     l.pinnedUntil && l.pinnedUntil > new Date().toISOString() ? '<span class="stamp stamp-pinned">закреплено</span>' : null,
     l.recurring ? '<span class="stamp stamp-recur">регулярно</span>' : null,
     archived ? '<span class="stamp stamp-expired">архив</span>' : null,
@@ -157,7 +157,7 @@ export function renderRowHtml(l: Listing, opts: RowOptions = {}): string {
   return `<article class="row">
   <a class="row-link" href="/item/${encodeURIComponent(l.id)}" aria-label="${escapeHtml(routeText(l))}: открыть объявление"></a>
   <div class="row-main">
-    <h3 class="route-line">${escapeHtml(l.fromCity)}${routeArrowHtml(l)}<span class="r-to">${escapeHtml(l.toCity)}</span></h3>
+    <h3 class="route-line">${escapeHtml(l.fromCity)}${routeArrowHtml(l)}<span class="r-to">${escapeHtml(l.toCity)}</span><span class="stamp stamp-${l.type} stamp-route">${l.type === 'offer' ? 'водитель везёт' : 'ищу передачу'}</span></h3>
     <p class="desc">${escapeHtml(l.description)}</p>
     <div class="meta-line">${meta}</div>
   </div>
