@@ -2394,7 +2394,11 @@ function scrubBox() {
   const result = el('p', { class: 'form-note', text: '' });
   const btn = el('button', { class: 'btn btn-line btn-sm', type: 'button', text: 'очистить контакт в заявках' });
   btn.addEventListener('click', async () => {
-    const usernames = input.value.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    // понимаем и голые ники, и вставленные ссылки/markdown: @чат, t.me/чат,
+    // [@чат](https://t.me/чат) — из всего вылавливаем юзернеймы
+    const found = [...input.value.matchAll(/(?:@|t\.me\/)([a-zA-Z0-9_]{4,32})/g)].map((m) => m[1]);
+    const usernames = (found.length > 0 ? found : input.value.split(/[,\s]+/))
+      .map((s) => String(s).trim().replace(/^@/, '')).filter(Boolean);
     if (usernames.length === 0) { input.focus(); return; }
     btn.disabled = true;
     result.textContent = 'чищу…';

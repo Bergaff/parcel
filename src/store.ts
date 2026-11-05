@@ -1045,8 +1045,9 @@ export async function updateSourceOrigin(
 }
 
 /** Разовая чистка «нечеловеческих» контактов: ник чата-источника и ники из
- *  списка (аккаунты радара-релея). Задевает только заявки с записанным
- *  исходным чатом — настоящую личную подачу однофамильца не стирает.
+ *  списка (аккаунты радара-релея). Явный список — решение админа («этот ник
+ *  не человек»), он не зависит от source_chat_username: у релейных копий его
+ *  часто нет (ссылка-ответ радара не приходила), а контакт всё равно неверный.
  *  Заявки не удаляются: обнуляется только контакт. */
 export async function scrubContactUsernames(env: Env, usernames: string[]): Promise<number> {
   const bare = [...new Set(
@@ -1059,11 +1060,12 @@ export async function scrubContactUsernames(env: Env, usernames: string[]): Prom
     clauses.push(`lower(replace(telegram, '@', '')) IN (${bare.map(() => '?').join(', ')})`);
     params.push(...bare);
   }
-  clauses.push("lower(replace(telegram, '@', '')) = lower(replace(source_chat_username, '@', ''))");
+  // ник совпал с ником чата-источника — чат не автор (автоматическое правило;
+  // здесь source_chat_username обязателен — иначе сравнивать не с чем)
+  clauses.push("(source_chat_username IS NOT NULL AND lower(replace(telegram, '@', '')) = lower(replace(source_chat_username, '@', '')))");
   const res = await env.DB.prepare(
     `UPDATE listings SET telegram = NULL
-     WHERE telegram IS NOT NULL AND source_chat_username IS NOT NULL
-       AND (${clauses.join(' OR ')})`
+     WHERE telegram IS NOT NULL AND (${clauses.join(' OR ')})`
   ).bind(...params).run();
   return Number(res.meta.changes ?? 0);
 }

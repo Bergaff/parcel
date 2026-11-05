@@ -134,8 +134,10 @@ describe('scrubContactUsernames — разовая чистка', () => {
     expect(n).toBe(7);
     const upd = calls.find((c) => c.sql.startsWith('UPDATE listings SET telegram = NULL'))!;
     expect(upd.sql).toContain('IN (?, ?)'); // дубли схлопнулись, «@» отброшен
-    expect(upd.sql).toContain("lower(replace(telegram, '@', '')) = lower(replace(source_chat_username, '@', ''))");
-    expect(upd.sql).toContain('source_chat_username IS NOT NULL'); // личную подачу однофамильца не трогает
+    // явный список НЕ ограничен source_chat_username: у релейных копий его часто нет
+    expect(upd.sql).toContain('WHERE telegram IS NOT NULL AND (');
+    // автоматическое правило «ник == ник чата» — с защитой
+    expect(upd.sql).toContain("(source_chat_username IS NOT NULL AND lower(replace(telegram, '@', '')) = lower(replace(source_chat_username, '@', '')))");
     expect(upd.params).toEqual(['granica_chat', 'daniil06496']);
   });
 });
