@@ -32,6 +32,7 @@ import {
 import { renderRowHtml } from './ssr';
 import { tripInfo } from './geo';
 import { fromCity, genitiveCity, accusativeCity, inCountry } from './ru';
+import { FOOT_CARRY } from './carry-pages';
 
 export interface SeoRoute {
   from: string;
@@ -452,6 +453,7 @@ export function seoPageShell(opts: {
       <a href="/routes">Маршруты</a>
       <a href="/gorod">Города</a>
       <a href="/itogi">Итоги</a>
+      <a href="/peredat">Что передают</a>
       <a href="https://t.me/parcel_info" target="_blank" rel="noopener">Канал</a>
       ${opts.botUsername ? '<a href="/bot">Бот</a>' : ''}
       <a href="/new" class="btn btn-ink nav-cta">+ разместить</a>
@@ -481,6 +483,11 @@ ${opts.body}
       <a href="/gorod">все города →</a>
       <a href="/itogi">итоги месяца →</a>
     </nav>
+    <nav class="foot-routes" aria-label="Что передают">
+      <b>Что передают:</b>
+      ${FOOT_CARRY.map((s) => `<a href="/peredat/${s.slug}">${escapeHtml(s.label)}</a>`).join('\n      ')}
+      <a href="/peredat">все темы →</a>
+    </nav>
     <p class="foot-meta">нашли фейк — жалоба из карточки объявления</p>
   </footer>
   <div id="cookie-note" class="cookie-note" hidden>
@@ -506,7 +513,7 @@ ${opts.body}
 </html>`;
 }
 
-function crumbs(origin: string, trail: Crumb[]): string {
+export function crumbs(origin: string, trail: Crumb[]): string {
   return `<nav class="crumbs" aria-label="Хлебные крошки">${trail
     .map((c) => (c.path ? `<a href="${escapeHtml(c.path)}">${escapeHtml(c.name)}</a>` : `<span>${escapeHtml(c.name)}</span>`))
     .join(' <span class="crumb-sep">›</span> ')}</nav>`;
@@ -1189,7 +1196,8 @@ function sitemapIndex(entries: Array<{ loc: string; lastmod?: string }>): string
 export function buildPagesSitemap(
   origin: string,
   lastmod: string,
-  months: Array<{ month: string; updatedAt?: string | null }> = []
+  months: Array<{ month: string; updatedAt?: string | null }> = [],
+  extraPaths: string[] = []
 ): string {
   const pages: Array<[string, string, string]> = [
     ['/', 'hourly', '1.0'],
@@ -1212,6 +1220,10 @@ export function buildPagesSitemap(
       changefreq: 'monthly',
       priority: '0.6',
     }));
+  }
+  // GEO-страницы «что передают» (хаб и категории): обновляются вместе с доской
+  for (const p of extraPaths) {
+    entries.push(urlEntry(`${origin}${p}`, { lastmod, changefreq: 'daily', priority: '0.8' }));
   }
   return urlset(entries);
 }

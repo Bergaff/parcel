@@ -2262,16 +2262,25 @@ export const CARRY_CATEGORIES: Array<{ key: string; label: string; words: string
 ];
 
 export interface CarryStat { key: string; label: string; total: number; offers: number; requests: number; last30: number }
-export interface CarryStats { total: number; categories: CarryStat[]; other: CarryStat }
+export interface CarryStats { total: number; categories: CarryStat[]; other: CarryStat; updatedAt: string | null }
+
+/** Условие поиска слов категории по нижнерегистровому описанию. */
+function carryHit(words: string[]): string {
+  return `(${words.map((w) => `description_lc LIKE '%${escapeLike(w)}%'`).join(' OR ')})`;
+}
+
+/** Окно «30 дней» (+3 часа — граница суток по Москве). */
+const CARRY_WINDOW30 = "datetime(created_at) >= datetime('now', '-30 days', '+3 hours')";
 
 /** Отчёт «что передают»: один проход по descriptions_lc (живые и архив, без
  *  отклонённых). Пустые категории не возвращаем; «прочее» — описания, где не
- *  нашлось ни одного ключевого слова. */
-export async function listCarryStats(env: Env): Promise<CarryStats> {
-  const window30 = "datetime(created_at) >= datetime('now', '-30 days', '+3 hours')";
-  const hit = (words: string[]) =>
-    `(${words.map((w) => `description_lc LIKE '%${escapeLike(w)}%'`).join(' OR ')})`;
-  const cells: string[] = ['COUNT(*) AS total'];
+ *  нашлось ни одного ключевого слова. boardOnly — публичные цифры для
+ *  GEO-страниц /peredat: только то, что реально на доске сейчас. */
+export async function listCarryStats(env: Env, opts: { boardOnly?: boolean } = {}): Promise<CarryStats> {
+  const window30 = CARRY_WINDOW30;
+  const hit = carryHit;
+  const statusCond = opts.boardOnly ? `status = 'published'` : `status IN ('published','expired')`;
+  const cells: string[] = ['COUNT(*) AS total', 'MAX(datetime(COALESCE(published_at, created_at))) AS upd'];
   const cell4 = (alias: string, cond: string) => {
     cells.push(`SUM(CASE WHEN ${cond} THEN 1 ELSE 0 END) AS ${alias}`);
     cells.push(`SUM(CASE WHEN ${cond} AND type = 'offer' THEN 1 ELSE 0 END) AS ${alias}_o`);
@@ -2282,7 +2291,7 @@ export async function listCarryStats(env: Env): Promise<CarryStats> {
   cell4('oth', `NOT ${hit(CARRY_CATEGORIES.flatMap((c) => c.words))}`);
   const row = (await env.DB.prepare(
     `SELECT ${cells.join(', ')} FROM listings
-      WHERE status IN ('published','expired') AND description_lc IS NOT NULL AND description_lc != ''`
+      WHERE ${statusCond} AND description_lc IS NOT NULL AND description_lc != ''`
   ).first()) as Record<string, unknown> | null;
   const num = (k: string) => Number((row ?? {})[k] ?? 0);
   const stat = (key: string, label: string, alias: string): CarryStat => ({
@@ -2293,7 +2302,67 @@ export async function listCarryStats(env: Env): Promise<CarryStats> {
     .map((c, i) => stat(c.key, c.label, `c${i}`))
     .filter((c) => c.total > 0)
     .sort((a, b) => b.total - a.total);
-  return { total: num('total'), categories, other: stat('other', 'Прочее (без ключевых слов)', 'oth') };
+  return {
+    total: num('total'), categories, other: stat('other', 'Прочее (без ключевых слов)', 'oth'),
+    updatedAt: row?.upd == null ? null : String(row.upd),
+  };
+}
+
+/* ---- Публичные цифры GEO-страниц «что передают» (/peredat/:slug) ---- */
+
+export interface CarryBoardStat { board: number; offers: number; requests: number; last30: number; updatedAt: string | null }
+export interface CarryRouteStat { from: string; to: string; total: number }
+
+/** Цифры категории для публичной страницы: только живые заявки (published);
+ *  updatedAt — когда тему последний раз публиковали (свежесть страницы). */
+export async function carryCategoryBoard(env: Env, words: string[]): Promise<CarryBoardStat> {
+  const row = (await env.DB.prepare(
+    `SELECT COUNT(*) AS board,
+            SUM(CASE WHEN type = 'offer' THEN 1 ELSE 0 END) AS offers,
+            SUM(CASE WHEN type = 'request' THEN 1 ELSE 0 END) AS requests,
+            SUM(CASE WHEN ${CARRY_WINDOW30} THEN 1 ELSE 0 END) AS last30,
+            MAX(datetime(COALESCE(published_at, created_at))) AS upd
+       FROM listings
+      WHERE status = 'published' AND description_lc IS NOT NULL AND description_lc != ''
+        AND ${carryHit(words)}`
+  ).first()) as Record<string, unknown> | null;
+  const num = (k: string) => Number((row ?? {})[k] ?? 0);
+  return {
+    board: num('board'), offers: num('offers'), requests: num('requests'), last30: num('last30'),
+    updatedAt: row?.upd == null ? null : String(row.upd),
+  };
+}
+
+/** Популярные направления категории: какие пары откуда→куда чаще везут груз. */
+export async function carryTopRoutes(env: Env, words: string[], limit = 6): Promise<CarryRouteStat[]> {
+  const cap = Math.min(20, Math.max(1, limit));
+  const res = await env.DB.prepare(
+    `SELECT from_city, to_city, COUNT(*) AS total
+       FROM listings
+      WHERE status = 'published' AND description_lc IS NOT NULL AND description_lc != ''
+        AND ${carryHit(words)}
+      GROUP BY from_city, to_city
+      ORDER BY total DESC, from_city
+      LIMIT ?`
+  ).bind(cap).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => ({ from: String(r.from_city ?? ''), to: String(r.to_city ?? ''), total: Number(r.total ?? 0) }))
+    .filter((r) => r.from && r.to);
+}
+
+/** Свежие живые заявки категории — строки для GEO-страницы. Публичная
+ *  проекция: происхождение с точностью до сообщения срезано (publicListing). */
+export async function carryListings(env: Env, words: string[], limit = 6): Promise<Listing[]> {
+  const cap = Math.min(20, Math.max(1, limit));
+  const res = await env.DB.prepare(
+    `SELECT * FROM listings
+      WHERE status = 'published' AND description_lc IS NOT NULL AND description_lc != ''
+        AND ${carryHit(words)}
+      ORDER BY datetime(COALESCE(published_at, created_at)) DESC
+      LIMIT ?`
+  ).bind(cap).all();
+  return ((res.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => publicListing(mapRow(r)));
 }
 
 export async function listTopUsernames(

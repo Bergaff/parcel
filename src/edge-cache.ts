@@ -34,10 +34,12 @@ export function edgeCacheTtl(pathname: string, hasQuery: boolean): number | null
   if (pathname === '/routes' || pathname === '/gorod') return 3600;
   if (pathname === '/itogi') return 1800;
   if (pathname.startsWith('/itogi/')) return 3600;
+  if (pathname === '/peredat' || pathname.startsWith('/peredat/')) return 1800;
+  if (pathname === '/llms.txt') return 3600;
   if (pathname.startsWith('/r/')) return 600;
   if (pathname.startsWith('/gorod/')) return 600;
   if (pathname.startsWith('/item/')) return 300;
-  if (pathname.startsWith('/og/') || pathname.startsWith('/og-route/')) return 86400;
+  if (pathname.startsWith('/og/') || pathname.startsWith('/og-route/') || pathname.startsWith('/og-carry/')) return 86400;
   if (
     pathname === '/how' || pathname === '/bot' || pathname === '/new' ||
     pathname === '/terms' || pathname === '/privacy'

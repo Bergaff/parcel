@@ -97,6 +97,7 @@ export function pageKind(path: string): string {
   if (path === '/gorod' || path.startsWith('/gorod/')) return 'Города';
   if (path.startsWith('/item/')) return 'Карточки объявлений';
   if (path === '/itogi' || path.startsWith('/itogi/')) return 'Итоги';
+  if (path === '/peredat' || path.startsWith('/peredat/')) return 'Что передают';
   if (path === '/new') return 'Форма подачи';
   return 'Прочее';
 }
@@ -106,6 +107,7 @@ export function isTrackablePage(path: string): boolean {
   return path === '/' || path === '/routes' || path.startsWith('/r/')
     || path === '/gorod' || path.startsWith('/gorod/')
     || path.startsWith('/item/') || path === '/itogi' || path.startsWith('/itogi/')
+    || path === '/peredat' || path.startsWith('/peredat/')
     || path === '/new' || path === '/how' || path === '/bot' || path === '/terms' || path === '/privacy';
 }
 

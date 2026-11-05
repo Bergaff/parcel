@@ -761,3 +761,16 @@ button { font-family: inherit; }
    задан display:flex, а авторский стиль всегда сильнее браузерного
    [hidden] { display: none } — атрибут hidden переставал работать */
 .cookie-note[hidden] { display: none; }
+
+/* GEO-страницы «что передают» (/peredat): списки категорий и направлений
+   с живыми цифрами из базы. Те же карточки, что и в FAQ (.qa). */
+.carry-list { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 8px; }
+.carry-list li {
+  border: 1px solid var(--line); background: var(--card); padding: 10px 14px;
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline;
+}
+.carry-list a { font-weight: 600; }
+.carry-list .num { color: var(--muted); font-size: 13.5px; white-space: nowrap; }
+.carry-routes { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 6px; font-size: 15px; }
+.carry-routes .num { color: var(--muted); font-size: 13.5px; }
+.carry-routes .r-arrow { color: var(--accent); margin: 0 4px; font-weight: 400; }

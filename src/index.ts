@@ -2,9 +2,11 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listCarryStats, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listCarryStats, carryCategoryBoard, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
+import { buildCarryHubPage, buildCarryPage, buildLlmsTxt, carryOgSpec, carryWordsFor } from './seo-carry';
+import { carryPaths, resolveCarryPage } from './carry-pages';
 import { checkMediaCredentials, gatherMediaStats, getCookie, isMediaAuthed, mediaCookieValue, renderLoginPage } from './mediakit';
 import {
   confirmJsVisit, gatherVisitStats, isTrackablePage, OWN_COOKIE, pruneVisitStats, renderAudiencePage, setOwnVisitor,
@@ -566,6 +568,34 @@ app.get('/gorod/:slug', async (c) => {
   return c.html(html);
 });
 
+/* ---------------- GEO-страницы «что передают» ---------------- */
+/* Под ИИ-поисковики (ChatGPT, Яндекс Нейро, Perplexity, Google AI Overviews):
+   они отвечают на вопросы «как передать документы из Минска в Варшаву» и
+   цитируют страницы с живыми цифрами и FAQ. Цифры — из D1, тексты не обещают
+   того, чего в базе нет. */
+app.get('/peredat', async (c) => {
+  const html = await buildCarryHubPage(c.env, siteOrigin(c.env, c.req.url));
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=1800');
+  return c.html(html);
+});
+
+app.get('/peredat/:slug', async (c) => {
+  const origin = siteOrigin(c.env, c.req.url);
+  const html = await buildCarryPage(c.env, c.req.param('slug'), origin);
+  if (!html) return c.notFound();
+  c.header('Cache-Control', 'public, max-age=0, s-maxage=1800');
+  return c.html(html);
+});
+
+/* Сводка сайта для LLM (стандарт llmstxt.org): что за сайт, живые цифры,
+   какие страницы цитировать. Боты ИИ-поисковиков пущены в robots.txt. */
+app.get('/llms.txt', async (c) => {
+  const txt = await buildLlmsTxt(c.env, siteOrigin(c.env, c.req.url));
+  return new Response(txt, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
+  });
+});
+
 /* Карта сайта: /sitemap.xml — индекс из трёх файлов (страницы, маршруты,
    объявления). Разбивка нужна, потому что объявления меняются каждый час,
    а витрина маршрутов — раз в день. */
@@ -586,7 +616,7 @@ app.get('/sitemap.xml', async (c) => {
 app.get('/sitemap-pages.xml', async (c) => {
   // страницы месяцев итогов появляются по одному на каждый месяц
   const months = await listMonthStats(c.env).catch(() => []);
-  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso(), months);
+  const xml = buildPagesSitemap(siteOrigin(c.env, c.req.url), mskTodayIso(), months, carryPaths());
   return new Response(xml, {
     headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=0, s-maxage=3600' },
   });
@@ -621,6 +651,23 @@ app.get('/og-route/:slug', async (c) => {
     });
   } catch (e) {
     console.error('og route render failed', e);
+    return c.redirect('/og-cover.png');
+  }
+});
+
+/* OG-картинка категории «что передают»: /og-carry/dokumenty.png */
+app.get('/og-carry/:slug', async (c) => {
+  const slug = (c.req.param('slug') ?? '').replace(/\.png$/, '');
+  const page = resolveCarryPage(slug);
+  if (!page) return c.redirect('/og-cover.png');
+  try {
+    const stat = await carryCategoryBoard(c.env, carryWordsFor(page.key)).catch(() => null);
+    const png = await renderRouteOg(carryOgSpec(page, stat), c.env);
+    return new Response(png.buffer as ArrayBuffer, {
+      headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' },
+    });
+  } catch (e) {
+    console.error('og carry render failed', e);
     return c.redirect('/og-cover.png');
   }
 });
