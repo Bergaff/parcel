@@ -1185,10 +1185,14 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
             const input: ListingInput = {
               ...fields,
               // В личке отправитель обычно и есть автор; но копию из защищённого
-              // чата шлёт радар (RADAR_USERNAMES) — его ник не контакт
+              // чата шлёт радар, а его аккаунты — админские (id совпадают с
+              // ADMIN_IDS): ник админа-отправителя контактом не бывает, ни
+              // подстановкой, ни из текста. RADAR_USERNAMES — для релея без
+              // админских прав
               telegram: validContact(env,
-                fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
-                [env.BOT_USERNAME, ...radarUsernames(env)]),
+                fields.telegram ?? (isAdminChat(env, msg) || !msg.from?.username ? null : `@${msg.from.username}`),
+                [env.BOT_USERNAME, ...radarUsernames(env),
+                 ...(isAdminChat(env, msg) && msg.from?.username ? [msg.from.username] : [])]),
               status: env.AUTO_APPROVE === '1' ? 'published' : 'pending',
               source,
               sourceChat: 'Личное сообщение боту',
@@ -1462,11 +1466,13 @@ async function handleGroupText(env: Env, msg: TgMessage): Promise<void> {
   const repeats: Repeat[] = [];
   const similarBy = new Map<string, { id: string; why: string }>();
   for (const fields of list) {
-    // Контакт — никогда не сам чат (включая «от имени группы») и не бот:
-    // только ник из текста или живой автор сообщения
+    // Контакт — никогда не сам чат (включая «от имени группы»), не бот и не
+    // аккаунт админа (радара): только ник из текста или живой автор сообщения
+    const senderIsAdmin = isAdminChat(env, msg);
     const telegram = validContact(env,
-      fields.telegram ?? (msg.from?.username ? `@${msg.from.username}` : null),
-      [msg.chat.username, msg.sender_chat?.username, env.BOT_USERNAME]);
+      fields.telegram ?? (senderIsAdmin || !msg.from?.username ? null : `@${msg.from.username}`),
+      [msg.chat.username, msg.sender_chat?.username, env.BOT_USERNAME, ...radarUsernames(env),
+       ...(senderIsAdmin && msg.from?.username ? [msg.from.username] : [])]);
     const input: ListingInput = {
       ...fields,
       telegram,

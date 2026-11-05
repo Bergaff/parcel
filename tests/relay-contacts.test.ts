@@ -262,6 +262,42 @@ describe('текстовая копия радара в личке — полн�
     expect(listings.get(String(ins.params[0]))!.telegram).toBe('@ivan_p');
   });
 
+  it('аккаунт радара = админский id: секрет RADAR_USERNAMES не нужен', async () => {
+    const { db, calls, listings } = statefulDb();
+    // ADMIN_IDS: '42' — и отправитель копии 42: ник админа не подставляется
+    const env = { ...baseEnv, RADAR_USERNAMES: '', DB: db } as unknown as Env;
+    await handleTelegramUpdate(env, pmFrom(830, { id: 42, username: 'Daniil06496' },
+      'Нужно передать 5 января Гродно — Белосток, конверт с документами, ссылка https://t.me/granica_belarus_chat/153043/153048'));
+    const ins = calls.find((c) => c.sql.includes('INSERT INTO listings'))!;
+    expect(listings.get(String(ins.params[0]))!.telegram).toBeNull();
+  });
+
+  it('ник админа-отправителя из текста тоже не становится контактом', async () => {
+    const { db, calls, listings } = statefulDb();
+    const env = { ...baseEnv, RADAR_USERNAMES: '', DB: db } as unknown as Env;
+    await handleTelegramUpdate(env, pmFrom(831, { id: 42, username: 'Daniil06496' },
+      'Нужно передать 5 января Гродно — Белосток, конверт, писать @Daniil06496'));
+    const ins = calls.find((c) => c.sql.includes('INSERT INTO listings'))!;
+    expect(listings.get(String(ins.params[0]))!.telegram).toBeNull();
+  });
+
+  it('в группе сообщение админа (радара) его ником не подписывается', async () => {
+    const { db, calls, listings } = statefulDb();
+    const env = { ...baseEnv, RADAR_USERNAMES: '', DB: db } as unknown as Env;
+    await handleTelegramUpdate(env, {
+      update_id: 832,
+      message: {
+        message_id: 832,
+        date: 1789000000,
+        chat: { id: -1001234567890, type: 'supergroup', title: 'Граница BY-LT-PL', username: 'granica_chat' } as never,
+        from: { id: 42, username: 'Daniil06496' } as never,
+        text: 'Нужно передать 5 января Гродно — Белосток, конверт с документами',
+      },
+    });
+    const ins = calls.find((c) => c.sql.includes('INSERT INTO listings'))!;
+    expect(listings.get(String(ins.params[0]))!.telegram, 'ник админа не контакт').toBeNull();
+  });
+
   it('старая копия с ником чата в тексте: ссылка-ответ радара стирает его из контакта', async () => {
     const { db, calls, listings } = statefulDb();
     const env = { ...baseEnv, DB: db } as unknown as Env;
