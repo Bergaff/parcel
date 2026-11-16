@@ -2209,6 +2209,8 @@ export async function listMostViewed(env: Env, limit = 10): Promise<Listing[]> {
        FROM stat_item_views v
        JOIN listings l ON l.id = v.listing_id
       WHERE v.bot = 0 AND v.own = 0
+        AND NOT EXISTS (SELECT 1 FROM stat_js_flags f
+                         WHERE f.day = v.day AND f.vid = v.vid AND f.score >= 3)
         AND l.status IN ('published', 'expired') AND (l.hidden IS NULL OR l.hidden != 1)
       GROUP BY v.listing_id
       ORDER BY human_views DESC, datetime(COALESCE(l.published_at, l.created_at)) DESC

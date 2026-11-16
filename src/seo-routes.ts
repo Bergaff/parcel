@@ -497,7 +497,26 @@ ${opts.body}
   <script>
     // маячок статистики: «браузер живой» — тот же сигнал, что app.js отправляет
     // с доски. У SEO-страниц своего app.js нет, поэтому шлём прямо отсюда.
-    try { fetch('/api/visit-confirm', { keepalive: true }).catch(function () {}); } catch (e) { /* не важно */ }
+    // ?s= — сигналы браузера (webdriver, экран, языки, часовой пояс, платформа):
+    // сервер отличает живых людей от headless-автоматики, которая JS исполняет.
+    try {
+      var __sig = JSON.stringify({
+        wd: navigator.webdriver ? 1 : 0,
+        tz: (window.Intl && Intl.DateTimeFormat().resolvedOptions().timeZone) || '',
+        tzo: new Date().getTimezoneOffset(),
+        w: screen.width || 0,
+        h: screen.height || 0,
+        dpr: window.devicePixelRatio || 0,
+        lang: (navigator.languages && navigator.languages[0]) || navigator.language || '',
+        langs: navigator.languages ? navigator.languages.length : 0,
+        cores: navigator.hardwareConcurrency || 0,
+        touch: navigator.maxTouchPoints || 0,
+        plat: navigator.platform || ''
+      });
+      fetch('/api/visit-confirm?s=' + encodeURIComponent(__sig), { keepalive: true }).catch(function () {});
+    } catch (e) {
+      try { fetch('/api/visit-confirm', { keepalive: true }).catch(function () {}); } catch (e2) { /* не важно */ }
+    }
     try {
       if (!localStorage.getItem('poputka_cookie_ok')) {
         var cookieNote = document.getElementById('cookie-note');

@@ -99,12 +99,23 @@ app.use('*', async (c, next) => {
   } catch { /* статистика не должна ломать сайт */ }
 });
 
-/* Маячок «браузер живой»: app.js дёргает его при загрузке страницы —
-   посетитель дня помечается как подтверждённый JavaScript-ом */
+/* Маячок «браузер живой»: app.js и SEO-страницы дёргают его при загрузке
+   страницы — посетитель дня помечается как подтверждённый JavaScript-ом.
+   Параметр ?s= несёт сигналы браузера (JSON: webdriver, экран, языки,
+   часовой пояс, платформа): headless-фермы на резидентных прокси маячок
+   исполняют, но проваливают проверку сигналами и в живую аудиторию не
+   попадают (повод — псевдоживой «буст Америки» в неделе 10–16.11).
+   GET сохранён: старый app.js из кэша шлёт маячок без параметров. */
 app.get('/api/visit-confirm', (c) => {
   c.header('Cache-Control', 'no-store');
+  const cf = (c.req.raw as { cf?: { country?: string } }).cf;
   c.executionCtx.waitUntil(
-    confirmJsVisit(c.env, { ip: getIp(c), ua: c.req.header('user-agent') ?? '' })
+    confirmJsVisit(c.env, {
+      ip: getIp(c),
+      ua: c.req.header('user-agent') ?? '',
+      signals: (c.req.query('s') ?? '').slice(0, 2000),
+      country: cf?.country ?? null,
+    }).catch(() => undefined)
   );
   return c.body(null, 204);
 });

@@ -136,7 +136,8 @@ describe('агрегаты медиакита без «своих»', () => {
 describe('страница медиакита говорит о пометке', () => {
   const base: AudienceStats = {
     days: 7, generatedAt: '2026-10-19T12:00:00Z', coveredDays: 5, avgUniques: 4, views: 20,
-    rawViews: 40, uniquesSum: 20, pagesPerVisitor: '1,0', botsFiltered: 20, daily: [],
+    rawViews: 40, uniquesSum: 20, pagesPerVisitor: '1,0', botsFiltered: 20,
+    autoViews: 0, autoVisitors: 0, daily: [],
     countries: [], dcViews: 0, ownViews: 0, devices: [], os: [], sources: [], referrers: [],
     pages: [], bot: { total: 2, active: 1, groups: 1, privates: 1 },
   };

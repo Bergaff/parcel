@@ -200,10 +200,12 @@ describe('страница и CSV', () => {
     uniquesSum: 84,
     pagesPerVisitor: '1,7',
     botsFiltered: 30,
+    autoViews: 0,
+    autoVisitors: 0,
     daily: [
-      { day: '2026-09-30', uniques: 20, views: 33, bots: 3 },
-      { day: '2026-10-01', uniques: 28, views: 48, bots: 10 },
-      { day: '2026-10-02', uniques: 36, views: 60, bots: 17 },
+      { day: '2026-09-30', uniques: 20, views: 33, bots: 3, auto: 0 },
+      { day: '2026-10-01', uniques: 28, views: 48, bots: 10, auto: 0 },
+      { day: '2026-10-02', uniques: 36, views: 60, bots: 17, auto: 0 },
     ],
     countries: [
       { country: 'RU', views: 12, share: 25 },
@@ -263,8 +265,8 @@ describe('страница и CSV', () => {
   it('CSV: заголовок, строки, BOM для Excel', () => {
     const csv = renderDailyCsv(audience.daily);
     expect(csv.startsWith('\uFEFF')).toBe(true);
-    expect(csv).toContain('day;visitors_live;views_live;bots_filtered');
-    expect(csv).toContain('2026-10-01;28;48;10');
+    expect(csv).toContain('day;visitors_live;views_live;auto_cut;bots_filtered');
+    expect(csv).toContain('2026-10-01;28;48;0;10');
     expect(csv.split('\n')).toHaveLength(5); // заголовок + 3 строки + пустой хвост
   });
 

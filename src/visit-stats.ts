@@ -58,6 +58,104 @@ export function isDatacenterOrg(asOrg: string | null | undefined): boolean {
   return Boolean(asOrg) && DC_ORG.test(asOrg!);
 }
 
+/* ------------------------------------------------------------------ */
+/* Браузерные автоматы (псевдоживой трафик)                            */
+/* ------------------------------------------------------------------ */
+
+/** Порог баллов: начиная с него посетитель дня не считается живым. */
+export const AUTO_SCORE = 3;
+
+/** Предел длины полезной нагрузки маячка: сигналы крошечные, больше — мусор. */
+const SIGNALS_MAX = 2000;
+
+/** Страны Америки, где часовой пояс UTC+0 у местного жителя почти невозможен. */
+const UTC_IMPOSSIBLE = new Set(['US', 'CA', 'MX', 'BR', 'AR', 'CL', 'CO', 'PE', 'VE']);
+
+export interface ClientSignals { score: number; flags: string[] }
+
+/**
+ * Оценка браузера по сигналам маячка (navigator/screen/Intl) и User-Agent.
+ *
+ * Повод: неделя 10–16.11.2026 — «живые» просмотры США выросли 22→374.
+ * Headless-фермы на резидентных прокси научились исполнять JS-маячок и
+ * попадали в живую аудиторию. Автоматы выдаёт то, что у настоящего браузера
+ * есть всегда: navigator.webdriver, нулевой экран и плотность пикселей,
+ * пустые языки, «телефон» без касаний, платформа не из User-Agent,
+ * часовой пояс UTC у посетителя из Америки.
+ *
+ * Оценка нарочно мягкая: каждый сигнал по отдельности (кроме webdriver)
+ * ниже порога — настоящий посетитель с причудливым браузером (защита
+ * приватности, старое устройство) не отсекается; для отсечения нужно
+ * несколько совпадений сразу. Нет полезной нагрузки (старый app.js из
+ * кэша) — оценка 0: лучше недорезать, чем потерять живых людей.
+ */
+export function scoreClientSignals(
+  raw: string | null | undefined,
+  ua: string,
+  country?: string | null
+): ClientSignals {
+  const flags: string[] = [];
+  let score = 0;
+  let p: Record<string, unknown> | null = null;
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (text && text.length <= SIGNALS_MAX) {
+    try {
+      const v: unknown = JSON.parse(text);
+      if (v && typeof v === 'object' && !Array.isArray(v)) p = v as Record<string, unknown>;
+    } catch { /* мусор — как будто нагрузки нет */ }
+  }
+  if (!p) return { score: 0, flags };
+
+  const num = (k: string): number => {
+    const v = p?.[k];
+    return typeof v === 'number' && Number.isFinite(v) ? v : Number.NaN;
+  };
+  const str = (k: string): string => { const v = p?.[k]; return typeof v === 'string' ? v : ''; };
+  const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(p, k);
+
+  // navigator.webdriver — штатный флаг Selenium/Puppeteer/Playwright.
+  if (p['wd'] === 1 || p['wd'] === true) { score += 4; flags.push('webdriver'); }
+  // Экран: у настоящего браузера размеры всегда есть и они осмысленные;
+  // headless часто рапортует 0×0 (сам размер 800×600 уликой не считается).
+  if (has('w') || has('h')) {
+    const w = num('w'); const h = num('h');
+    if ((Number.isFinite(w) && w < 100) || (Number.isFinite(h) && h < 100)) { score += 2; flags.push('screen'); }
+  }
+  // devicePixelRatio = 0 в настоящих браузерах не бывает.
+  const dpr = num('dpr');
+  if (Number.isFinite(dpr) && dpr <= 0) { score += 2; flags.push('dpr'); }
+  // Число ядер: 0 или неправдоподобно много — следы эмуляции.
+  const cores = num('cores');
+  if (Number.isFinite(cores) && (cores <= 0 || cores > 128)) { score += 2; flags.push('cores'); }
+  // Язык: у живого браузера он есть всегда (хотя бы системный).
+  if (has('lang') && !str('lang')) { score += 2; flags.push('lang'); }
+  const langs = num('langs');
+  if (Number.isFinite(langs) && langs <= 0) { score += 1; flags.push('langs'); }
+  // User-Agent говорит «телефон», а касаний нет: телефон без тачскрина не бывает.
+  const touch = num('touch');
+  const cls = classifyUserAgent(ua);
+  if (cls.device === 'Телефон' && Number.isFinite(touch) && touch <= 0) { score += 2; flags.push('touch'); }
+  // navigator.platform против User-Agent: «Windows» поверх Linux x86_64 —
+  // подделка. iOS не трогаем: там в UA «like Mac OS X», а платформа — iPhone.
+  const plat = str('plat').toLowerCase();
+  const uaLow = ua.toLowerCase();
+  if (plat) {
+    const win = uaLow.includes('windows');
+    const mac = uaLow.includes('macintosh')
+      || (uaLow.includes('mac os x') && !uaLow.includes('like mac os x'));
+    if ((win && !plat.startsWith('win')) || (mac && !plat.startsWith('mac'))) {
+      score += 2; flags.push('plat');
+    }
+  }
+  // Часовой пояс UTC+0 у посетителя с IP в Америках: headless без настройки
+  // TZ. Европейцев не трогаем — Великобритания и Португалия живут в UTC+0.
+  const tzo = num('tzo');
+  if (Number.isFinite(tzo) && tzo === 0 && country && UTC_IMPOSSIBLE.has(country.toUpperCase())) {
+    score += 2; flags.push('tz');
+  }
+  return { score, flags };
+}
+
 export interface RefInfo { group: string; host: string | null }
 
 /**
@@ -156,6 +254,15 @@ export function ensureStatTables(env: Env): Promise<void> {
           dc INTEGER NOT NULL DEFAULT 0, ref_group TEXT, ref_host TEXT)`),
         env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_stat_views_day ON stat_views(day)'),
         env.DB.prepare('CREATE TABLE IF NOT EXISTS stat_js (day TEXT NOT NULL, vid TEXT NOT NULL, PRIMARY KEY (day, vid))'),
+        // Браузеры, подтвердившие маячок, но провалившие проверку сигналами
+        // (scoreClientSignals): headless-автоматика на резидентных прокси.
+        // Такие посетители дня не попадают в живые цифры медиакита. Храним
+        // 400 дней — как stat_item_views: «просмотры карточек людьми»
+        // считаются за всё время и ретро-отсечение должно работать.
+        env.DB.prepare(`CREATE TABLE IF NOT EXISTS stat_js_flags (
+          day TEXT NOT NULL, vid TEXT NOT NULL,
+          score INTEGER NOT NULL DEFAULT 0, flags TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL, PRIMARY KEY (day, vid))`),
         // Просмотры конкретных заявок (отчёт «Самые просматриваемые»). Одна
         // строка на человека в сутки на заявку (PRIMARY KEY day+listing+vid):
         // обновление страницы не накручивает счётчик. bot/own — чтобы считать
@@ -284,14 +391,32 @@ export async function setOwnVisitor(
   return vid;
 }
 
-/** Маячок из app.js: браузер живой. Отмечает посетителя дня как подтверждённого. */
-export async function confirmJsVisit(env: Env, v: { ip: string; ua: string }): Promise<void> {
+/** Маячок из app.js: браузер живой. Отмечает посетителя дня как подтверждённого.
+ *  `signals` — JSON с признаками браузера из маячка (параметр ?s=): посетители,
+ *  набравшие AUTO_SCORE и больше, уходят в stat_js_flags и в живые агрегаты
+ *  медиакита не попадают (headless-фермы тоже исполняют JS). */
+export async function confirmJsVisit(
+  env: Env,
+  v: { ip: string; ua: string; signals?: string | null; country?: string | null }
+): Promise<void> {
   const ua = classifyUserAgent(v.ua);
   if (ua.bot) return;
   await ensureStatTables(env);
   const day = new Date().toISOString().slice(0, 10);
   const vid = await visitorId(v.ip, v.ua, day, await ensureSalt(env));
   await env.DB.prepare('INSERT OR IGNORE INTO stat_js (day, vid) VALUES (?, ?)').bind(day, vid).run();
+  const sig = scoreClientSignals(v.signals ?? '', v.ua, v.country ?? null);
+  if (sig.score >= AUTO_SCORE) {
+    // повторные маячки того же посетителя дня: берём максимум оценки
+    // (поведение за день могло «улучшиться» в худшую сторону), флаг не снимаем
+    await env.DB.prepare(
+      `INSERT INTO stat_js_flags (day, vid, score, flags, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(day, vid) DO UPDATE SET
+         flags = CASE WHEN excluded.score > score THEN excluded.flags ELSE flags END,
+         score = MAX(score, excluded.score),
+         updated_at = excluded.updated_at`
+    ).bind(day, vid, sig.score, sig.flags.join(','), new Date().toISOString()).run();
+  }
 }
 
 /** Помнить чаты, в которых бот работает (для блока Telegram-бота). */
@@ -311,6 +436,9 @@ export async function pruneVisitStats(env: Env): Promise<void> {
     env.DB.prepare("DELETE FROM stat_views WHERE day < date('now', '-90 days')"),
     env.DB.prepare("DELETE FROM stat_js WHERE day < date('now', '-90 days')"),
     env.DB.prepare("DELETE FROM stat_item_views WHERE day < date('now', '-400 days')"),
+    // метки автоматов живут столько же, сколько просмотры заявок:
+    // «просмотров карточек людьми» — счётчик за всё время
+    env.DB.prepare("DELETE FROM stat_js_flags WHERE day < date('now', '-400 days')"),
   ]);
 }
 
@@ -319,11 +447,15 @@ export async function pruneVisitStats(env: Env): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 /** День динамики: посетители и просмотры — живая аудитория (JS-маячок),
+ *  auto — сколько просмотров в этот день срезано как браузерные автоматы,
  *  bots — сколько роботов отфильтровано в этот день. */
-export interface AudienceDaily { day: string; uniques: number; views: number; bots: number }
+export interface AudienceDaily { day: string; uniques: number; views: number; bots: number; auto: number }
 
-/** Просмотры живой аудитории: посетитель в этот день подтверждён JS-маячком. */
-const LIVE_JOIN = 'JOIN stat_js j ON j.day = v.day AND j.vid = v.vid';
+/** Просмотры живой аудитории: посетитель в этот день подтверждён JS-маячком
+ *  и его браузер прошёл проверку сигналами (stat_js_flags — headless-фермы,
+ *  исполняющие маячок, из живых цифр исключены). */
+const LIVE_JOIN = `JOIN stat_js j ON j.day = v.day AND j.vid = v.vid
+   AND NOT EXISTS (SELECT 1 FROM stat_js_flags f WHERE f.day = v.day AND f.vid = v.vid AND f.score >= ${AUTO_SCORE})`;
 
 /* Без «своих» визитов: владелец сайта заходит на доску сам, и эти просмотры
    не должны попадать ни в медиакит, ни в оценку поискового трафика
@@ -342,6 +474,11 @@ export interface AudienceStats {
   uniquesSum: number;
   pagesPerVisitor: string;
   botsFiltered: number;
+  /** Просмотры псевдоживых посетителей: JS-маячок исполнили, но проверку
+   *  сигналами браузера провалили (headless-автоматика) — срезаны. */
+  autoViews: number;
+  /** Сколько таких «посетителей» (сумма суточных уникальных). */
+  autoVisitors: number;
   daily: AudienceDaily[];
   countries: Array<{ country: string; views: number; share: number }>;
   dcViews: number;
@@ -371,8 +508,9 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
   const dayList = lastDays(days);
   const from = dayList[0]!;
 
-  // порядок важен: ownRes — счётчик «своих» просмотров, botRes — последний (чат-боты)
-  const [liveByDay, rawByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, ownRes, botRes] = await Promise.all([
+  // порядок важен: ownRes — счётчик «своих» просмотров, botRes — чат-боты,
+  // autoRes — сколько срезано браузерных автоматов (по дням)
+  const [liveByDay, rawByDay, geo, dcRes, devRes, osRes, srcRes, refRes, pageRes, ownRes, botRes, autoRes] = await Promise.all([
     env.DB.prepare(
       `SELECT v.day, COUNT(DISTINCT v.vid) AS uniques, COUNT(*) AS views
        FROM stat_views v ${LIVE_JOIN} WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY v.day`
@@ -420,6 +558,14 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
               SUM(CASE WHEN CAST(chat_id AS INTEGER) < 0 THEN 1 ELSE 0 END) AS groups
        FROM stat_bot_chats`
     ).bind(new Date(Date.now() - days * 86400e3).toISOString()).first(),
+    // псевдоживой трафик: маячок исполнили, но проверку сигналами провалили.
+    // В живые цифры (LIVE_JOIN) не входит — показываем отдельной строкой.
+    env.DB.prepare(
+      `SELECT v.day, COUNT(*) AS views, COUNT(DISTINCT v.vid) AS visitors
+       FROM stat_views v
+       JOIN stat_js_flags f ON f.day = v.day AND f.vid = v.vid AND f.score >= ${AUTO_SCORE}
+       WHERE v.day >= ? AND v.bot = 0 ${NOT_OWN} GROUP BY v.day`
+    ).bind(from).all(),
   ]);
 
   // динамика по дням — живая аудитория; роботы идут отдельным столбцом
@@ -431,11 +577,17 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
   for (const r of (rawByDay.results ?? []) as unknown as Array<{ day: string; total: number; bots: number }>) {
     rawMap.set(String(r.day), { total: Number(r.total ?? 0), bots: Number(r.bots ?? 0) });
   }
+  // vid солится датой, поэтому суточные уникалы суммируются без пересечений
+  const autoMap = new Map<string, { views: number; visitors: number }>();
+  for (const r of (autoRes.results ?? []) as unknown as Array<{ day: string; views: number; visitors: number }>) {
+    autoMap.set(String(r.day), { views: Number(r.views ?? 0), visitors: Number(r.visitors ?? 0) });
+  }
   const daily: AudienceDaily[] = dayList.map((day) => ({
     day,
     uniques: liveMap.get(day)?.uniques ?? 0,
     views: liveMap.get(day)?.views ?? 0,
     bots: rawMap.get(day)?.bots ?? 0,
+    auto: autoMap.get(day)?.views ?? 0,
   }));
 
   const views = daily.reduce((a, d) => a + d.views, 0);
@@ -460,6 +612,8 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
     uniquesSum,
     pagesPerVisitor: uniquesSum > 0 ? (views / uniquesSum).toFixed(1).replace('.', ',') : '0',
     botsFiltered: daily.reduce((a, d) => a + d.bots, 0),
+    autoViews: daily.reduce((a, d) => a + d.auto, 0),
+    autoVisitors: dayList.reduce((a, day) => a + (autoMap.get(day)?.visitors ?? 0), 0),
     daily,
     countries: withShare(((geo.results ?? []) as unknown as Array<{ country: string; n: number }>)
       .map((r) => ({ country: String(r.country), views: Number(r.n) })), (r) => r.views, views),
@@ -489,11 +643,12 @@ export async function gatherVisitStats(env: Env, days: number): Promise<Audience
 /* CSV                                                                 */
 /* ------------------------------------------------------------------ */
 
-/** Ежедневная таблица в CSV (для Excel — с BOM и точкой с запятой). */
+/** Ежедневная таблица в CSV (для Excel — с BOM и точкой с запятой).
+ *  auto_cut — просмотры, срезанные как браузерные автоматы. */
 export function renderDailyCsv(daily: AudienceDaily[]): string {
-  const lines = ['day;visitors_live;views_live;bots_filtered'];
+  const lines = ['day;visitors_live;views_live;auto_cut;bots_filtered'];
   for (const d of daily) {
-    lines.push(`${d.day};${d.uniques};${d.views};${d.bots}`);
+    lines.push(`${d.day};${d.uniques};${d.views};${d.auto};${d.bots}`);
   }
   return `\uFEFF${lines.join('\n')}\n`;
 }
@@ -575,7 +730,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
          <div class="media-tile"><b>${opts.board.onBoard}</b><span>объявлений на доске</span></div>
          <div class="media-tile"><b>${opts.board.last30Arrived}</b><span>новых заявок за 30 дней</span></div>
          <div class="media-tile"><b>${opts.board.last30Cities}</b><span>городов в обороте</span></div>
-         <div class="media-tile" title="Живые люди: один человек на заявку в сутки, без роботов и визитов владельца"><b>${opts.board.viewsTotal}</b><span>просмотров карточек людьми</span></div>
+         <div class="media-tile" title="Живые люди: один человек на заявку в сутки, без роботов, визитов владельца и браузерных автоматов"><b>${opts.board.viewsTotal}</b><span>просмотров карточек людьми</span></div>
        </div>`
     : '';
 
@@ -588,6 +743,13 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   const rawNote = a.views > 0
     ? `<p class="plain">Все цифры на странице — только живая аудитория: посетители, чей браузер исполнил JavaScript. Сырых просмотров за период — ${a.rawViews}, из них живых — ${a.views}; остальные — роботы и скрипты (${a.botsFiltered} отфильтровано по User-Agent, часть идёт с браузерными User-Agent и отсечена маячком) и посетители с выключенным JavaScript.</p>`
     : `<p class="plain">За период не зафиксировано живых посетителей (браузер с JavaScript) — показывать нечего. Сырых просмотров — ${a.rawViews}, роботов отфильтровано — ${a.botsFiltered}.</p>`;
+  // псевдоживой трафик: исполнили JS-маячок, но провалили проверку сигналами
+  // браузера (headless-фермы на резидентных прокси — повод: «буст Америки»
+  // в неделе 10–16.11, США 22→374 просмотра). Числа не прячем: срез показан
+  // отдельной строкой, в живые цифры он не входит.
+  const autoNote = a.autoViews > 0
+    ? `<p class="plain">Отсечено как браузерные автоматы: ${a.autoViews} ${plural(a.autoViews, 'просмотр', 'просмотра', 'просмотров')} у ${a.autoVisitors} ${plural(a.autoVisitors, 'псевдопосетителя', 'псевдопосетителей', 'псевдопосетителей')}. Эти браузеры исполнили JavaScript-маячок, но не прошли проверку сигналами (флаг автоматизации, нулевой экран, пустые языки, несовпадение часового пояса, платформы и страны) — в живые цифры они не входят.</p>`
+    : '';
   // «не считать меня»: владелец сайта заходит на доску сам, и без пометки его
   // просмотры выглядят как аудитория (повод — «РБ это я мог быть» в разборе
   // Search Console). Цифры выше уже без помеченных визитов.
@@ -606,7 +768,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
   const pages = sectionTable('Страницы', a.pages.map((d) => ({ a: esc(d.name), b: String(d.views), c: String(d.share).replace('.', ',') })));
 
   const dayRows = a.daily.slice().reverse().map((d) =>
-    `<tr><td class="mono">${d.day}</td><td>${d.uniques}</td><td>${d.views}</td><td>${d.bots}</td></tr>`).join('');
+    `<tr><td class="mono">${d.day}</td><td>${d.uniques}</td><td>${d.views}</td><td>${d.auto}</td><td>${d.bots}</td></tr>`).join('');
 
   const period = (n: number) => `<a class="media-period${a.days === n ? ' on' : ''}" href="/mediakit?days=${n}">${n === 1 ? '24 часа' : `${n} дней`}</a>`;
 
@@ -660,6 +822,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
 
   <div class="media-grid">${tiles}</div>
   ${rawNote}
+  ${autoNote}
   ${ownNote}
 
   ${board}
@@ -681,7 +844,7 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
 
   <h2 class="rule-head">Динамика по дням (таблица)</h2>
   <table class="stats-table stats-table-wide">
-    <thead><tr><th>Дата</th><th>Живые посетители</th><th>Просмотры страниц</th><th>Роботов отфильтровано</th></tr></thead>
+    <thead><tr><th>Дата</th><th>Живые посетители</th><th>Просмотры страниц</th><th>Отсечено автоматов</th><th>Роботов отфильтровано</th></tr></thead>
     <tbody>${dayRows}</tbody>
   </table>
 
@@ -690,8 +853,9 @@ export function renderAudiencePage(opts: AudiencePageOpts): string {
     <li>Учитываются только люди: поисковые роботы, превью ссылок в мессенджерах, ИИ-краулеры, скрипты и мониторинги определяются по User-Agent и исключаются (но считаются в «отфильтровано роботов»).</li>
     <li>Уникальный посетитель — обезличенный суточный идентификатор (хеш соли, даты, IP-адреса и браузера; сам IP не хранится). За период выводится сумма и среднее суточных значений.</li>
     <li>Просмотр страницы засчитывается при каждом открытии страниц доски (включая ответы из CDN-кэша), если браузер посетителя подтвердил себя JavaScript-маячком.</li>
-    <li>«Просмотров карточек людьми» — сколько раз живые люди открывали карточки заявок: один человек на одну заявку в сутки, без роботов и визитов владельца; считаются и прямые заходы (из поиска и мессенджеров), и клики по доске. Накапливаются с момента включения честного счётчика.</li>
-    <li>Живой посетитель — чей браузер выполнил JavaScript страницы (маячок в app.js и на SEO-страницах). Все показатели страницы — плитки, график, таблицы и CSV — считаются по живой аудитории; сырые просмотры и отфильтрованные роботы — в примечании под плитками.</li>
+    <li>«Просмотров карточек людьми» — сколько раз живые люди открывали карточки заявок: один человек на одну заявку в сутки, без роботов, визитов владельца и браузерных автоматов; считаются и прямые заходы (из поиска и мессенджеров), и клики по доске. Накапливаются с момента включения честного счётчика.</li>
+    <li>Живой посетитель — чей браузер выполнил JavaScript страницы (маячок в app.js и на SEO-страницах) и прошёл проверку сигналами браузера. Все показатели страницы — плитки, график, таблицы и CSV — считаются по живой аудитории; сырые просмотры и отфильтрованные роботы — в примечании под плитками.</li>
+    <li>Проверка сигналами: маячок передаёт признак автоматизации (navigator.webdriver), размер экрана и плотность пикселей, языки браузера, число ядер процессора, поддержку касаний, платформу и часовой пояс. Скраперы и фермы на резидентных прокси JavaScript исполняют, но выдают себя этими сигналами — их просмотры исключаются из живых цифр и показываются отдельно («Отсечено автоматов»). Оценка мягкая: для исключения нужно несколько несовпадений сразу, настоящий посетитель с необычным браузером не отсекается.</li>
     <li>География, устройства, операционные системы, источники и страницы считаются только по живой аудитории (подтверждённой маячком): боты, подделывающие браузерные User-Agent, приходят в основном из дата-центров и сильно искажают сырую картину.</li>
     <li>География — по IP-адресу (Cloudflare). Посетители через VPN учитываются по стране VPN-сервера и отмечаются отдельной строкой.</li>
     <li>Источник трафика определяется по заголовку Referer при входе на сайт; переходы внутри сайта не считаются.</li>

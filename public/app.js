@@ -3103,7 +3103,29 @@ async function init() {
   // исполняют). Если ниже что-то бросит исключение в редком браузере,
   // посетитель всё равно уже отмечен — на /mediakit это «подтверждены
   // браузером» и вся таблица живой аудитории.
-  try { fetch('/api/visit-confirm', { keepalive: true }).catch(() => {}); } catch { /* не важно */ }
+  // Параметр ?s= несёт сигналы браузера (флаг автоматизации webdriver,
+  // экран, языки, часовой пояс, платформа): headless-фермы на резидентных
+  // прокси тоже исполняют JS, но проваливают проверку сигналами — сервер
+  // режет их из живых цифр медиакита. Если сигналы собрать не удалось
+  // (совсем старый браузер), шлём голый маячок — живых не теряем.
+  try {
+    const sig = JSON.stringify({
+      wd: navigator.webdriver ? 1 : 0,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+      tzo: new Date().getTimezoneOffset(),
+      w: screen.width || 0,
+      h: screen.height || 0,
+      dpr: window.devicePixelRatio || 0,
+      lang: (navigator.languages && navigator.languages[0]) || navigator.language || '',
+      langs: navigator.languages ? navigator.languages.length : 0,
+      cores: navigator.hardwareConcurrency || 0,
+      touch: navigator.maxTouchPoints || 0,
+      plat: navigator.platform || '',
+    });
+    fetch(`/api/visit-confirm?s=${encodeURIComponent(sig)}`, { keepalive: true }).catch(() => {});
+  } catch {
+    try { fetch('/api/visit-confirm', { keepalive: true }).catch(() => {}); } catch { /* не важно */ }
+  }
 
   setToday();
   bindBoard();

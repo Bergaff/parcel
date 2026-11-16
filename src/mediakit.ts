@@ -65,9 +65,13 @@ export async function gatherMediaStats(env: Env): Promise<MediaStats> {
     // заходы (поиск, мессенджеры), и клики по доске. Раньше здесь был
     // SUM(listings.views) — сырой счётчик: только клики внутри сайта, боты и
     // обновления страницы его накручивали (повод — «цифры не должны врать»).
+    // Браузерные автоматы (stat_js_flags — headless-фермы, исполняющие
+    // JS-маячок; порог AUTO_SCORE в visit-stats.ts) тоже не люди.
     // Таблица появляется вместе со счётчиком: пока её нет, показываем 0.
     (await env.DB.prepare(
-      'SELECT COUNT(*) AS v FROM stat_item_views WHERE bot = 0 AND own = 0'
+      `SELECT COUNT(*) AS v FROM stat_item_views iv WHERE iv.bot = 0 AND iv.own = 0
+         AND NOT EXISTS (SELECT 1 FROM stat_js_flags f
+                          WHERE f.day = iv.day AND f.vid = iv.vid AND f.score >= 3)`
     ).first().catch(() => ({ v: 0 }))) as { v: number } | null,
   ]);
 

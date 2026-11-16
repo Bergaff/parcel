@@ -127,6 +127,8 @@ describe('listMostViewed — отчёт из stat_item_views', () => {
     const q = calls.find((c) => /FROM stat_item_views/.test(c.sql))!;
     expect(q.sql).toMatch(/JOIN listings l ON l\.id = v\.listing_id/);
     expect(q.sql).toMatch(/v\.bot = 0 AND v\.own = 0/);
+    // браузерные автоматы (headless, исполняющий JS-маячок) — не люди
+    expect(q.sql).toContain('stat_js_flags');
     expect(q.sql).toMatch(/GROUP BY v\.listing_id/);
     expect(q.sql).toMatch(/ORDER BY human_views DESC/);
     expect(q.params[0]).toBe(10);
