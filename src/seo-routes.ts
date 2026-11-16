@@ -19,6 +19,7 @@
  */
 import type { Env, Listing } from './types';
 import { escapeHtml } from './util';
+import { METRIKA_SNIPPET } from './metrika';
 import {
   getChatLinks, getCounts, listCityStats, listListings, listRoutePairs, listSitemapItems,
   type CityStat, type RoutePair,
@@ -419,6 +420,9 @@ export function seoPageShell(opts: {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#f2eee5" />
+  <!-- Яндекс.Метрика — в самом начале head (требование Яндекса: успеть
+       отправить просмотр, даже если страницу сразу закрыли). src/metrika.ts -->
+  ${METRIKA_SNIPPET}
   <title>${escapeHtml(opts.title)}</title>
   <meta name="description" content="${escapeHtml(opts.description)}" />
   ${headMeta({
@@ -491,7 +495,7 @@ ${opts.body}
     <p class="foot-meta">нашли фейк — жалоба из карточки объявления</p>
   </footer>
   <div id="cookie-note" class="cookie-note" hidden>
-    <span>Сайт работает без рекламных cookies и трекеров — localStorage нужен только для работы доски.</span>
+    <span>Для статистики посещений сайт использует Яндекс.Метрику (cookies, запись сессий); localStorage нужен только для работы доски.</span>
     <button type="button" id="cookie-ok">понятно</button>
   </div>
   <script>

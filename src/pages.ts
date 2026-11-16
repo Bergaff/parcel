@@ -15,6 +15,7 @@ import { plural, fmtDayShort, fmtPeriod, fmtPeriodGen, currentPeriod } from './f
 import { breadcrumbsLd, itemListLd, listingLd, webSiteLd, faqPageLd, SITE_NAME } from './seo';
 import { isArchived, renderDetailHtml, renderRowsHtml, renderShell, readShellTemplate, type View } from './ssr';
 import { seoPageShell, routePathFor, mastheadData } from './seo-routes';
+import { METRIKA_SNIPPET } from './metrika';
 import { listMonthStats, refreshStats, parseMonthPayload, fallbackSummary, type MonthStat } from './stats';
 import { getMonthSnapshot } from './store';
 import { fmtAmount, CURRENCY_LABEL } from './price';
@@ -339,7 +340,7 @@ export async function buildNotFoundPage(env: Env, origin: string, message?: stri
     page = '';
   }
   if (!page) {
-    page = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>Не найдено — ${escapeHtml(SITE_NAME)}</title></head><body><h1>404</h1><p>${escapeHtml(message ?? 'Страница не найдена.')}</p><p><a href="/">на доску</a></p></body></html>`;
+    page = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">${METRIKA_SNIPPET}<title>Не найдено — ${escapeHtml(SITE_NAME)}</title></head><body><h1>404</h1><p>${escapeHtml(message ?? 'Страница не найдена.')}</p><p><a href="/">на доску</a></p></body></html>`;
   }
   page = page
     .replace('<!--404_MESSAGE-->', message ? `<p class="empty-note">${escapeHtml(message)}</p>` : '')

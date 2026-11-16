@@ -91,6 +91,8 @@ describe('авария D1 — честный 503 вместо голого 500',
     expect(html).toContain('Сайт временно не отвечает');
     expect(html).toContain('Попутка');
     expect(html).not.toContain('Internal Server Error');
+    // Метрика стоит и на странице аварии: сбой видно по всплеску 503-х
+    expect(html).toContain('mc.yandex.ru/metrika/tag.js?id=114285172');
     expect(cachePuts).toHaveLength(0);
   });
 

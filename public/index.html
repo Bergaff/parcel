@@ -4,6 +4,23 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#f2eee5" />
+  <!-- Яндекс.Метрика — в самом начале head (требование Яндекса: успеть
+       отправить просмотр, даже если страницу сразу закрыли). SSR главной
+       подменяет только SEO-блок ниже — сниппет переживает подмену.
+       Держит дословно тот же код, что src/metrika.ts (проверяет тест). -->
+<!-- Yandex.Metrika counter -->
+<script type="text/javascript">
+    (function(m,e,t,r,i,k,a){
+        m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};
+        m[i].l=1*new Date();
+        for (var j = 0; j < document.scripts.length; j++) {if (document.scripts[j].src === r) { return; }}
+        k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)
+    })(window, document,'script','https://mc.yandex.ru/metrika/tag.js?id=114285172', 'ym');
+
+    ym(114285172, 'init', {ssr:true, webvisor:true, clickmap:true, ecommerce:"dataLayer", referrer: document.referrer, url: location.href, accurateTrackBounce:true, trackLinks:true});
+</script>
+<noscript><div><img src="https://mc.yandex.ru/watch/114285172" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
+<!-- /Yandex.Metrika counter -->
   <!-- Заголовок, описание, canonical, OG и JSON-LD. Воркер подставляет сюда
        данные конкретной страницы (src/ssr.ts); ниже — значения для главной,
        чтобы страница работала и без воркера. -->
@@ -630,7 +647,7 @@
        только для работы доски (ключ админки, настройки). Маркер доверия:
        поисковики видят честную политику, человек — что его не отслеживают. -->
   <div id="cookie-note" class="cookie-note" hidden>
-    <span>Сайт работает без рекламных cookies и трекеров — localStorage нужен только для работы доски.</span>
+    <span>Для статистики посещений сайт использует Яндекс.Метрику (cookies, запись сессий); localStorage нужен только для работы доски.</span>
     <button type="button" id="cookie-ok">понятно</button>
   </div>
 

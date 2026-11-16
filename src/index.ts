@@ -18,6 +18,7 @@ import { contactKeyOf, filterHiddenPairs, formatMatchDigest, listingSnapshot, lo
 import { forumReachStats, handleTelegramUpdate, notifyAdmins, notifyAdminsConflict, notifyAdminsDigest, notifyAdminsHiddenRequest, notifyAdminsReport, notifyListingPublished } from './telegram';
 import { renderOgImage, renderRouteOg } from './og';
 import { cacheableStatus, edgeCache, edgeCacheControl, edgeCacheKey, edgeCacheTtl } from './edge-cache';
+import { METRIKA_SNIPPET } from './metrika';
 import { SITE_VERSION } from './version';
 import {
   buildCitiesIndexPage, buildCityPage, buildItemsSitemap, buildPagesSitemap,
@@ -1497,6 +1498,7 @@ const OUTAGE_PAGE = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  ${METRIKA_SNIPPET}
   <title>Попутка временно не отвечает</title>
 </head>
 <body style="margin:0;background:#f2eee5;color:#201d17;font-family:Georgia,'Times New Roman','PT Serif',serif;">
