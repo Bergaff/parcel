@@ -346,7 +346,9 @@ async function route() {
     $('#f-to').value = state.to;
     $('#f-date').value = state.date;
     $$('.tab').forEach((t) => {
-      t.classList.toggle('on', state.archive ? t.dataset.type === 'archive' : t.dataset.type === state.type);
+      const on = state.archive ? t.dataset.type === 'archive' : t.dataset.type === state.type;
+      t.classList.toggle('on', on);
+      t.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     await loadList(true);
   }
@@ -501,8 +503,9 @@ async function loadList(reset = false) {
 function bindBoard() {
   $$('.tab').forEach((tab) => {
     tab.addEventListener('click', () => {
-      $$('.tab').forEach((t) => t.classList.remove('on'));
+      $$('.tab').forEach((t) => { t.classList.remove('on'); t.setAttribute('aria-pressed', 'false'); });
       tab.classList.add('on');
+      tab.setAttribute('aria-pressed', 'true');
       if (tab.dataset.type === 'archive') {
         state.archive = true;
         state.type = '';

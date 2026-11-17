@@ -109,11 +109,16 @@
         <a href="/gorod/grodno" data-from="Гродно">попутки Гродно</a>
       </p>
 
-      <div class="tabs" role="tablist">
-        <button class="tab on" data-type="">все <span class="tab-count" id="c-all"></span></button>
-        <button class="tab" data-type="offer">водители везут <span class="tab-count" id="c-offer"></span></button>
-        <button class="tab" data-type="request">ищу передачу <span class="tab-count" id="c-request"></span></button>
-        <button class="tab" data-type="archive">архив</button>
+      <!-- Фильтры доски — группа кнопок-переключателей над ОДНИМ списком, а не
+           вкладки с отдельными панелями: честная роль — group + aria-pressed.
+           Lighthouse (в т.ч. «дерево доступности для ИИ-агентов») верно ругался:
+           role="tablist" обязан содержать role="tab" с aria-selected и панелями,
+           которых тут нет — полу-ARIA хуже, чем никакой. -->
+      <div class="tabs" role="group" aria-label="Что показывать на доске">
+        <button class="tab on" data-type="" aria-pressed="true">все <span class="tab-count" id="c-all"></span></button>
+        <button class="tab" data-type="offer" aria-pressed="false">водители везут <span class="tab-count" id="c-offer"></span></button>
+        <button class="tab" data-type="request" aria-pressed="false">ищу передачу <span class="tab-count" id="c-request"></span></button>
+        <button class="tab" data-type="archive" aria-pressed="false">архив</button>
       </div>
 
       <div id="list" class="rows" aria-live="polite"></div>

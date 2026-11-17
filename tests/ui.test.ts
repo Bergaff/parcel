@@ -1440,6 +1440,53 @@ describe('версия сборки', () => {
   });
 });
 
+/* Доступность табов доски. Повод — Lighthouse: «Дерево доступности имеет
+   неверный формат» / «Certain ARIA roles must contain particular children»:
+   role="tablist" без role="tab"-детей. Табы — фильтры одного списка, поэтому
+   честный паттерн — группа кнопок-переключателей с aria-pressed. */
+describe('a11y табов доски: группа переключателей с aria-pressed', () => {
+  const tabBtns = () => Array.from(win.document.querySelectorAll('.tab')) as HTMLElement[];
+
+  it('контейнер — group с подписью, «полу-» tablist больше нет', () => {
+    const box = win.document.querySelector('.tabs') as HTMLElement;
+    expect(box.getAttribute('role')).toBe('group');
+    expect(box.getAttribute('aria-label')).toBeTruthy();
+    // В дереве доступности не должно остаться «полу-» tablist — ни здесь, ни где-либо ещё.
+    expect(win.document.querySelectorAll('[role="tablist"], [role="tab"], [role="tabpanel"]')).toHaveLength(0);
+  });
+
+  it('aria-pressed есть у всех четырёх, нажат ровно один', () => {
+    const btns = tabBtns();
+    expect(btns).toHaveLength(4);
+    for (const b of btns) expect(b.getAttribute('aria-pressed'), b.textContent ?? '').toMatch(/^(true|false)$/);
+    expect(btns.filter((b) => b.getAttribute('aria-pressed') === 'true')).toHaveLength(1);
+  });
+
+  it('клик по табу переключает aria-pressed вместе с классом on', async () => {
+    const offer = tabBtns().find((b) => b.dataset.type === 'offer')!;
+    offer.click();
+    await settle();
+    expect(offer.getAttribute('aria-pressed')).toBe('true');
+    expect(offer.classList.contains('on')).toBe(true);
+    const all = tabBtns().find((b) => b.dataset.type === '')!;
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+    expect(tabBtns().filter((b) => b.getAttribute('aria-pressed') === 'true')).toHaveLength(1);
+    all.click(); // вернуть доску в исходное для остальных тестов
+    await settle();
+  });
+
+  it('заход по URL с фильтром отмечает нажатый таб (aria-pressed)', async () => {
+    await goto('/?type=request');
+    const req = tabBtns().find((b) => b.dataset.type === 'request')!;
+    expect(req.getAttribute('aria-pressed')).toBe('true');
+    await goto('/?archive=1');
+    expect(tabBtns().find((b) => b.dataset.type === 'archive')!.getAttribute('aria-pressed')).toBe('true');
+    expect(req.getAttribute('aria-pressed')).toBe('false');
+    await goto('/');
+    expect(tabBtns().find((b) => b.dataset.type === '')!.getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
 describe('здоровье страницы', () => {
   it('за всё время теста не было необработанных ошибок скрипта', () => {
     expect(pageErrors).toEqual([]);
