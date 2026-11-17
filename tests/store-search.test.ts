@@ -285,6 +285,13 @@ describe('заявки «ищу попутчика» без контакта —
     const sitemap = fakeDb({ columns: ['id', 'type', 'status', 'recurring'] });
     await listSitemapItems(sitemap.env, 10);
     expect(sitemap.calls.some((c) => /hidden IS NULL/.test(c.sql))).toBe(true);
+    // v0.4.66: в карту сайта — только заявки с доски «прямо сейчас».
+    // Просроченные давали тысячи короткоживущих URL: архив → noindex,
+    // удаление → 404 (в GSC: 590 noindex, 138 «не найдено»), а кликов
+    // из поиска на /item/* не было вовсе (0 за 3 месяца).
+    const sm = sitemap.calls.find((c) => /SELECT id, COALESCE\(published_at/.test(c.sql))!;
+    expect(sm.sql).toContain("status = 'published'");
+    expect(sm.sql).not.toContain('expired');
   });
 });
 

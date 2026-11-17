@@ -444,6 +444,23 @@ describe('страница города', () => {
     expect(html).toContain('href="/item/l-2"');
   });
 
+  it('фильтрованные ссылки главной закрыты от краулера (nofollow)', async () => {
+    // /?from=…&to=… — noindex-дубли страниц маршрутов. Без nofollow Google
+    // тратил на них крауловый бюджет и держал в отчёте «noindex» (590 URL).
+    clearRouteIndexCache();
+    const pages = [
+      await buildRoutePage(env, 'varshava-minsk', ORIGIN),
+      await buildCityPage(env, 'varshava', ORIGIN),
+    ];
+    let total = 0;
+    for (const html of pages) {
+      const links = [...(html ?? '').matchAll(/<a [^>]*href="\/\?[^"]*"[^>]*>/g)].map((m) => m[0]);
+      total += links.length;
+      for (const l of links) expect(l, l).toContain('rel="nofollow"');
+    }
+    expect(total).toBeGreaterThan(0);
+  });
+
   it('город без заявок остаётся страницей, но без пустых блоков', async () => {
     const html = await buildCityPage(env, 'krakov', ORIGIN);
     expect(html).toContain('Сейчас заявок с этим городом нет');

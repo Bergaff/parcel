@@ -875,6 +875,10 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
     .sort((a, b) => (b.pair?.active ?? 0) - (a.pair?.active ?? 0))
     .slice(0, 10);
 
+  // «Открыть на доске» — фильтрованный URL главной, он noindex (дубль
+  // страницы маршрута). rel="nofollow" закрывает краулеру путь в noindex-
+  // пустошь: Google держал 590 таких URL в отчёте «индексирование запрещено»
+  // (GSC от 16.11), а крауловый бюджет нужен маршрутам и городам.
   const boardUrl = `/?from=${encodeURIComponent(r.from)}&to=${encodeURIComponent(r.to)}`;
   const statsLine = [
     r.pair ? `${r.pair.active} ${plural(r.pair.active, 'заявка', 'заявки', 'заявок')} на доске` : null,
@@ -933,7 +937,7 @@ export async function buildRoutePage(env: Env, slug: string, origin: string): Pr
 
     <div class="cta-row">
       <a class="btn btn-ink btn-lg" href="/new">Разместить объявление</a>
-      <a class="btn btn-line btn-lg" href="${boardUrl}">Открыть на доске</a>
+      <a class="btn btn-line btn-lg" href="${boardUrl}" rel="nofollow">Открыть на доске</a>
       <a class="btn btn-line btn-lg" href="${cityPathFor(r.from)}">${escapeHtml(r.from)}: все направления</a>
     </div>
 
@@ -1024,7 +1028,7 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
       const label = fromHere ? `${escapeHtml(d.toCity)}` : `${escapeHtml(d.fromCity)}`;
       return s
         ? `<a href="/r/${s}">${label} <span class="mono">${d.active}</span></a>`
-        : `<a href="/?from=${encodeURIComponent(d.fromCity)}&to=${encodeURIComponent(d.toCity)}">${label} <span class="mono">${d.active}</span></a>`;
+        : `<a href="/?from=${encodeURIComponent(d.fromCity)}&to=${encodeURIComponent(d.toCity)}" rel="nofollow">${label} <span class="mono">${d.active}</span></a>`;
     }).join('');
     return `\n<h2 class="rule-head">${escapeHtml(title2)}</h2>\n<p class="related">${links}</p>`;
   };
@@ -1053,8 +1057,8 @@ export async function buildCityPage(env: Env, slug: string, origin: string): Pro
 
     <div class="cta-row">
       <a class="btn btn-ink btn-lg" href="/new">Разместить объявление</a>
-      <a class="btn btn-line btn-lg" href="/?from=${encodeURIComponent(city)}">Куда едут ${escapeHtml(fromCity(city))}</a>
-      <a class="btn btn-line btn-lg" href="/?to=${encodeURIComponent(city)}">Кто едет в ${escapeHtml(acc)}</a>
+      <a class="btn btn-line btn-lg" href="/?from=${encodeURIComponent(city)}" rel="nofollow">Куда едут ${escapeHtml(fromCity(city))}</a>
+      <a class="btn btn-line btn-lg" href="/?to=${encodeURIComponent(city)}" rel="nofollow">Кто едет в ${escapeHtml(acc)}</a>
     </div>
 ${dirBlock(`Куда едут ${fromCity(city)}`, directionsOut, true)}
 ${dirBlock(`Откуда везут в ${acc}`, directionsIn, false)}

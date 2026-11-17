@@ -2019,12 +2019,21 @@ export interface SitemapItem {
   lastmod: string;
 }
 
-/** Объявления для sitemap: те же, что видны на сайте, последними изменениями вперёд. */
+/** Объявления для sitemap: только те, что на доске ПРЯМО СЕЙЧАС, последними
+ *  изменениями вперёд. Просроченные (VISIBLE_WHERE пускал их ещё 7 дней)
+ *  убраны из карты сайта в v0.4.66: карточка быстро уходит в архив
+ *  (noindex), потом удаляется (404) — тысячи короткоживущих URL сжигали
+ *  доверие и крауловый бюджет Google (GSC за 09–11.16.11: «noindex» 590,
+ *  «обнаружено, но не индексируется» 1920, «404» 138), а поисковой отдачи
+ *  от /item/* нет: 0 кликов и 11 показов за 3 месяца. Живые карточки
+ *  Google находит и по внутренним ссылкам со страниц маршрутов и городов. */
 export async function listSitemapItems(env: Env, limit = 5000): Promise<SitemapItem[]> {
   const res = await env.DB.prepare(
     `SELECT id, COALESCE(published_at, created_at) AS lastmod
        FROM listings
-      WHERE ${VISIBLE_WHERE}
+      WHERE status = 'published'
+        AND (departure_date IS NULL OR departure_date >= date('now', '+3 hours') OR recurring IS NOT NULL)
+        AND (hidden IS NULL OR hidden != 1)
       ORDER BY lastmod DESC
       LIMIT ?`
   ).bind(Math.min(20000, Math.max(1, limit))).all();
