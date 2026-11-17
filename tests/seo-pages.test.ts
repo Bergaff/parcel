@@ -641,3 +641,63 @@ describe('каноник фильтрованной главной', () => {
     expect(html).not.toContain('name="robots"');
   });
 });
+
+/* Точечные заметки под интент «показы есть, кликов нет» (GSC 11.09–15.11):
+   brest-terespol — 31 показ, позиция 6,4, CTR 0%; varshava↔brest — ходовые
+   маршруты доски при позициях 15–22; gorod/lvov — 64 показа, позиция 67,
+   украинские запросы области без ответа на странице. */
+describe('точечные заметки маршрутов и городов', () => {
+  it('Брест — Тересполь: раздел про границу, свой сниппет, вопрос в FAQ', async () => {
+    db.pairs = [...db.pairs, { fromCity: 'Брест', toCity: 'Тересполь', total: 8, active: 5, lastmod: '2026-11-17' }];
+    db.listings = [...db.listings, listing({ id: 'l-bt', fromCity: 'Брест', toCity: 'Тересполь' })];
+    const html = await buildRoutePage(env, 'brest-terespol', ORIGIN);
+    expect(html).not.toBeNull();
+    expect(html).toContain('Брест — Тересполь: рейсы через границу каждый день');
+    expect(html).toContain('телеграм-чатов границы');
+    // вопрос уходит и в FAQPage-разметку
+    expect(html).toContain('Кто едет Брест — Тересполь сегодня?');
+    // сниппет под интент «кто едет сейчас» вместо общего про посылки
+    expect(html).toContain('content="Кто едет Брест — Тересполь сегодня');
+  });
+
+  it('Варшава — Брест (витрина): коридор диаспоры и FAQ про границу', async () => {
+    const html = await buildRoutePage(env, 'varshava-brest', ORIGIN);
+    expect(html).not.toBeNull();
+    expect(html).toContain('Варшава — Брест: главный коридор между Беларусью и Польшей');
+    expect(html).toContain('Как передать посылку Варшава — Брест через границу?');
+    expect(html).toContain('content="Варшава — Брест: передать посылку через границу');
+  });
+
+  it('Брест — Варшава (живая пара из базы): та же заметка', async () => {
+    db.pairs = [...db.pairs, { fromCity: 'Брест', toCity: 'Варшава', total: 20, active: 9, lastmod: '2026-11-17' }];
+    const html = await buildRoutePage(env, 'brest-varshava', ORIGIN);
+    expect(html).not.toBeNull();
+    expect(html).toContain('Брест — Варшава: главный коридор между Беларусью и Польшей');
+    expect(html).toContain('Сколько стоит передать посылку Брест — Варшава?');
+  });
+
+  it('сниппет заметки влезает в бюджет Google (160 символов)', async () => {
+    db.pairs = [...db.pairs, { fromCity: 'Брест', toCity: 'Тересполь', total: 2, active: 1, lastmod: '2026-11-17' }];
+    const html = await buildRoutePage(env, 'brest-terespol', ORIGIN);
+    const m = html!.match(/<meta name="description" content="([^"]*)"/);
+    expect(m).not.toBeNull();
+    expect(m![1]!.length).toBeLessThanOrEqual(160);
+    expect(m![1]).toContain('Кто едет Брест — Тересполь сегодня');
+  });
+
+  it('Львов: украинский блок — города области и переходы к Польше', async () => {
+    const html = await buildCityPage(env, 'lvov', ORIGIN);
+    expect(html).not.toBeNull();
+    expect(html).toContain('Львів — передати посилку попутнім транспортом');
+    for (const t of ['Мостиска', 'Володимир', 'Дрогобич', 'Пісочної', 'Рава-Руська', 'Шегині', 'Устилуг']) {
+      expect(html, t).toContain(t);
+    }
+    expect(html).toContain('Чи є попутки зі Львова');
+  });
+
+  it('точечность: у маршрута без заметки описание прежнее', async () => {
+    const html = await buildRoutePage(env, 'varshava-minsk', ORIGIN);
+    expect(html).not.toContain('рейсы через границу каждый день');
+    expect(html).toContain('живые заявки Варшава → Минск');
+  });
+});
