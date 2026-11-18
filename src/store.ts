@@ -1,9 +1,10 @@
-import type { Env, ListFilters, Listing, ListingInput, ListingStatus } from './types';
+import type { Env, ListFilters, Listing, ListingInput, ListingSource, ListingStatus } from './types';
 import type { MatchPair, ListingSnapshot } from './match';
 import { listingSnapshot, parseSnapshot } from './match';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
 import { admins, hasContactHint, normalizeContacts } from './util';
+import { autoPublishVerdict } from './auto-publish';
 import { nextRecurringDate } from './parser';
 // IndexNow: очередь адресов на переиндексацию (см. src/indexnow.ts)
 import { listingPaths, queueListingChange, queuePaths } from './indexnow';
@@ -94,9 +95,14 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   // ссылка t.me/+48… на сайте). Через createListing проходят все источники.
   const { telegram, phone } = normalizeContacts(input.telegram, input.phone);
   // Приговор заявке без контакта — здесь, единым правилом для всех источников:
-  // offer отклоняем (чтобы не висел в очереди), request публикуем скрытым
+  // совсем без контакта отклоняем, а «ищу передачу» с сайта публикуем скрытой
   const auto = autoStatusFor(input, { telegram, phone });
-  const status = auto ? auto.status : input.status;
+  // Автопубликация заявок от админских аккаунтов (личка админа, его пересылки,
+  // копии радара): публикуем сразу, если правило выше не вынесло приговор и
+  // разбор не сомневается — см. src/auto-publish.ts. Контакты передаём уже
+  // нормализованными: номер не должен считаться «контактом в тексте».
+  const autoPublish = auto ? null : autoPublishVerdict(env, { ...input, telegram, phone });
+  const status = auto ? auto.status : autoPublish?.publish ? 'published' : input.status;
   const hidden = auto ? auto.hidden : input.hidden === true;
   const publishedAt = status === 'published' ? now : null;
   // Цепочка маршрута (v0.4.55): «Минск-Брест-Белосток-Варшава» хранится целиком.
@@ -1309,16 +1315,16 @@ export function ensureHiddenColumn(env: Env): Promise<void> {
 }
 
 /**
- * Заявка «ищу попутчика» с сайта без контакта: публикуем автоматически, но
- * прячем с доски — видна только в подборе. Владелец сайта пишет людям сам,
- * а заявка живёт ограниченный срок и удаляется cron'ом.
- * Не касается админских заявок и заявок из Telegram/чатов — те идут как обычно.
+ * Заявка «ищу попутчика» С САЙТА без контакта: публикуем автоматически, но
+ * прячем с доски — видна только в подборе. Человек ждёт ответа «подбираем
+ * попутчика», владелец рейса пишет ему сам, а заявка живёт ограниченный срок
+ * и удаляется cron'ом.
+ * Заявки из бота и чатов сюда не попадают: дойти до автора там нечем, их
+ * отклоняет autoStatusFor.
  */
 export function isHiddenRequestInput(input: ListingInput): boolean {
-  // «ищу передачу» без контакта — из ЛЮБОГО источника (форма сайта, личка
-  // бота, пересылка, чат): публикуем сразу и прячем с доски, видна только
-  // в подборе — владелец рейса пишет людям сам (см. autoStatusFor)
   return input.type === 'request'
+    && input.source === 'site'
     && !input.telegram
     && !input.phone;
 }
@@ -1327,28 +1333,26 @@ export function isHiddenRequestInput(input: ListingInput): boolean {
  * Что сразу делать с заявкой без контакта — правило для всех источников
  * (форма сайта, личка бота, пересылки, чаты), чтобы такие не висели в
  * очереди модерации:
- *  - offer («могу передать») без контакта ни в полях, ни в описании —
- *    отклоняем сразу: пассажирам некуда писать, модерировать нечего;
- *  - request («ищу передачу») без контакта — публикуем и прячем с доски
- *    (видна только в подборе; человеку отвечаем «подбираем попутчика»).
- * null — обычный путь: модерация или AUTO_APPROVE.
+ *  - контакт, написанный в тексте (телефон, @юзернейм или ссылка на исходное
+ *    сообщение — радар оставляет её в копиях из защищённых чатов), считается
+ *    контактом: заявку оставляем модератору, он перенесёт его в поле;
+ *  - offer («могу передать») совсем без контакта — отклоняем сразу:
+ *    пассажирам некуда писать, модерировать нечего;
+ *  - request («ищу передачу») совсем без контакта — отклоняем, если заявка
+ *    пришла из бота или чата: дойти до автора нечем, а подбор такая заявка
+ *    только засоряет (решение владельца 2026-09-19). С сайта — публикуем
+ *    и прячем с доски: там человек получил обещание «подбираем попутчика»,
+ *    и отклонить заявку молча значило бы соврать (см. isHiddenRequestInput).
+ * null — обычный путь: модерация, AUTO_APPROVE или автопубликация админского.
  */
 export function autoStatusFor(
-  input: Pick<ListingInput, 'type' | 'description'>,
+  input: Pick<ListingInput, 'type' | 'description'> & { source?: ListingSource | null },
   contacts: { telegram: string | null; phone: string | null }
 ): { status: 'rejected' | 'published'; hidden: boolean } | null {
   if (contacts.telegram || contacts.phone) return null;
-  if (input.type === 'offer') {
-    // контакт, написанный прямо в описании (телефон или @юзернейм),
-    // считается контактом — заявку оставляем модератору, он перенесёт
-    // его в поле
-    if (input.description && hasContactHint(input.description)) return null;
-    return { status: 'rejected', hidden: false };
-  }
-  // Ссылка на исходное сообщение/чат в тексте — способ связаться (радар
-  // оставляет её в копиях из защищённых чатов): такую просьбу не прячем.
   if (input.description && hasContactHint(input.description)) return null;
-  return { status: 'published', hidden: true };
+  if (input.type === 'request' && input.source === 'site') return { status: 'published', hidden: true };
+  return { status: 'rejected', hidden: false };
 }
 
 /**
@@ -1865,11 +1869,20 @@ export async function touchListing(env: Env, id: string): Promise<Listing | null
  * Создать заявку, но не плодить дубликаты: если такая уже есть — вернуть её
  * (и освежить, если она на доске). Через неё идут все источники: пересылки,
  * сообщения в чатах, мастер /post и форма на сайте.
+ *
+ * Точный дубль — красное предупреждение «♻️ Это повтор» в очереди модерации —
+ * новую заявку не создаёт никогда и ни от какого источника: заявка, полностью
+ * повторяющая существующую на сайте, отклоняется сама, не дожидаясь клика
+ * модератора (решение владельца 2026-09-19). Живую заявку при этом освежаем:
+ * повторный анонс той же поездки снова оказывается вверху доски, то есть
+ * пересылка не проходит впустую.
+ * «Похожая» заявка — серое предупреждение, kind='similar' («пересылка от того
+ * же автора, но контакт другой», «текст почти тот же») — создаётся как обычно:
+ * люди могут быть разные, и старую заявку мы не заменяем и не снимаем.
  */
 export async function createListingSafe(
   env: Env,
-  input: ListingInput,
-  opts: { force?: boolean } = {}
+  input: ListingInput
 ): Promise<{
   listing: Listing;
   created: boolean;
@@ -1878,9 +1891,7 @@ export async function createListingSafe(
   why: string;
 }> {
   const hit = await findDuplicate(env, input);
-  // force — заявку создаём в любом случае (например, /post человек заполнил сам),
-  // но сведения о дубле возвращаем: модератор увидит предупреждение.
-  if (hit && hit.kind === 'duplicate' && !opts.force) {
+  if (hit && hit.kind === 'duplicate') {
     const refreshed = await touchListing(env, hit.listing.id);
     const listing = refreshed ?? hit.listing;
     return { listing, created: false, duplicateOf: listing, kind: 'duplicate', why: hit.why };

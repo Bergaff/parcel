@@ -302,22 +302,29 @@ describe('пересылка объявления без контакта — п
     expect(sent.filter((s) => s.chatId === 42)).toHaveLength(0);
   });
 
-  it('«ищу передачу» без контакта — опубликована скрытой: админу карточка «Заявка без контакта»', async () => {
+  it('«ищу передачу» без контакта из бота — rejected: написать автору некуда', async () => {
     sent.length = 0;
     const { db, calls } = dbFake();
     const envFwd = { ...env, DB: db } as unknown as Env;
     await handleTelegramUpdate(envFwd, forward('Нужно передать 5 января Гродно — Белосток, конверт с документами'));
     const insert = calls.find((c) => c.sql.includes('INSERT INTO listings'));
     expect(insert).toBeTruthy();
-    expect(insert!.params).toContain('published');
-    expect(insert!.params).toContain(1); // hidden
-    // переславшему — «подбираю попутчика», без слов про модерацию
+    // Раньше такая заявка публиковалась скрытой и 30 дней жила в подборе.
+    // Контакта нет ни в полях, ни в тексте — значит дойти до автора нечем,
+    // и подбор она только засоряла: теперь отклоняем (решение владельца).
+    expect(insert!.params).toContain('rejected');
+    expect(insert!.params).toContain('no_contact');
+    expect(insert!.params).not.toContain('published');
+    expect(insert!.params[19]).toBe(0); // hidden: ничего не прячем, заявка отклонена
+    // переславшему — объяснение про просьбу (не про «объявление водителя»)
     const reply = sent.filter((s) => s.chatId === 555).map((s) => s.text).join('\n');
-    expect(reply).toContain('Подбираю попутчика');
-    // админу — карточка скрытой заявки с источником
+    expect(reply).toContain('Не принято');
+    expect(reply).toContain('в просьбе нет контакта');
+    expect(reply).not.toContain('модерацию');
+    // карточки «Заявка без контакта» больше нет: ничего не опубликовано
     const card = sent.filter((s) => s.chatId === 42).map((s) => s.text).join('\n');
-    expect(card).toContain('Заявка без контакта');
-    expect(card).toContain('Опубликована автоматически, на доске скрыта');
+    expect(card).not.toContain('Заявка без контакта');
+    expect(card).not.toContain('Опубликована автоматически, на доске скрыта');
   });
 });
 

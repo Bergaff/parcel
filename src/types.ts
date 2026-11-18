@@ -8,6 +8,10 @@ export interface Env {
   BOT_SECRET?: string;
   ADMIN_IDS?: string;
   AUTO_APPROVE?: string;
+  /** "0" — выключить автопубликацию заявок от админских аккаунтов (по умолчанию
+   *  она включена: такие заявки публикуются сразу, если разбор не сомневается —
+   *  см. src/auto-publish.ts). Применяется без деплоя. */
+  AUTO_PUBLISH_ADMIN?: string;
   SITE_URL?: string;
   BOT_USERNAME?: string;
   /** Ники аккаунтов-ретрансляторов (радара), через запятую: не считаются авторами заявок. */

@@ -343,9 +343,11 @@ app.post('/api/listings', async (c) => {
   if (error || !input) return c.json({ error }, 400);
 
   // Кто подаёт: админ (форма с ключом админки в этом же браузере) или
-  // посторонний человек. Для человека дубль не сливаем: возможно, это владелец
-  // рейса подал сам, а копию раньше принёс админ из чата — заявку человека
-  // создаём отдельной, конфликт показываем модератору и в Telegram.
+  // посторонний человек. От этого зависит автопубликация (заявка админа
+  // публикуется сама, если разбор не сомневается — src/auto-publish.ts) и
+  // метка «кто подал». Точный дубль не создаём ни для кого, а «похожая»
+  // заявка создаётся отдельной: возможно, это владелец рейса подал сам, а
+  // копию раньше принёс админ из чата — конфликт показываем модератору.
   const auth = c.req.header('Authorization') ?? '';
   const isAdminSubmit = !!c.env.ADMIN_API_TOKEN && auth === `Bearer ${c.env.ADMIN_API_TOKEN}`;
   input.byAdmin = isAdminSubmit;
@@ -370,7 +372,7 @@ app.post('/api/listings', async (c) => {
   } else {
     input.status = c.env.AUTO_APPROVE === '1' ? 'published' : 'pending';
   }
-  const res = await createListingSafe(c.env, input, { force: !isAdminSubmit });
+  const res = await createListingSafe(c.env, input);
   const listing = res.listing;
 
   if (!res.created) {
@@ -400,6 +402,16 @@ app.post('/api/listings', async (c) => {
     );
   }
 
+  // Заявка опубликована (AUTO_APPROVE=1 или автопубликация заявки от админского
+  // аккаунта) — делаем то же, что делает ручное «Одобрить»: ссылка в «комнату»
+  // направления форум-канала и уведомление наблюдателям. Скрытые заявки
+  // (без контакта) в публичный канал не уходят.
+  if (listing.status === 'published' && !listing.hidden) {
+    c.executionCtx.waitUntil(
+      notifyListingPublished(c.env, listing).catch((e) => console.error('notifyListingPublished failed', e))
+    );
+  }
+
   if (autoHidden) {
     // владельцу — сразу в Telegram: он пишет людям сам
     c.executionCtx.waitUntil(
@@ -424,14 +436,20 @@ app.post('/api/listings', async (c) => {
     {
       item: listing,
       ...(notifyUrl ? { notify: { url: notifyUrl } } : {}),
-      message: (input.status === 'published'
+      // Статус — по факту (listing.status), а не по намерению (input.status):
+      // заявка от админского аккаунта публикуется сама внутри createListing
+      // (см. src/auto-publish.ts), и ответ «отправлено на модерацию» про уже
+      // опубликованную заявку был бы враньём.
+      message: (listing.status === 'published'
         ? 'Объявление опубликовано.'
         : 'Объявление отправлено на модерацию и появится после проверки.')
         + (res.duplicateOf && !isAdminSubmit
-          ? ' Похожая заявка уже была — модератор посмотрит и решит, какую оставить.'
+          ? (listing.status === 'published'
+            ? ' Похожая заявка уже была — эта опубликована рядом, старая осталась на месте.'
+            : ' Похожая заявка уже была — модератор посмотрит и решит, какую оставить.')
           : ''),
     },
-    input.status === 'published' ? 201 : 202
+    listing.status === 'published' ? 201 : 202
   );
 });
 

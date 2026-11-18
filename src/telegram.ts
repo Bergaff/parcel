@@ -13,6 +13,7 @@ import {
 } from './util';import { contactsInText } from './dedupe';
 
 import { aiExtractListing, type AiFields } from './ai';
+import { autoPublishEnabled, doubtNote, doubtsFor } from './auto-publish';
 import { currentPeriod, fmtPeriod, fmtPeriodGen, plural } from './format';
 import { CITY_COUNTRY } from './seo-routes';
 import { FORUM_COUNTRIES, forumCityCount, forumCountryOfCity } from './forum-cities';
@@ -98,6 +99,17 @@ function approveKeyboard(listingId: string): Record<string, unknown> {
     inline_keyboard: [[
       { text: 'Одобрить', callback_data: `appr:${listingId}` },
       { text: 'Отклонить', callback_data: `rej:${listingId}` },
+    ]],
+  };
+}
+
+/** Карточка автопубликации: заявка уже на доске, одобрять нечего — остаётся
+ *  только снять её, если админ не согласен. Callback тот же, что у кнопки
+ *  «Отклонить» (rej:), — статус и причина уже обрабатываются. */
+function autoPublishKeyboard(listingId: string): Record<string, unknown> {
+  return {
+    inline_keyboard: [[
+      { text: 'Снять с доски', callback_data: `rej:${listingId}` },
     ]],
   };
 }
@@ -969,7 +981,7 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
       // пересылают каждый день — вторую заявку не плодим). Пересылку от
       // постороннего человека — нет: возможно, владелец подал сам, а копию
       // мы уже принесли из чата; тогда заявку создаём и показываем конфликт.
-      const res = await createListingSafe(env, input, { force: !isAdmin });
+      const res = await createListingSafe(env, input);
       if (!res.created) {
         repeats.push({ listing: res.listing, why: res.why });
         await notifyAdminsRepeat(env, res.listing, res.why);
@@ -1201,9 +1213,10 @@ async function handlePrivateText(env: Env, msg: TgMessage): Promise<void> {
               byAdmin: isAdminChat(env, msg),
               fromPerson: !isAdminChat(env, msg),
             };
-            // от постороннего человека дубль не сливаем — см. блок пересылок
+            // точный дубль не создаём ни от кого (см. createListingSafe),
+            // а «похожая» заявка создаётся: модератор увидит предупреждение
             const fromAdmin = isAdminChat(env, msg);
-            const res = await createListingSafe(env, input, { force: !fromAdmin });
+            const res = await createListingSafe(env, input);
             if (!res.created) {
               repeats.push({ listing: res.listing, why: res.why });
               await notifyAdminsRepeat(env, res.listing, res.why);
@@ -1337,13 +1350,17 @@ async function finalizeWizard(env: Env, chatId: number, w: WizardState): Promise
     byAdmin: admins(env).includes(String(chatId)),
     fromPerson: !admins(env).includes(String(chatId)),
   };
-  // /post человек заполняет сам, шаг за шагом, — заявку создаём в любом случае,
-  // но если такая уже есть, предупреждаем и его, и модератора.
-  const res = await createListingSafe(env, input, { force: true });
+  // /post человек заполняет сам, шаг за шагом. Точный дубль не создаём ни для
+  // кого — отвечаем честно, что такое объявление уже есть (createListingSafe).
+  const res = await createListingSafe(env, input);
   const listing = res.listing;
   await setWizard(env, chatId, null);
-  // статус — по факту, а не по AUTO_APPROVE: offer без контакта мог быть
-  // отклонён, request без контакта — опубликован скрытым (autoStatusFor)
+  if (!res.created) {
+    await sendText(env, chatId, repeatReply([{ listing, why: res.why }]));
+    return;
+  }
+  // статус — по факту, а не по AUTO_APPROVE: заявку без контакта правило
+  // autoStatusFor могло отклонить, а админская могла опубликоваться сама
   const statusNote = listingStatusNote(listing);
   const dupNote = res.duplicateOf
     ? `\n\n<i>⚠ Похоже, такая заявка уже есть: №${res.duplicateOf.id.slice(0, 8)} (${escapeHtml(res.why)}). Модератор это увидит.</i>`
@@ -1539,13 +1556,20 @@ function similarNote(res: {
   return res.kind === 'similar' && res.duplicateOf ? { id: res.duplicateOf.id, why: res.why } : null;
 }
 
-/** Что ответить человеку после создания заявки — по её НАСТОЯЩЕМУ статусу
- *  (offer без контакта отклонён правилом autoStatusFor, request без контакта
- *  опубликован скрытым — ответ «на модерации» в обоих случаях был бы враньём). */
+/** Что ответить человеку после создания заявки — по её НАСТОЯЩЕМУ статусу,
+ *  а не по AUTO_APPROVE: заявку без контакта правило autoStatusFor отклоняет
+ *  (с сайта «ищу передачу» — публикует скрытой), а заявка от админского
+ *  аккаунта может опубликоваться сама (src/auto-publish.ts). Ответ
+ *  «отправлено на модерацию» в этих случаях был бы враньём. */
 export function listingStatusNote(l: Listing): string {
   if (l.status === 'rejected') {
-    return '\n⚠ <b>Не принято:</b> в объявлении водителя нет контакта — пассажирам некуда писать. '
-      + 'Пришлите ещё раз, добавив телефон или @юзернейм Telegram.';
+    // Контакт обязателен в обе стороны: пассажиру — кому писать, автору
+    // просьбы — чтобы ему могли написать. Причина одна, слова разные.
+    return l.type === 'offer'
+      ? '\n⚠ <b>Не принято:</b> в объявлении водителя нет контакта — пассажирам некуда писать. '
+        + 'Пришлите ещё раз, добавив телефон или @юзернейм Telegram.'
+      : '\n⚠ <b>Не принято:</b> в просьбе нет контакта — тому, кто поедет вашим маршрутом, '
+        + 'некуда вам написать. Пришлите ещё раз, добавив телефон или @юзернейм Telegram.';
   }
   if (l.hidden) {
     return '\n📦 <b>Принято.</b> Подбираю попутчика по вашему маршруту — как найдётся, объявление появится на доске.';
@@ -1565,6 +1589,19 @@ async function notifyCreated(
 ): Promise<void> {
   if (listing.hidden && listing.status === 'published') {
     await notifyAdminsHiddenRequest(env, listing);
+    return;
+  }
+  // Заявка от админского аккаунта ушла на доску сама (src/auto-publish.ts):
+  // карточки модерации нет — одобрять нечего, — но молчать нельзя: админ
+  // видит, что опубликовано, и может снять одной кнопкой.
+  if (listing.status === 'published' && listing.byAdmin) {
+    await notifyAdminsAutoPublished(env, listing, dup ?? null);
+    // Дальше — ровно то же, что делает ручное «Одобрить»: ссылка в «комнату»
+    // направления форум-канала и уведомление тем, кто попросил сообщить.
+    // Автору не пишем: источник такой заявки — личка админа, а карточку выше
+    // он уже получил (иначе по два сообщения на каждую из сотен заявок в день).
+    await notifyListingPublished(env, listing, { notifyAuthor: false })
+      .catch((e) => console.error('notifyListingPublished (auto-publish) failed', e));
     return;
   }
   await notifyAdmins(env, listing, dup ?? null);
@@ -1828,6 +1865,9 @@ export function forumThreadFor(
 
 /** Опубликованная заявка → ссылка в «комнату» направления форум-канала. */
 export async function broadcastListingToForum(env: Env, listing: Listing): Promise<void> {
+  // Скрытые заявки (без контакта, видны только в подборе) в публичный канал
+  // не уходят: на доске их нет, значит и анонсировать их негде.
+  if (listing.hidden) return;
   const cfg = await loadForumConfig(env);
   if (!cfg) return;
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
@@ -2104,15 +2144,24 @@ async function handleWatchStart(env: Env, chatId: number, listingId: string): Pr
 }
 
 /** Заявка опубликована: сообщаем всем, кто попросил (watch_<id> с сайта),
- *  и автору, если он подавал заявку через бота в личке. */
-export async function notifyListingPublished(env: Env, listing: Listing): Promise<void> {
+ *  и автору, если он подавал заявку через бота в личке.
+ *  `notifyAuthor: false` — автору не пишем: нужно при автопубликации заявок
+ *  от админских аккаунтов, где источник и есть личка админа, а он уже
+ *  получает карточку «опубликовано автоматически» (иначе два сообщения
+ *  подряд на каждую из сотен заявок в день). */
+export async function notifyListingPublished(
+  env: Env,
+  listing: Listing,
+  opts: { notifyAuthor?: boolean } = {}
+): Promise<void> {
   // ссылка с превью в «комнату» направления (форум-канал, если настроен)
   await broadcastListingToForum(env, listing).catch((e) => console.error('forum broadcast failed', e));
   const site = (env.SITE_URL ?? '').replace(/\/$/, '');
   const link = site ? `${site}/item/${encodeURIComponent(listing.id)}` : '';
   const chatIds = new Set<string>(await listWatchers(env, listing.id).catch(() => [] as string[]));
   // положительный id — личный диалог с ботом; группы (отрицательные) не дёргаем
-  if (listing.source === 'telegram' && listing.sourceChatId && Number(listing.sourceChatId) > 0) {
+  if (opts.notifyAuthor !== false
+    && listing.source === 'telegram' && listing.sourceChatId && Number(listing.sourceChatId) > 0) {
     chatIds.add(String(listing.sourceChatId));
   }
   for (const chatId of chatIds) {
@@ -2176,11 +2225,53 @@ export async function notifyAdmins(
         ? `\n<i>🗂 Человек подал сам (${listing.source === 'site' ? 'с сайта' : 'в личке бота'}), а похожая заявка уже есть: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}.</i>\n<i>Если это владелец — в очереди модерации нажмите «заменить старую»: старая удалится, эта опубликуется.</i>`
         : `\n<i>⚠ Похоже на дубль: №${dup.id.slice(0, 8)} — ${escapeHtml(dup.why)}</i>`)
     : '';
+  // Заявка от админского аккаунта, но автоматически не опубликовалась:
+  // пишем почему. В очереди из сотен карточек это главное — сразу видно,
+  // на что смотреть (правила сомнения: src/auto-publish.ts).
+  const holdNote = listing.byAdmin && autoPublishEnabled(env)
+    ? holdReasonNote(listing)
+    : '';
   for (const adminId of admins(env)) {
     // ссылка на исходное сообщение (если есть) — уже внутри formatListing
     await sendText(env, Number(adminId),
-      formatListing(listing, noContact + dupNote),
+      formatListing(listing, noContact + dupNote + holdNote),
       { reply_markup: approveKeyboard(listing.id) }
+    ).catch(() => undefined);
+  }
+}
+
+/** Почему заявка от админского аккаунта не опубликовалась сама. Пустая строка
+ *  — поводов не было (такое возможно, если автопубликацию выключили рубильником
+ *  AUTO_PUBLISH_ADMIN=0 уже после создания заявки). */
+function holdReasonNote(listing: Listing): string {
+  const doubts = doubtsFor(listing);
+  if (doubts.length === 0) return '';
+  return `\n<i>🤔 Автоматически не опубликовано: ${escapeHtml(doubtNote(doubts))}.</i>`;
+}
+
+/** Карточка автопубликации: заявка от админского аккаунта ушла на доску сама —
+ *  правила разбора не сомневались (см. src/auto-publish.ts). Одобрять нечего,
+ *  поэтому кнопка одна: снять, если админ не согласен. */
+export async function notifyAdminsAutoPublished(
+  env: Env,
+  listing: Listing,
+  dup?: { id: string; why: string; selfSubmitted?: boolean } | null
+): Promise<void> {
+  if (!listing || listing.status !== 'published') return;
+  const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
+  const link = site ? ` — <a href="${site}/item/${encodeURIComponent(listing.id)}">открыть</a>` : '';
+  // «Похожая» заявка уже была: по правилу владельца принимаем без замены
+  // старой, но сказать об этом нужно — иначе две похожие карточки на доске
+  // выглядят как ошибка автопубликации.
+  const dupNote = dup && dup.id
+    ? `\n<i>⚠️ Похожа на №${dup.id.slice(0, 8)} (${escapeHtml(dup.why)}) — принята без замены старой.</i>`
+    : '';
+  for (const adminId of admins(env)) {
+    await sendText(env, Number(adminId),
+      `✅ <b>Опубликовано автоматически</b>${link}\n` +
+      `<i>Заявка от админского аккаунта, разбор не сомневался.</i>${dupNote}\n\n` +
+      formatListing(listing),
+      { reply_markup: autoPublishKeyboard(listing.id) }
     ).catch(() => undefined);
   }
 }
@@ -2192,8 +2283,8 @@ export async function notifyAdmins(
 export async function notifyAdminsHiddenRequest(env: Env, listing: Listing): Promise<void> {
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
-  // источник может быть любым: форма сайта, личка бота, пересылка, чат —
-  // правило «без контакта» теперь общее для всех (isHiddenRequestInput)
+  // Скрытыми бывают только заявки с сайта (форма): из бота и чатов просьбу
+  // без контакта отклоняет autoStatusFor — дойти до автора там нечем.
   const origin = listing.source === 'site'
     ? 'форма на сайте'
     : listing.sourceChat ?? 'Telegram';
@@ -2218,6 +2309,11 @@ export async function notifyAdminsConflict(
   old: Listing,
   why: string
 ): Promise<void> {
+  // Заявка от админского аккаунта опубликовалась автоматически, и админ уже
+  // получил карточку «Опубликовано автоматически» с пометкой о похожей заявке.
+  // Его правило для «похожих» — принимать БЕЗ замены старой, а эта сводка
+  // советует старую удалить, то есть зовёт сделать наоборот.
+  if (listing.byAdmin) return;
   const site = (env.SITE_URL ?? '').replace(/\/+$/, '');
   const link = site ? ` — <a href="${site}/item/${listing.id}">открыть</a>` : '';
   const oldLabel = old.status === 'published' ? 'на доске' : old.status === 'pending' ? 'в очереди' : 'в архиве';

@@ -71,11 +71,18 @@ describe('просьба без контакта, но со ссылкой в т
       { telegram: null, phone: null }
     )).toBeNull();
   });
-  it('совсем без контакта — как раньше: публикуем скрытой', () => {
+  it('совсем без контакта: с сайта — публикуем скрытой, из бота — отклоняем', () => {
+    // форма сайта обещала человеку «подбираем попутчика» — держим слово
     expect(autoStatusFor(
-      { type: 'request', description: 'передайте конверт' },
+      { type: 'request', description: 'передайте конверт', source: 'site' },
       { telegram: null, phone: null }
     )).toEqual({ status: 'published', hidden: true });
+    // из бота и чатов дойти до автора нечем: заявка отклоняется, а не копится
+    // в подборе (решение владельца 2026-09-19)
+    expect(autoStatusFor(
+      { type: 'request', description: 'передайте конверт', source: 'telegram' },
+      { telegram: null, phone: null }
+    )).toEqual({ status: 'rejected', hidden: false });
   });
 });
 

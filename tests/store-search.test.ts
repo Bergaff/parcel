@@ -236,22 +236,22 @@ describe('заявки «ищу попутчика» без контакта —
     type: 'request', telegram: null, phone: null, source: 'site', fromPerson: true, ...over,
   });
 
-  it('скрытой становится «ищу передачу» без контакта — из любого источника', () => {
+  it('скрытой становится «ищу передачу» без контакта — только с сайта', () => {
     expect(isHiddenRequestInput(mk({}) as never)).toBe(true);
     // водитель — нет: ему будут писать пассажиры
     expect(isHiddenRequestInput(mk({ type: 'offer' }) as never)).toBe(false);
     // с контактом — обычная модерация
     expect(isHiddenRequestInput(mk({ telegram: '@x' }) as never)).toBe(false);
-    // от админа из формы (с ключом) — тоже скрытая: «ищу передачу» без
-    // контакта не должно висеть на рассмотрении, кто бы ни подал
+    // от админа из формы (с ключом) — тоже скрытая: источник всё тот же сайт,
+    // «ищу передачу» без контакта не должно висеть на рассмотрении
     expect(isHiddenRequestInput(mk({ fromPerson: false }) as never)).toBe(true);
-    // из бота, пересылок и чатов — теперь так же: без контакта заявке на
-    // доске всё равно нечего показывать, а в подборе она работает
-    expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(true);
-    expect(isHiddenRequestInput(mk({ source: 'parser' }) as never)).toBe(true);
+    // из бота, пересылок и чатов — НЕ скрытая: дойти до автора там нечем,
+    // такую просьбу autoStatusFor отклоняет (решение владельца 2026-09-19)
+    expect(isHiddenRequestInput(mk({ source: 'telegram' }) as never)).toBe(false);
+    expect(isHiddenRequestInput(mk({ source: 'parser' }) as never)).toBe(false);
   });
 
-  it('autoStatusFor: оффер без контакта — rejected, реквест — published и скрыт', () => {
+  it('autoStatusFor: совсем без контакта — отклоняем; «ищу передачу» с сайта публикуем скрытой', () => {
     const none = { telegram: null, phone: null };
     // оффер без контакта ни в полях, ни в описании — отклоняем сразу,
     // в очереди модерации ему не место
@@ -260,11 +260,25 @@ describe('заявки «ищу попутчика» без контакта —
     // контакт прямо в описании спасает заявку: модератор перенесёт в поле
     expect(autoStatusFor({ type: 'offer', description: 'везу, телефон +375291234567' }, none)).toBeNull();
     expect(autoStatusFor({ type: 'offer', description: 'пишите @driver' }, none)).toBeNull();
-    // контакт в поле — обычный путь (модерация/AUTO_APPROVE)
+    // контакт в поле — обычный путь (модерация, AUTO_APPROVE, автопубликация)
     expect(autoStatusFor({ type: 'offer', description: 'везу' }, { telegram: '@x', phone: null })).toBeNull();
-    // «ищу передачу» без контакта — сразу опубликована и скрыта, кто бы ни подал
-    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт' }, none))
+    // «ищу передачу» без контакта С САЙТА — опубликована и скрыта: человек
+    // получил ответ «подбираем попутчика», отклонить молча значило бы соврать
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт', source: 'site' }, none))
       .toEqual({ status: 'published', hidden: true });
+    // та же просьба из бота или из чата — отклонена: написать автору некуда,
+    // а подбор такая заявка только засоряет
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт', source: 'telegram' }, none))
+      .toEqual({ status: 'rejected', hidden: false });
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт', source: 'parser' }, none))
+      .toEqual({ status: 'rejected', hidden: false });
+    // источник не назван — считаем, что это не сайт, и отклоняем
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать конверт' }, none))
+      .toEqual({ status: 'rejected', hidden: false });
+    // ссылка на исходное сообщение в тексте — способ связаться (радар
+    // оставляет её в копиях из защищённых чатов): такую не отклоняем
+    expect(autoStatusFor({ type: 'request', description: 'нужно передать, t.me/granica_chat/123', source: 'telegram' }, none))
+      .toBeNull();
     expect(autoStatusFor({ type: 'request', description: 'нужно передать' }, { telegram: null, phone: '+48 579 264 254' })).toBeNull();
   });
 
