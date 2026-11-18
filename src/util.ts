@@ -196,8 +196,13 @@ export function countryNotCityMessage(value: string): string {
 
 /** Сегодняшняя дата YYYY-MM-DD по Москве/Минску (UTC+3) —
  *  с ней сравнивается дата выезда заявки. */
+/** День по МСК в ISO (YYYY-MM-DD) для заданного момента. */
+export function mskDayIso(ts: number): string {
+  return new Date(ts + 3 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 export function mskTodayIso(): string {
-  return new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+  return mskDayIso(Date.now());
 }
 
 export function sanitizeContact(s: unknown): string | null {

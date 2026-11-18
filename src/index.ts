@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Env, ListingInput, ListingType } from './types';
 import { normalizeCity, parseRecurring } from './parser';
 import { renderListingsCsv } from './listing-csv';
-import { addReport, archiveExpired, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listCarryStats, carryCategoryBoard, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
+import { addReport, archiveExpired, autoPublishStats, clearRejected, countPending, createListing, createListingSafe, deleteListing, deleteListings, deleteMatchRun, deleteSetting, findDuplicate, listForDuplicateSweep, ensureChatLinksTable, findRelated, getChatLinks, getSetting, isAdminOrigin, isHiddenRequestInput, lastAiRunAt, lastSerpCheckAt, listAiRuns, listDailyStats, listCarryStats, carryCategoryBoard, listMostViewed, listTopUsernames, listRejected, listSerpHistory, listSerpQueries, isPersonOrigin, listPending, loadStatsSnapshots, pruneDuplicatePending, pruneMatchRuns, pruneRejected, pruneStalePending, archiveFarDepartures, publicListing, relatedListings, getCounts, getListingById, getMatchRun, listAdminBoard, listAllForExport, countFarDepartures, listForMatching, listMatchRuns, listListings, listSourceChats, resetForumStats, saveMatchRun, scrubContactUsernames, setListingPin, setSetting, updateListing, updateListingStatus, upsertChatLink } from './store';
 import type { SerpCheck } from './store';
 import { runAiVisibilityCheck, runSerpCheck, siteDomain } from './seo-watch';
 import { buildCarryHubPage, buildCarryPage, buildLlmsTxt, carryOgSpec, carryWordsFor } from './seo-carry';
@@ -1392,6 +1392,17 @@ app.get('/api/admin/forum-stats', async (c) => {
   const raw = Number(c.req.query('days') ?? '30');
   const days = Number.isFinite(raw) ? Math.min(365, Math.max(0, Math.floor(raw))) : 30;
   return c.json(await forumReachStats(c.env, days));
+});
+
+/* Статистика автоодобрения (вкладка «итоги», блок «Автоодобрение»): сколько
+ * заявок от админских аккаунтов опубликовано без модератора, сколько задержано
+ * и по каким признакам сомнения, сколько не создано как точный дубль и сколько
+ * отклонено без контакта. Счётчики ведутся с момента включения (v0.4.70) —
+ * задним числом их нет, поэтому период показываем явно. days=0 — всё время. */
+app.get('/api/admin/auto-stats', async (c) => {
+  const raw = Number(c.req.query('days') ?? '30');
+  const days = Number.isFinite(raw) ? Math.min(400, Math.max(0, Math.floor(raw))) : 30;
+  return c.json(await autoPublishStats(c.env, days));
 });
 
 /* Сброс статистики канала: комнаты перенастроили командой /здесь — счётчики

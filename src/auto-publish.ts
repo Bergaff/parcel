@@ -45,6 +45,25 @@ export interface Doubt {
  *  в архив (archiveFarDepartures, 90 дней) — публиковать нечего. */
 const FAR_DAYS = 90;
 
+/** Короткие подписи признаков сомнения — для статистики в админке
+ *  («итоги» → блок «Автоодобрение»), где длинные формулировки не влезают
+ *  в таблицу. Единственный источник подписей: смысл тот же, что в карточке
+ *  модератора («🤔 Автоматически не опубликовано: …»). */
+export const DOUBT_LABELS: Record<Doubt['code'], string> = {
+  ai_parsed: 'разбирал ИИ',
+  city_garbage: 'город не похож на название',
+  same_city: 'откуда и куда — один город',
+  date_bad: 'дату не разобрать',
+  date_past: 'дата выезда прошла',
+  date_far: 'выезд дальше 90 дней',
+  contact_in_text: 'контакт в тексте, не в поле',
+};
+
+/** Подпись признака для человека; незнакомый код показываем как есть. */
+export function doubtLabel(code: string): string {
+  return DOUBT_LABELS[code as Doubt['code']] ?? code;
+}
+
 /** Заявка или черновик заявки — всё, что нужно для проверки. Listing расширяет
  *  ListingInput, поэтому подходит и то и другое. */
 export type AutoPublishSubject = Pick<ListingInput,

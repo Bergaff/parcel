@@ -601,6 +601,69 @@ button { font-family: inherit; }
 .match-nocontact { color: var(--accent); }
 /* ссылка на исходное сообщение в паре подбора — рядом с «№ заявки» */
 .match-msg-link { font-size: 13px; white-space: nowrap; }
+
+/* --- дерево подбора: просьба слева, водители справа, между ними линии ---
+   Линии нарисованы чистым CSS, без измерений в JS: геометрию держат две
+   переменные — --match-gap (промежуток колонок) и --match-arm (его половина).
+   Ствол проходит ровно посередине промежутка, поэтому горизонтальные ветки
+   от узла и от карточек сходятся с ним сами. Строки сетки задаёт app.js
+   (узел — на всю высоту своих веток), классы is-first/is-last/is-only —
+   где ствол начинается и заканчивается. */
+.match-tree {
+  --match-gap: 58px;
+  --match-arm: 29px;
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  column-gap: var(--match-gap);
+  row-gap: 12px;
+}
+.match-group { padding: 14px 16px; }
+.match-tree-hint { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+.match-hub-cell { grid-column: 1; position: relative; display: flex; align-items: center; }
+.match-hub-cell::after { /* линия от узла к стволу */
+  content: ''; position: absolute; left: 100%; top: 50%;
+  width: var(--match-arm); height: 2px; margin-top: -1px; background: var(--line-strong);
+}
+.match-hub { flex: 1 1 auto; border: 1.5px solid var(--line-strong); background: var(--card); padding: 12px 14px; }
+.match-hub-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: baseline; margin: 0 0 8px; }
+.match-hub-badge {
+  font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--accent-deep); border: 1px solid var(--line-strong); padding: 2px 8px;
+}
+.match-hub-count { font-size: 13px; color: var(--ink-soft); }
+.match-hub-best { font-size: 12.5px; color: var(--muted); }
+.match-leaf { grid-column: 2; position: relative; }
+.match-leaf::before { /* ветка от ствола к карточке водителя */
+  content: ''; position: absolute; right: 100%; top: 50%;
+  width: var(--match-arm); height: 2px; margin-top: -1px; background: var(--line-strong);
+}
+.match-leaf::after { /* ствол: соединяет ветки одной просьбы */
+  content: ''; position: absolute; right: calc(100% + var(--match-arm) - 1px); top: 0; bottom: 0;
+  width: 2px; background: var(--line-strong);
+}
+.match-leaf.is-first::after { top: 50%; }     /* ствол начинается на первой ветке */
+.match-leaf.is-last::after { bottom: 50%; }   /* …и заканчивается на последней */
+.match-leaf.is-only::after { display: none; } /* водитель один — ствол не нужен */
+/* планшет: промежуток меньше, линии короче (переменные меняют всё сразу) */
+@media (max-width: 1100px) {
+  .match-tree { --match-gap: 40px; --match-arm: 20px; }
+}
+/* телефон: колонки складываются — просьба сверху, водители под ней, дерево
+   читается сверху вниз, линии становятся вертикальными. grid-row из app.js
+   перебиваем с !important: в одну колонку строки не нужны. */
+@media (max-width: 900px) {
+  .match-tree { grid-template-columns: minmax(0, 1fr); row-gap: 10px; }
+  .match-hub-cell { grid-column: 1 !important; grid-row: auto !important; }
+  .match-hub-cell::after { display: none; }
+  .match-leaf { grid-column: 1 !important; grid-row: auto !important; margin-left: 18px; }
+  .match-leaf::after { right: auto; left: -18px; top: 0; bottom: 0; }
+  .match-leaf::before { right: auto; left: -18px; top: 22px; width: 18px; }
+  .match-leaf.is-first::after { top: 22px; }
+  .match-leaf.is-last::after { top: 0; bottom: auto; height: 22px; }
+  .match-leaf.is-only::after { display: none; }
+  .match-leaf.is-only::before { display: none; }
+}
+
 .match-history { margin-top: 26px; }
 .match-history-head { font-size: 16px; margin: 0 0 12px; }
 .match-run { padding: 12px 16px; }
@@ -716,6 +779,19 @@ button { font-family: inherit; }
 .flow-legend { display: flex; gap: 14px; margin: 0 0 2px; font-size: 13px; color: var(--ink-soft); }
 .flow-leg-offer { color: #47571f; }
 .flow-leg-request { color: #a43a10; }
+/* Блок «Автоодобрение»: счётчики по дням и признаки задержки */
+.stats-autopub .admin-contact { margin: 0 0 10px; }
+.stats-autopub .admin-card-actions { margin: 0 0 4px; }
+/* Общее правило .stats-table прячет на телефоне третью колонку, а здесь
+   третья — главная («авто»). Возвращаем её и убираем вместо неё «дубли» и
+   «без контакта»: их итоги за период написаны текстом выше, так что числа
+   не теряются, а таблица влезает в узкий экран. */
+@media (max-width: 640px) {
+  .stats-autopub .stats-table thead th:nth-child(3),
+  .stats-autopub .stats-table tbody td:nth-child(3) { display: table-cell; }
+  .stats-autopub .stats-table thead th:nth-child(n+5),
+  .stats-autopub .stats-table tbody td:nth-child(n+5) { display: none; }
+}
 
 /* ---------- плашка про cookies: трекеров нет, но честно сказать ---------- */
 .cookie-note {

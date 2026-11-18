@@ -1794,23 +1794,97 @@ function matchHiddenBox() {
   ]);
 }
 
-function matchPairCard(p, i) {
+/* ---------- подбор: дерево вокруг заявки «нужно передать» ----------
+   Плоский список пар приходилось читать глазами: одна и та же просьба
+   встречалась в пяти карточках подряд, и было не видно, сколько вообще
+   людей можно позвать на одну передачу. Теперь просьба — узел слева, от
+   неё линии к найденным водителям справа. Единица подбора (пара) при этом
+   никуда не делась: каждая ветка — по-прежнему одна пара, и скрытие
+   контакта убирает именно её. */
+
+/** Ключ группы: одна просьба — одна группа. В снимках старых прогонов id
+ *  может не быть, тогда ключ собираем из содержимого снимка. */
+function matchGroupKey(p) {
+  const r = p && p.request;
+  if (r && r.id) return `id:${r.id}`;
+  return [r && r.fromCity, r && r.toCity, r && r.departureDate,
+    (r && Array.isArray(r.contacts) ? r.contacts[0] : ''),
+    String((r && r.description) || '').slice(0, 40)].join('|');
+}
+
+/** Разложить пары по просьбам. Внутри группы и сами группы — по оценке:
+ *  самый перспективный вариант виден первым. */
+function matchGroups(pairs) {
+  const byScore = (a, b) => Number((b && b.score) || 0) - Number((a && a.score) || 0);
+  const map = new Map();
+  for (const p of pairs || []) {
+    const key = matchGroupKey(p);
+    if (!map.has(key)) map.set(key, { key, request: (p && p.request) || null, items: [] });
+    map.get(key).items.push(p);
+  }
+  const groups = Array.from(map.values());
+  for (const g of groups) g.items.sort(byScore);
+  return groups.sort((a, b) => byScore(a.items[0], b.items[0]));
+}
+
+/** Первое сообщение автору просьбы. Фраза — дословно та, что просил владелец;
+ *  города подставляются из маршрута просьбы. */
+function matchAskTemplate(request) {
+  const from = String((request && request.fromCity) || '').trim() || 'город 1';
+  const to = String((request && request.toCity) || '').trim() || 'город 2';
+  return `здравствуйте увидел вашу просьбу о передаче посылки ${from} - ${to}. Актуально?`;
+}
+
+/** Ветка: водитель, которого можно позвать на эту передачу. */
+function matchLeafCard(p, i, pos) {
   const reasons = Array.isArray(p.reasons) ? p.reasons : String(p.reason ?? '').split('; ').filter(Boolean);
-  return el('article', { class: 'admin-card match-pair' }, [
+  // строка сетки задана явно: линии в CSS считают её известной
+  return el('article', { class: `admin-card match-pair match-leaf ${pos}`, style: `grid-row: ${i}` }, [
     el('p', { class: 'match-pair-head' }, [
-      el('span', { class: 'match-score', text: `пара ${i} · оценка ${p.score}` }),
+      el('span', { class: 'match-score', text: `водитель ${i} · оценка ${p.score}` }),
       ...reasons.map((r) => el('span', { class: 'match-reason', text: r })),
     ]),
     matchSide(p.offer, '🚗'),
-    matchSide(p.request, '📦'),
     el('div', { class: 'admin-card-actions' }, [
       el('a', { class: 'btn btn-line btn-sm', href: `/item/${p.offer.id}`, text: 'водитель' }),
-      el('a', { class: 'btn btn-line btn-sm', href: `/item/${p.request.id}`, text: 'заявка' }),
       el('button', {
         class: 'btn btn-line btn-sm', type: 'button', text: 'скопировать сообщение',
         onclick: () => copyText(matchMessage(p)),
       }),
     ]),
+  ]);
+}
+
+/** Узел: просьба слева и все найденные для неё водители справа. */
+function matchGroupCard(g, gi) {
+  const items = g.items;
+  const n = items.length;
+  const req = g.request;
+  const pos = (i) => (n === 1 ? 'is-only' : i === 0 ? 'is-first' : i === n - 1 ? 'is-last' : 'is-mid');
+  const hub = el('div', { class: 'match-hub-cell', style: `grid-row: 1 / span ${n}` }, [
+    el('div', { class: 'match-hub' }, [
+      el('p', { class: 'match-hub-head' }, [
+        el('span', { class: 'match-hub-badge', text: `просьба ${gi}` }),
+        el('span', { class: 'match-hub-count', text: `водителей найдено: ${n}` }),
+        n > 1 ? el('span', { class: 'match-hub-best', text: `лучшая оценка ${items[0].score}` }) : null,
+      ].filter(Boolean)),
+      matchSide(req, '📦'),
+      el('div', { class: 'admin-card-actions' }, [
+        el('button', {
+          class: 'btn btn-ink btn-sm', type: 'button', text: 'скопировать текст',
+          // шаблон виден до нажатия: админ знает, что именно уйдёт в буфер
+          title: matchAskTemplate(req),
+          onclick: () => copyText(matchAskTemplate(req), {
+            ok: 'Шаблон скопирован — можно вставлять в личку автору просьбы.',
+            fail: 'Скопировать не получилось. Выделите текст шаблона вручную.',
+          }),
+        }),
+        req && req.id ? el('a', { class: 'btn btn-line btn-sm', href: `/item/${req.id}`, text: 'заявка' }) : null,
+      ].filter(Boolean)),
+    ]),
+  ]);
+  return el('section', { class: 'admin-card match-group' }, [
+    el('div', { class: 'match-tree' }, [hub, ...items.map((p, i) => matchLeafCard(p, i + 1, pos(i)))]),
   ]);
 }
 
@@ -1878,8 +1952,14 @@ function matchResultsBox() {
       class: 'empty-note',
       text: 'Пар не нашлось. Попробуйте расширить окно по датам, включить архив или убрать города из фильтра.',
     }));
+    return el('section', { class: 'match-result' }, nodes);
   }
-  pairs.forEach((p, i) => nodes.push(matchPairCard(p, i + 1)));
+  const groups = matchGroups(pairs);
+  nodes.push(el('p', {
+    class: 'match-tree-hint',
+    text: `Просьб: ${groups.length} · пар: ${pairs.length}. Слева заявка «нужно передать», от неё линии к водителям, которые её закрывают.`,
+  }));
+  groups.forEach((g, i) => nodes.push(matchGroupCard(g, i + 1)));
   return el('section', { class: 'match-result' }, nodes);
 }
 
@@ -2283,6 +2363,97 @@ function flowChart(rows, unit) {
   return svg;
 }
 
+/* ---------- автоодобрение ----------
+   Заявки от админских аккаунтов (личка админа, его пересылки, копии радара)
+   публикуются сами, если разбор не сомневается — правила в src/auto-publish.ts.
+   Здесь видно, сколько ушло на доску без модератора, сколько задержано и по
+   каким признакам. Счётчики ведутся с v0.4.70: задним числом их нет, поэтому
+   период назван явно. */
+let autoPubDays = 30;
+
+function autoPubBox(d) {
+  if (!d) return null;
+  const t = d.totals ?? {};
+  const n = (v) => Number(v ?? 0);
+  const pct = (a, b) => (b > 0 ? `${Math.round((a / b) * 100)}%` : '—');
+  const seg = (value, label) => el('button', {
+    class: `btn btn-sm seg-btn${autoPubDays === value ? ' btn-ink' : ' btn-line'}`,
+    type: 'button',
+    text: label,
+    onclick: () => { autoPubDays = value; renderAdminStats(); },
+  });
+  const arrived = n(t.adminArrived);
+  const published = n(t.autoPublished);
+  const held = n(t.held);
+  const reasons = Array.isArray(d.reasons) ? d.reasons : [];
+  const days = Array.isArray(d.byDay) ? d.byDay.slice().reverse() : []; // новые сверху
+  const period = n(d.days) === 0
+    ? 'за всё время'
+    : `за ${n(d.days)} ${plural(n(d.days), 'день', 'дня', 'дней')} (с ${fmtDate(d.since)})`;
+
+  const nodes = [
+    el('h3', { class: 'match-history-head', text: 'Автоодобрение: что ушло на доску без модератора' }),
+    el('p', {
+      class: 'admin-contact',
+      text: `Заявок от админских аккаунтов ${period}: ${arrived}. ` +
+        `Опубликовано автоматически ${published} (${pct(published, arrived)}), ` +
+        `задержано на модерацию ${held} (${pct(held, arrived)}). ` +
+        `Отклонено без контакта ${n(t.rejectedNoContact)}, не создано как точный дубль ${n(t.dupSkipped)} — ` +
+        `эти два правила общие для всех источников, не только админских.`,
+    }),
+    el('div', { class: 'admin-card-actions' }, [
+      seg(1, 'сегодня'), seg(7, '7 дней'), seg(30, '30 дней'), seg(0, 'всё время'),
+    ]),
+  ];
+
+  if (reasons.length) {
+    nodes.push(el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'почему задержано' }), el('th', { text: 'заявок' }),
+      ])]),
+      el('tbody', {}, reasons.map((r) => el('tr', {}, [
+        el('th', { scope: 'row', text: r.note || r.code }),
+        el('td', { class: 'mono', text: String(n(r.n)) }),
+      ]))),
+    ]));
+    nodes.push(el('p', {
+      class: 'form-note',
+      text: 'У одной заявки бывает несколько признаков сомнения, поэтому сумма строк может быть больше числа задержанных.',
+    }));
+  } else if (held > 0) {
+    nodes.push(el('p', { class: 'empty-note', text: 'Задержанные есть, но признаки не записались — сообщите, это сбой счётчика.' }));
+  }
+
+  if (days.length) {
+    nodes.push(el('table', { class: 'stats-table stats-table-wide' }, [
+      el('thead', {}, [el('tr', {}, [
+        el('th', { text: 'день' }), el('th', { text: 'админских' }), el('th', { text: 'авто' }),
+        el('th', { text: 'задержано' }), el('th', { text: 'дубли' }), el('th', { text: 'без контакта' }),
+      ])]),
+      el('tbody', {}, days.slice(0, 40).map((r) => el('tr', {}, [
+        el('th', { scope: 'row', text: fmtDate(r.day) }),
+        el('td', { class: 'mono', text: String(n(r.adminArrived)) }),
+        el('td', { class: 'mono', text: String(n(r.autoPublished)) }),
+        el('td', { class: 'mono', text: String(n(r.held)) }),
+        el('td', { class: 'mono', text: String(n(r.dupSkipped)) }),
+        el('td', { class: 'mono', text: String(n(r.rejectedNoContact)) }),
+      ]))),
+    ]));
+  } else {
+    nodes.push(el('p', {
+      class: 'empty-note',
+      text: 'За этот период счётчики пусты: автоодобрение ещё ничего не решало (или период выбран раньше его включения).',
+    }));
+  }
+
+  nodes.push(el('p', {
+    class: 'form-note',
+    text: 'Приход больше суммы исходов, когда заявку решило не автоодобрение, а общее правило: AUTO_APPROVE=1 публикует всё подряд, а просьба с сайта без контакта публикуется скрытой. Точный дубль заявку не создаёт вовсе — строки в базе нет, поэтому он считается отдельным счётчиком.',
+  }));
+
+  return el('section', { class: 'admin-card stats-autopub' }, nodes);
+}
+
 function flowBox(flow) {
   if (!flow) return null;
   const unit = statsFlowUnit;
@@ -2479,6 +2650,14 @@ async function renderAdminStats() {
     return;
   }
   const months = data.months || [];
+  // Автоодобрение — отдельным запросом: его сбой не должен оставлять админку
+  // без итогов месяца, а период у него свой («сегодня / 7 / 30 / всё время»).
+  let autoPub = null;
+  try {
+    const autoRes = await adminApi(`/api/admin/auto-stats?days=${autoPubDays}`);
+    if (autoRes.ok) autoPub = await autoRes.json();
+  } catch { /* без блока автоодобрения итоги остаются читаемыми */ }
+  const autoBox = autoPubBox(autoPub);
   // поток заявок и просмотры показываем всегда — даже если опубликованных
   // объявлений ещё нет (например, всё отклонили)
   const flow = flowBox(data.flow);
@@ -2487,6 +2666,7 @@ async function renderAdminStats() {
   const carry = carryBox(data.carry);
   if (months.length === 0) {
     listEl.replaceChildren();
+    if (autoBox) listEl.append(autoBox);
     if (flow) listEl.append(flow);
     if (viewed) listEl.append(viewed);
     if (usernames) listEl.append(usernames);
@@ -2566,6 +2746,7 @@ async function renderAdminStats() {
     },
   }, 'написать мнение');
 
+  if (autoBox) listEl.append(autoBox);
   if (flow) listEl.append(flow);
   if (viewed) listEl.append(viewed);
   if (usernames) listEl.append(usernames);

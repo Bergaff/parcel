@@ -68,6 +68,9 @@ const server = {
   boardOddGets: 0, // сколько раз доска запрашивала фильтр аномальных дат
   farArchivedStub: 0, // >0 — сервер говорит «все аномальные уже в архиве»
   matchHidden: [] as Array<{ key: string; label: string }>,
+  autoStatsGets: 0,                 // сколько раз вкладка «итоги» спросила счётчики автоодобрения
+  autoStatsQuery: '',               // с каким окном (days) спросили
+  autoStatsOver: null as Loose | null, // подменить сводку (пустые счётчики, сбой)
   matchPairs: [
     {
       score: 80, reasons: ['маршрут', 'даты рядом'],
@@ -319,6 +322,30 @@ function makeFetch(calls: string[]) {
               ],
               other: { key: 'other', label: 'Прочее (без ключевых слов)', total: 60, offers: 50, requests: 10, last30: 20 },
             },
+          },
+        };
+      }
+      if (path === '/api/admin/auto-stats') {
+        server.autoStatsGets += 1;
+        server.autoStatsQuery = String(q.get('days') ?? '');
+        if (server.autoStatsOver) {
+          // сценарий сбоя: счётчики не приехали, остальные итоги должны остаться
+          if (server.autoStatsOver.status) return server.autoStatsOver as StubResult;
+          return { body: server.autoStatsOver };
+        }
+        return {
+          body: {
+            days: Number(q.get('days') ?? 30),
+            since: '2026-08-24',
+            byDay: [
+              { day: '2026-09-21', adminArrived: 6, autoPublished: 4, held: 2, dupSkipped: 1, rejectedNoContact: 0 },
+              { day: '2026-09-22', adminArrived: 3, autoPublished: 3, held: 0, dupSkipped: 0, rejectedNoContact: 1 },
+            ],
+            totals: { adminArrived: 9, autoPublished: 7, held: 2, dupSkipped: 1, rejectedNoContact: 1 },
+            reasons: [
+              { code: 'ai_parsed', note: 'разобрал ИИ, уверенность ниже порога', n: 1 },
+              { code: 'date_past', note: 'дата выезда уже прошла', n: 1 },
+            ],
           },
         };
       }
@@ -1258,6 +1285,118 @@ describe('админка', () => {
     await settle(100);
   });
 
+  it('подбор: просьба — узел, от него линии к найденным водителям', async () => {
+    byId('admin-tab-match').click();
+    await settle(100);
+    // у первой просьбы два водителя: m1 (оценка 80) и m5 (оценка 60).
+    // кладём слабым первым — иначе сортировку по оценке тест не заметит
+    const strongPair = server.matchPairs[0]!; // просьба m2 с водителем m1 (80)
+    server.matchPairs.unshift({
+      score: 60, reasons: ['маршрут'],
+      offer: {
+        id: 'm5', fromCity: 'Варшава', toCity: 'Минск', departureDate: '2030-05-23',
+        contacts: ['@second_driver'], description: 'везу, есть место', status: 'published',
+      },
+      request: { ...strongPair.request }, // та же просьба — вторая ветка к ней
+    });
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+
+    const groups = Array.from(win.document.querySelectorAll('.match-group')) as HTMLElement[];
+    expect(groups, 'групп столько, сколько просьб').toHaveLength(2);
+    expect(win.document.querySelectorAll('.match-pair'), 'пара единицей подбора остаться').toHaveLength(3);
+
+    // сверху просьба с лучшей оценкой: 80 > 70
+    const first = groups[0]!;
+    expect(first.querySelector('.match-hub')!.textContent).toContain('Варшава → Минск');
+    expect(first.querySelector('.match-hub-count')!.textContent).toBe('водителей найдено: 2');
+    expect(first.querySelector('.match-hub-best')!.textContent).toContain('лучшая оценка 80');
+    // ветки — тоже по оценке: лучший водитель первым
+    const leaves = Array.from(first.querySelectorAll('.match-leaf')) as HTMLElement[];
+    expect(leaves).toHaveLength(2);
+    expect(leaves[0]!.querySelector('.match-score')!.textContent).toContain('водитель 1 · оценка 80');
+    expect(leaves[1]!.querySelector('.match-score')!.textContent).toContain('водитель 2 · оценка 60');
+    // место в сетке задано явно: узел занимает столько строк, сколько веток,
+    // иначе линии в CSS не знали бы, где ствол начинается и заканчивается
+    expect((first.querySelector('.match-hub-cell') as HTMLElement).style.gridRow).toBe('1 / span 2');
+    expect(leaves[0]!.style.gridRow).toBe('1');
+    expect(leaves[1]!.style.gridRow).toBe('2');
+    expect(leaves[0]!.className).toContain('is-first');
+    expect(leaves[1]!.className).toContain('is-last');
+
+    // вторая просьба: водитель один — ствол не рисуется
+    const second = groups[1]!;
+    expect(second.querySelector('.match-hub-count')!.textContent).toBe('водителей найдено: 1');
+    expect(second.querySelector('.match-hub-best')).toBeNull();
+    expect(second.querySelector('.match-leaf')!.className).toContain('is-only');
+    expect((second.querySelector('.match-hub-cell') as HTMLElement).style.gridRow).toBe('1 / span 1');
+
+    // просьба показана один раз (в узле): её контакт и «скрыть» — там же
+    expect(first.querySelectorAll('.match-nocontact')).toHaveLength(1);
+    expect(second.querySelector('.match-hub .match-contact')!.textContent).toContain('@other2');
+
+    server.matchPairs.shift();
+    byId('admin-tab-pending').click();
+    await settle(100);
+  });
+
+  it('подбор: «скопировать текст» на просьбе копирует шаблон с её городами', async () => {
+    byId('admin-tab-match').click();
+    await settle(100);
+    win.document.querySelector('.match-form')!.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+    await settle(120);
+
+    // буфера обмена в jsdom нет — фиксируем незащищённый контекст, чтобы
+    // copyText пошёл запасным путём (textarea + execCommand), и ловим текст
+    Object.defineProperty(win, 'isSecureContext', { value: false, configurable: true });
+    const copied: string[] = [];
+    win.document.execCommand = () => {
+      // запасной путь создаёт свою textarea в конце body — на странице есть
+      // и другие (форма заявки), поэтому берём последнюю
+      const tas = win.document.querySelectorAll('textarea');
+      copied.push((tas[tas.length - 1] as HTMLTextAreaElement | undefined)?.value ?? '');
+      return true;
+    };
+
+    const groups = Array.from(win.document.querySelectorAll('.match-group')) as HTMLElement[];
+    const btn = Array.from(groups[0]!.querySelectorAll('.match-hub button'))
+      .find((b) => b.textContent === 'скопировать текст') as HTMLElement;
+    expect(btn, 'кнопка на просьбе').toBeTruthy();
+    // что именно скопируется, видно до нажатия
+    expect(btn.getAttribute('title'))
+      .toBe('здравствуйте увидел вашу просьбу о передаче посылки Варшава - Минск. Актуально?');
+    btn.click();
+    await settle(40);
+    expect(copied).toEqual(['здравствуйте увидел вашу просьбу о передаче посылки Варшава - Минск. Актуально?']);
+    expect(text('toast')).toContain('Шаблон скопирован');
+
+    // у каждой просьбы своя кнопка и свои города маршрута
+    const btn2 = Array.from(groups[1]!.querySelectorAll('.match-hub button'))
+      .find((b) => b.textContent === 'скопировать текст') as HTMLElement;
+    btn2.click();
+    await settle(40);
+    expect(copied[1]).toBe('здравствуйте увидел вашу просьбу о передаче посылки Краков - Львов. Актуально?');
+
+    byId('admin-tab-pending').click();
+    await settle(100);
+  });
+
+  it('линии дерева — в CSS: ствол посередине промежутка, на телефоне вертикально', () => {
+    // jsdom не считает раскладку, поэтому геометрию линий проверяем в правилах
+    expect(cssSource).toMatch(/\.match-tree \{[^}]*--match-arm: 29px/s);
+    expect(cssSource).toMatch(/\.match-hub-cell::after \{[^}]*width: var\(--match-arm\)/s);
+    expect(cssSource).toMatch(/\.match-leaf::before \{[^}]*width: var\(--match-arm\)/s);
+    expect(cssSource).toMatch(/right: calc\(100% \+ var\(--match-arm\) - 1px\)/);
+    expect(cssSource).toMatch(/\.match-leaf\.is-first::after \{ top: 50%; \}/);
+    expect(cssSource).toMatch(/\.match-leaf\.is-last::after \{ bottom: 50%; \}/);
+    expect(cssSource).toMatch(/\.match-leaf\.is-only::after \{ display: none; \}/);
+    // узкий экран: одна колонка, строки сетки из app.js перебиты
+    expect(cssSource).toMatch(/\.match-leaf \{ grid-column: 1 !important; grid-row: auto !important;/);
+    expect(cssSource).toMatch(/\.match-leaf\.is-last::after \{ top: 0; bottom: auto; height: 22px; \}/);
+    // третья колонка таблицы автоодобрения («авто») на телефоне не прячется
+    expect(cssSource).toMatch(/\.stats-autopub \.stats-table tbody td:nth-child\(3\) \{ display: table-cell; \}/);
+  });
+
   it('«ищу попутчика» без контакта: принимается сразу, автор видит свою заявку', async () => {
     await goto('/new');
     const form = byId('form') as HTMLFormElement;
@@ -1338,6 +1477,59 @@ describe('админка', () => {
 
     // текст поста тоже на вкладке — ничего не потеряли
     expect(win.document.querySelector('.stats-post')).not.toBeNull();
+
+    // возвращаем вкладку «заявки»
+    byId('admin-tab-pending').click();
+    await settle(100);
+  });
+
+  it('вкладка «итоги»: автоодобрение — сколько ушло на доску без модератора и почему', async () => {
+    byId('admin-tab-stats').click();
+    await settle(120);
+    const box = win.document.querySelector('.stats-autopub') as HTMLElement;
+    expect(box, 'блок автоодобрения').not.toBeNull();
+    // период подписан честно: окно и его начало, иначе счётчики врут
+    expect(box.textContent).toContain('за 30 дней (с 24 авг): 9');
+    expect(box.textContent).toContain('Опубликовано автоматически 7 (78%)');
+    expect(box.textContent).toContain('задержано на модерацию 2 (22%)');
+    expect(box.textContent).toContain('Отклонено без контакта 1, не создано как точный дубль 1');
+    expect(box.textContent).toContain('не только админских');
+    // причины — человеческими словами, коды наружу не показывают
+    expect(box.textContent).toContain('разобрал ИИ');
+    expect(box.textContent).not.toContain('ai_parsed');
+    expect(box.textContent).toContain('сумма строк может быть больше');
+    // две таблицы: причины и дни (новые сверху)
+    const tables = box.querySelectorAll('table.stats-table');
+    expect(tables).toHaveLength(2);
+    expect(Array.from(tables[1]!.querySelectorAll('tbody th')).map((th) => th.textContent))
+      .toEqual(['22 сен', '21 сен']);
+    // окно переключается — вкладка спрашивает сервер заново с другим days
+    server.autoStatsGets = 0;
+    (Array.from(box.querySelectorAll('button')).find((b) => b.textContent === '7 дней') as HTMLElement).click();
+    await settle(120);
+    expect(server.autoStatsGets).toBe(1);
+    expect(server.autoStatsQuery).toBe('7');
+    expect((win.document.querySelector('.stats-autopub') as HTMLElement).textContent).toContain('за 7 дней');
+
+    // счётчики пусты — говорим прямо, что считать пока нечего
+    server.autoStatsOver = {
+      days: 30, since: '2026-08-24', byDay: [], reasons: [],
+      totals: { adminArrived: 0, autoPublished: 0, held: 0, dupSkipped: 0, rejectedNoContact: 0 },
+    };
+    (Array.from(win.document.querySelectorAll('.stats-autopub button')).find((b) => b.textContent === '30 дней') as HTMLElement).click();
+    await settle(120);
+    const empty = win.document.querySelector('.stats-autopub') as HTMLElement;
+    expect(empty.querySelectorAll('table')).toHaveLength(0);
+    expect(empty.textContent).toContain('За этот период счётчики пусты');
+    expect(empty.textContent).toContain('Опубликовано автоматически 0 (—)'); // делить на ноль нечего
+
+    // сводка не приехала — остальные итоги на месте (свой запрос, свой провал)
+    server.autoStatsOver = { status: 500, body: { error: 'boom' } };
+    (Array.from(empty.querySelectorAll('button')).find((b) => b.textContent === '30 дней') as HTMLElement).click();
+    await settle(120);
+    expect(win.document.querySelector('.stats-autopub'), 'блока нет, когда данных нет').toBeNull();
+    expect(win.document.querySelector('.stats-flow'), 'поток заявок остался').not.toBeNull();
+    server.autoStatsOver = null;
 
     // возвращаем вкладку «заявки»
     byId('admin-tab-pending').click();

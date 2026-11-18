@@ -3,8 +3,8 @@ import type { MatchPair, ListingSnapshot } from './match';
 import { listingSnapshot, parseSnapshot } from './match';
 import type { DedupeSubject, DuplicateHit, DuplicateKind } from './dedupe';
 import { pickDuplicate } from './dedupe';
-import { admins, hasContactHint, normalizeContacts } from './util';
-import { autoPublishVerdict } from './auto-publish';
+import { admins, hasContactHint, mskDayIso, mskTodayIso, normalizeContacts } from './util';
+import { autoPublishVerdict, doubtLabel, type AutoPublishVerdict } from './auto-publish';
 import { nextRecurringDate } from './parser';
 // IndexNow: очередь адресов на переиндексацию (см. src/indexnow.ts)
 import { listingPaths, queueListingChange, queuePaths } from './indexnow';
@@ -150,6 +150,9 @@ export async function createListing(env: Env, input: ListingInput): Promise<List
   if (status === 'published') {
     await queuePaths(env, listingPaths(id, input.fromCity, input.toCity)).catch(() => undefined);
   }
+  // Счётчики автоодобрения (админка → «итоги»): сбой счёта не должен ронять
+  // создание заявки — статистика важна меньше самой заявки.
+  await countAutoPublish(env, input, auto, autoPublish).catch(() => undefined);
   return mapRow(row);
 }
 
@@ -883,6 +886,179 @@ export async function listingFlowCounts(
     arrived: Number(row?.arrived ?? 0),
     published: Number(row?.published ?? 0),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Счётчики автоодобрения (админка → «итоги», блок «Автоодобрение»)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Что случилось с заявкой в конвейере автопубликации. Имена совпадают с
+ * колонками auto_pub_days и потому идут в SQL без экранирования: список
+ * закрытый, пользовательского ввода здесь не бывает (bumpAutoPubStat на
+ * всякий случай сверяет имя со списком).
+ *
+ * Зачем отдельные счётчики, а не выборка из listings: точный дубль заявку
+ * НЕ создаёт (см. createListingSafe), то есть строки в базе нет вовсе, —
+ * посчитать такие события задним числом неоткуда. Плюс история: заявки
+ * удаляются cron'ом, а счётчик дня остаётся.
+ */
+export type AutoPubEvent =
+  | 'admin_arrived' | 'auto_published' | 'held' | 'dup_skipped' | 'rejected_no_contact';
+
+const AUTO_PUB_EVENTS: readonly AutoPubEvent[] = [
+  'admin_arrived', 'auto_published', 'held', 'dup_skipped', 'rejected_no_contact',
+];
+
+let autoPubTablesReady: Promise<void> | null = null;
+
+/** Таблицы счётчиков воркер создаёт на лету (как chat_links и forum_stats):
+ *  на проде миграцию 0012 могут применить позже деплоя. CREATE TABLE
+ *  IF NOT EXISTS идемпотентен, существующие счётчики не затрагивает. */
+export function ensureAutoPubTables(env: Env): Promise<void> {
+  if (!autoPubTablesReady) {
+    autoPubTablesReady = (async () => {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS auto_pub_days (
+           day TEXT PRIMARY KEY,
+           admin_arrived INTEGER NOT NULL DEFAULT 0,
+           auto_published INTEGER NOT NULL DEFAULT 0,
+           held INTEGER NOT NULL DEFAULT 0,
+           dup_skipped INTEGER NOT NULL DEFAULT 0,
+           rejected_no_contact INTEGER NOT NULL DEFAULT 0
+         )`
+      ).run();
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS auto_pub_reasons (
+           day TEXT NOT NULL,
+           code TEXT NOT NULL,
+           n INTEGER NOT NULL DEFAULT 0,
+           PRIMARY KEY (day, code))`
+      ).run();
+    })();
+    autoPubTablesReady.catch(() => { autoPubTablesReady = null; });
+  }
+  return autoPubTablesReady;
+}
+
+/** +1 к счётчику дня. День по МСК — как в остальной статистике сайта. */
+export async function bumpAutoPubStat(
+  env: Env,
+  event: AutoPubEvent,
+  day: string = mskTodayIso()
+): Promise<void> {
+  if (!AUTO_PUB_EVENTS.includes(event)) return; // опечатка в имени не должна ломать SQL
+  await ensureAutoPubTables(env);
+  await env.DB.prepare(
+    `INSERT INTO auto_pub_days (day, ${event}) VALUES (?, 1)
+     ON CONFLICT(day) DO UPDATE SET ${event} = ${event} + 1`
+  ).bind(day).run();
+}
+
+/** +1 к признаку сомнения, из-за которого автопубликация задержала заявку.
+ *  Одна заявка с тремя сомнениями даст +1 в held и по единице на каждый признак. */
+export async function bumpAutoPubReason(
+  env: Env,
+  code: string,
+  day: string = mskTodayIso()
+): Promise<void> {
+  if (!/^[a-z_]{3,32}$/.test(code)) return;
+  await ensureAutoPubTables(env);
+  await env.DB.prepare(
+    `INSERT INTO auto_pub_reasons (day, code, n) VALUES (?, ?, 1)
+     ON CONFLICT(day, code) DO UPDATE SET n = n + 1`
+  ).bind(day, code).run();
+}
+
+/**
+ * Записать в счётчики, чем кончилась заявка в конвейере автопубликации.
+ * Отдельная функция, чтобы правило «что считаем» жило в одном месте:
+ *  - отклонено без контакта — считаем у всех источников (правило общее);
+ *  - заявки от админских аккаунтов — считаем приход и исход: опубликована
+ *    автоматически или задержана (и почему);
+ *  - прочее (AUTO_APPROVE=1, скрытая заявка с сайта) попадает только в приход,
+ *    поэтому admin_arrived ≥ auto_published + held: разница видна в админке.
+ */
+export async function countAutoPublish(
+  env: Env,
+  input: Pick<ListingInput, 'byAdmin'>,
+  auto: { status: 'rejected' | 'published'; hidden: boolean } | null,
+  verdict: AutoPublishVerdict | null
+): Promise<void> {
+  if (auto?.status === 'rejected') await bumpAutoPubStat(env, 'rejected_no_contact');
+  if (!input.byAdmin) return;
+  await bumpAutoPubStat(env, 'admin_arrived');
+  if (verdict?.publish) {
+    await bumpAutoPubStat(env, 'auto_published');
+    return;
+  }
+  if (verdict && verdict.doubts.length > 0) {
+    await bumpAutoPubStat(env, 'held');
+    for (const code of new Set(verdict.doubts.map((d) => d.code))) {
+      await bumpAutoPubReason(env, code);
+    }
+  }
+}
+
+/** Итоги одного дня. */
+export interface AutoPubDay {
+  day: string;
+  adminArrived: number;
+  autoPublished: number;
+  held: number;
+  dupSkipped: number;
+  rejectedNoContact: number;
+}
+
+export interface AutoPublishStats {
+  /** Ширина окна в днях; 0 — за всё время. */
+  days: number;
+  /** Первый день окна (включительно) — показываем в админке, чтобы период не врал. */
+  since: string;
+  /** По дням, старые → новые. */
+  byDay: AutoPubDay[];
+  totals: Omit<AutoPubDay, 'day'>;
+  /** Почему задерживали: по убыванию количества. */
+  reasons: Array<{ code: string; note: string; n: number }>;
+}
+
+/**
+ * Сводка автоодобрения за последние `days` дней (0 — за всё время).
+ * «За 7 дней» — сегодня и шесть предыдущих: окно в семь календарных суток.
+ */
+export async function autoPublishStats(env: Env, days: number): Promise<AutoPublishStats> {
+  await ensureAutoPubTables(env);
+  const since = days > 0 ? mskDayIso(Date.now() - (days - 1) * 86_400_000) : '0000-01-01';
+  const [dayRes, reasonRes] = await Promise.all([
+    env.DB.prepare('SELECT * FROM auto_pub_days WHERE day >= ? ORDER BY day ASC LIMIT 400').bind(since).all(),
+    env.DB.prepare(
+      'SELECT code, SUM(n) AS n FROM auto_pub_reasons WHERE day >= ? GROUP BY code ORDER BY n DESC LIMIT 30'
+    ).bind(since).all(),
+  ]);
+  const num = (v: unknown) => Number(v ?? 0);
+  const byDay: AutoPubDay[] = ((dayRes.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => ({
+      day: String(r.day),
+      adminArrived: num(r.admin_arrived),
+      autoPublished: num(r.auto_published),
+      held: num(r.held),
+      dupSkipped: num(r.dup_skipped),
+      rejectedNoContact: num(r.rejected_no_contact),
+    }));
+  const totals = byDay.reduce<Omit<AutoPubDay, 'day'>>(
+    (acc, d) => ({
+      adminArrived: acc.adminArrived + d.adminArrived,
+      autoPublished: acc.autoPublished + d.autoPublished,
+      held: acc.held + d.held,
+      dupSkipped: acc.dupSkipped + d.dupSkipped,
+      rejectedNoContact: acc.rejectedNoContact + d.rejectedNoContact,
+    }),
+    { adminArrived: 0, autoPublished: 0, held: 0, dupSkipped: 0, rejectedNoContact: 0 }
+  );
+  const reasons = ((reasonRes.results ?? []) as unknown as Array<Record<string, unknown>>)
+    .map((r) => ({ code: String(r.code), note: doubtLabel(String(r.code)), n: num(r.n) }))
+    .filter((r) => r.n > 0);
+  return { days: Math.max(0, Math.floor(days)), since, byDay, totals, reasons };
 }
 
 /** Публичные ссылки на чаты-источники (админ задаёт вручную): id чата → ссылка t.me/… */
@@ -1892,6 +2068,9 @@ export async function createListingSafe(
 }> {
   const hit = await findDuplicate(env, input);
   if (hit && hit.kind === 'duplicate') {
+    // Счётчик для статистики автоодобрения: строки в listings не будет вовсе,
+    // поэтому посчитать такие события задним числом неоткуда — считаем здесь.
+    await bumpAutoPubStat(env, 'dup_skipped').catch(() => undefined);
     const refreshed = await touchListing(env, hit.listing.id);
     const listing = refreshed ?? hit.listing;
     return { listing, created: false, duplicateOf: listing, kind: 'duplicate', why: hit.why };
