@@ -1390,6 +1390,10 @@ describe('админка', () => {
     expect(cssSource).toMatch(/\.match-leaf\.is-first::after \{ top: 50%; \}/);
     expect(cssSource).toMatch(/\.match-leaf\.is-last::after \{ bottom: 50%; \}/);
     expect(cssSource).toMatch(/\.match-leaf\.is-only::after \{ display: none; \}/);
+    // ствол сплошной, а не пунктиром: у ветки убран margin-bottom от .admin-card,
+    // а линия выходит вниз на row-gap
+    expect(cssSource).toMatch(/\.match-leaf \{ grid-column: 2; position: relative; margin-bottom: 0; \}/);
+    expect(cssSource).toMatch(/bottom: calc\(-1 \* var\(--match-row\)\)/);
     // узкий экран: одна колонка, строки сетки из app.js перебиты
     expect(cssSource).toMatch(/\.match-leaf \{ grid-column: 1 !important; grid-row: auto !important;/);
     expect(cssSource).toMatch(/\.match-leaf\.is-last::after \{ top: 0; bottom: auto; height: 22px; \}/);
